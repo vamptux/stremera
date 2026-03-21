@@ -18,28 +18,18 @@ export default defineConfig(async () => ({
     chunkSizeWarningLimit: 1000,
     rollupOptions: {
       output: {
-        manualChunks: {
-          // Heavy animation / motion library
-          'vendor-motion': ['framer-motion'],
-          // Radix UI primitives (dialogs, menus, tabs, etc.)
-          'vendor-radix': [
-            '@radix-ui/react-avatar',
-            '@radix-ui/react-context-menu',
-            '@radix-ui/react-dialog',
-            '@radix-ui/react-dropdown-menu',
-            '@radix-ui/react-label',
-            '@radix-ui/react-popover',
-            '@radix-ui/react-scroll-area',
-            '@radix-ui/react-slider',
-            '@radix-ui/react-slot',
-            '@radix-ui/react-tabs',
-          ],
-          // Drag-and-drop kit
-          'vendor-dnd': ['@dnd-kit/core', '@dnd-kit/sortable', '@dnd-kit/utilities'],
-          // React + router (rarely change, ideal for long-term caching)
-          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
-          // Data-fetching layer
-          'vendor-query': ['@tanstack/react-query'],
+        // Rolldown (Vite 8) requires manualChunks as a function
+        manualChunks: (id: string) => {
+          if (id.includes('framer-motion')) return 'vendor-motion';
+          if (id.includes('@radix-ui/')) return 'vendor-radix';
+          if (id.includes('@dnd-kit/')) return 'vendor-dnd';
+          if (id.includes('@tanstack/react-query')) return 'vendor-query';
+          if (
+            id.includes('/react-router') ||
+            id.includes('/react-dom/') ||
+            id.includes('/node_modules/react/')
+          )
+            return 'vendor-react';
         },
       },
     },

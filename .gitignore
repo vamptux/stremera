@@ -24,3 +24,15 @@ src-tauri/.cargo
 *.njsproj
 *.sln
 *.sw?
+
+# AI / IDE agent rule directories (local only)
+.claude/
+.trae/
+
+# Dev-only tracking files
+implementation_tracker.md
+new_features.md
+build-release.log
+
+# npm lockfile — replaced by bun.lock
+package-lock.json
