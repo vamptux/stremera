@@ -548,11 +548,11 @@ async fn fetch_prepared_streams_for_addon_best_effort(
     .await
     {
         Ok(streams) => streams,
-        Err(err) => {
+        Err(_err) => {
             #[cfg(debug_assertions)]
             eprintln!(
                 "Skipping addon '{}' in resolve_best_stream: {}",
-                source_name, err
+                source_name, _err
             );
             vec![]
         }
@@ -993,7 +993,7 @@ fn is_transient_rd_error(message: &str) -> bool {
 }
 
 async fn run_with_transient_retry<T, F, Fut>(
-    operation_name: &str,
+    _operation_name: &str,
     mut operation: F,
 ) -> Result<T, String>
 where
@@ -1010,7 +1010,7 @@ where
             #[cfg(debug_assertions)]
             eprintln!(
                 "Transient RD error during {} (retrying once): {}",
-                operation_name, first_error
+                _operation_name, first_error
             );
 
             tokio::time::sleep(Duration::from_millis(RD_TRANSIENT_RETRY_DELAY_MS)).await;

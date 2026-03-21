@@ -82,9 +82,9 @@ impl Cinemeta {
                     }
                 }
             }
-            Err(e) => {
+            Err(_e) => {
                 #[cfg(debug_assertions)]
-                eprintln!("Secondary catalog fetch failed (non-fatal): {}", e);
+                eprintln!("Secondary catalog fetch failed (non-fatal): {}", _e);
             }
         }
 

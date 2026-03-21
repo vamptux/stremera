@@ -141,9 +141,9 @@ impl SkipTimesProvider {
 
         let res = match self.client.get(&url).send().await {
             Ok(r) => r,
-            Err(e) => {
+            Err(_e) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[SkipTimes] AniSkip request error: {}", e);
+                eprintln!("[SkipTimes] AniSkip request error: {}", _e);
                 return Vec::new();
             }
         };
@@ -156,9 +156,9 @@ impl SkipTimesProvider {
 
         let body: AniSkipResponse = match res.json().await {
             Ok(b) => b,
-            Err(e) => {
+            Err(_e) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[SkipTimes] AniSkip parse error: {}", e);
+                eprintln!("[SkipTimes] AniSkip parse error: {}", _e);
                 return Vec::new();
             }
         };
@@ -194,9 +194,9 @@ impl SkipTimesProvider {
 
         let res = match self.client.get(&url).send().await {
             Ok(r) => r,
-            Err(e) => {
+            Err(_e) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[SkipTimes] IntroDB request error: {}", e);
+                eprintln!("[SkipTimes] IntroDB request error: {}", _e);
                 return Vec::new();
             }
         };
@@ -214,9 +214,9 @@ impl SkipTimesProvider {
 
         let body: IntroDbSegmentsResponse = match res.json().await {
             Ok(b) => b,
-            Err(e) => {
+            Err(_e) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[SkipTimes] IntroDB parse error: {}", e);
+                eprintln!("[SkipTimes] IntroDB parse error: {}", _e);
                 return Vec::new();
             }
         };

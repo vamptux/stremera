@@ -928,6 +928,7 @@ impl Torrentio {
     }
 }
 
+#[cfg(debug_assertions)]
 fn sanitize_torrentio_log(value: &str) -> String {
     static TOKEN_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(realdebrid=)[^/\s]+").expect("valid regex"));
