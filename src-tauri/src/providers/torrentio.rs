@@ -1,0 +1,1133 @@
+use crate::providers::realdebrid::RealDebrid;
+use regex::Regex;
+use reqwest::{header, Client};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+static SEEDER_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"👤\s*(\d+)").expect("valid seeder regex"));
+static SIZE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"💾\s*([\d\.]+)\s*([KMGT]B)").expect("valid size regex"));
+/// Fallback size regex for addons that use plain-text format (e.g. "1.2 GB") without emoji.
+static PLAIN_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|\s)([\d\.]+)\s*([KMGT]i?B)\b").expect("valid plain size regex")
+});
+
+/// Detects season packs, batch downloads, and multi-episode collections.
+/// Intentionally conservative to avoid false positives on single-episode streams.
+static BATCH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?i)(?:",
+        // Explicit batch/pack keywords
+        r"\bbatch\b",
+        r"|\bcomplete\s+(?:series|season|pack|collection)\b",
+        r"|\bseason\s*pack\b",
+        r"|\bfull\s+(?:season|series)\b",
+        // Season ranges: S01-S23, S01~S05
+        r"|\bs\d{1,2}\s*[-~]\s*s\d{1,2}\b",
+        // Episode ranges requiring BOTH E/EP markers to avoid
+        // false-matching titles like "S15E52 - 1080p"
+        r"|\b(?:e|ep)\d{1,4}\s*[-~]\s*(?:e|ep)\d{1,4}\b",
+        // Keyword ranges: "Season 1-23", "Episode 1-24"
+        r"|\bseason\s*\d+\s*[-~&]\s*(?:season\s*)?\d+\b",
+        r"|\bepisode\s*\d+\s*[-~]\s*(?:episode\s*)?\d+\b",
+        r")"
+    ))
+    .expect("valid batch regex")
+});
+
+/// Check whether stream text explicitly mentions the requested episode.
+/// Uses a pre-allocated buffer for pattern matching to avoid per-check heap allocations.
+/// Handles long-running series (e.g. One Piece ep 1000+) with multiple naming conventions.
+fn episode_matches_text(text: &str, season: u32, episode: u32) -> bool {
+    use std::fmt::Write;
+
+    let t = text.to_lowercase();
+    let mut buf = String::with_capacity(20);
+
+    // S15E52 (zero-padded)
+    let _ = write!(buf, "s{:02}e{:02}", season, episode);
+    if t.contains(buf.as_str()) {
+        return true;
+    }
+
+    // S15E52 (no zero-padding on season)
+    buf.clear();
+    let _ = write!(buf, "s{}e{}", season, episode);
+    if t.contains(buf.as_str()) {
+        return true;
+    }
+
+    // 3+ digit episodes: S01E1000 (common for long-running anime)
+    if episode >= 100 {
+        buf.clear();
+        let _ = write!(buf, "s{:02}e{}", season, episode);
+        if t.contains(buf.as_str()) {
+            return true;
+        }
+    }
+
+    // 15x52 / 1x1000
+    buf.clear();
+    let _ = write!(buf, "{}x{:02}", season, episode);
+    if t.contains(buf.as_str()) {
+        return true;
+    }
+    if episode >= 100 {
+        buf.clear();
+        let _ = write!(buf, "{}x{}", season, episode);
+        if t.contains(buf.as_str()) {
+            return true;
+        }
+    }
+
+    // "Episode 52" / "Episode 1000" / "Ep 52" / "Ep.52" / "EP52" / "E52" standalone
+    buf.clear();
+    let _ = write!(buf, "episode {}", episode);
+    if t.contains(buf.as_str()) {
+        return true;
+    }
+
+    buf.clear();
+    let _ = write!(buf, "ep {}", episode);
+    if t.contains(buf.as_str()) {
+        return true;
+    }
+
+    buf.clear();
+    let _ = write!(buf, "ep.{}", episode);
+    if t.contains(buf.as_str()) {
+        return true;
+    }
+
+    buf.clear();
+    let _ = write!(buf, "ep{}", episode);
+    if t.contains(buf.as_str()) {
+        return true;
+    }
+
+    // " - 1000" / " - 052" — common for anime release groups
+    buf.clear();
+    let _ = write!(buf, " - {:03}", episode);
+    if t.contains(buf.as_str()) {
+        return true;
+    }
+    if episode >= 100 {
+        buf.clear();
+        let _ = write!(buf, " - {}", episode);
+        if t.contains(buf.as_str()) {
+            return true;
+        }
+    }
+
+    // "#1000" — sometimes used in anime releases
+    buf.clear();
+    let _ = write!(buf, "#{}", episode);
+    if t.contains(buf.as_str()) {
+        return true;
+    }
+
+    false
+}
+
+fn stream_contains_batch(s: &TorrentioStream) -> bool {
+    s.name
+        .as_deref()
+        .is_some_and(|name| BATCH_REGEX.is_match(name))
+        || s.title
+            .as_deref()
+            .is_some_and(|title| BATCH_REGEX.is_match(title))
+}
+
+fn stream_matches_episode(s: &TorrentioStream, season: u32, episode: u32) -> bool {
+    s.name
+        .as_deref()
+        .is_some_and(|name| episode_matches_text(name, season, episode))
+        || s.title
+            .as_deref()
+            .is_some_and(|title| episode_matches_text(title, season, episode))
+}
+
+fn rd_token_cache_segment(rd_token: Option<&str>) -> String {
+    let Some(token) = rd_token.map(str::trim).filter(|token| !token.is_empty()) else {
+        return "rd:none".to_string();
+    };
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut hasher);
+    format!("rd:{:016x}", hasher.finish())
+}
+
+/// Builds a short deterministic cache segment from the addon config URL so that
+/// different addons never share a cache entry for the same content.
+fn config_cache_segment(config_url: Option<&str>) -> String {
+    let Some(url) = config_url.map(str::trim).filter(|u| !u.is_empty()) else {
+        return "cfg:default".to_string();
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut hasher);
+    format!("cfg:{:016x}", hasher.finish())
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TorrentioStream {
+    pub name: Option<String>,
+    #[serde(alias = "description")]
+    pub title: Option<String>,
+    #[serde(rename = "infoHash", alias = "info_hash")]
+    pub info_hash: Option<String>,
+    pub url: Option<String>,
+    #[serde(rename = "fileIdx", alias = "file_idx")]
+    pub file_idx: Option<u32>,
+    #[serde(rename = "behaviorHints", alias = "behavior_hints")]
+    pub behavior_hints: Option<BehaviorHints>,
+
+    // Computed fields (skipped in deserialization, set by the command layer)
+    #[serde(skip_deserializing, default)]
+    pub cached: bool,
+    #[serde(skip_deserializing, default)]
+    pub seeders: Option<u32>,
+    #[serde(skip_deserializing, default)]
+    pub size_bytes: Option<u64>,
+    /// Which addon/source produced this stream (set by commands.rs, not from Torrentio JSON).
+    #[serde(skip_deserializing, default)]
+    pub source_name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BehaviorHints {
+    #[serde(rename = "bingeGroup", alias = "binge_group")]
+    pub binge_group: Option<String>,
+    pub filename: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TorrentioResponse {
+    pub streams: Vec<TorrentioStream>,
+}
+
+/// TTL for cached Torrentio stream responses. Shared across `get_streams` and
+/// `resolve_best_stream` to avoid duplicate HTTP requests for the same content.
+const STREAM_CACHE_TTL: Duration = Duration::from_secs(180);
+
+/// Maximum number of entries before a full eviction pass.
+const STREAM_CACHE_MAX_ENTRIES: usize = 64;
+
+/// Truncation budget for default/public stream lists.
+const DEFAULT_STREAMS_MAX: usize = 15;
+/// Max number of debrid-friendly streams retained for custom config mode.
+const DEBRID_STREAMS_MAX: usize = 15;
+/// Max number of torrent-capable streams retained for custom config mode.
+const TORRENT_STREAMS_MAX: usize = 20;
+/// Final merged max in custom config mode.
+const TOTAL_STREAMS_MAX: usize = 35;
+/// Per-request timeout for fallback probes against `/stream/...` endpoints.
+const FALLBACK_STREAM_REQUEST_TIMEOUT_SECS: u64 = 6;
+
+struct CachedStreams {
+    streams: Vec<TorrentioStream>,
+    expires_at: Instant,
+}
+
+pub struct Torrentio {
+    client: Client,
+    /// In-memory, TTL-based cache for `get_streams` results keyed by
+    /// `{type}|{id}|{rd_token_hash_or_none}`.
+    /// Prevents duplicate Torrentio HTTP requests when multiple code-paths
+    /// (e.g. `get_streams` command + `resolve_best_stream` command) query the
+    /// same content within a short window.
+    cache: Mutex<HashMap<String, CachedStreams>>,
+}
+
+/// Composite quality score for a stream based on resolution, source, HDR,
+/// audio, and encoding metadata. Higher = better.  Used by both the
+/// Torrentio sort in `get_streams` and the best-stream ranker in commands.
+pub fn stream_quality_score(stream: &TorrentioStream) -> i32 {
+    let title = stream.title.as_deref().unwrap_or("").to_lowercase();
+    let name = stream.name.as_deref().unwrap_or("").to_lowercase();
+    let mut score = 0;
+
+    // ── Resolution ────────────────────────────────────────────────────
+    if title.contains("2160p") || title.contains("4k") || name.contains("4k") {
+        score += 400;
+    } else if title.contains("1080p") {
+        score += 300;
+    } else if title.contains("720p") {
+        score += 200;
+    } else if title.contains("480p") {
+        score += 100;
+    }
+
+    // ── Source quality (release type) ─────────────────────────────────
+    if title.contains("remux") || title.contains("bdremux") {
+        score += 35;
+    } else if title.contains("bluray") || title.contains("blu-ray") || title.contains("bdrip") {
+        score += 30;
+    } else if title.contains("web-dl") || title.contains("webdl") {
+        score += 25;
+    } else if title.contains("webrip") {
+        score += 20;
+    } else if title.contains("hdtv") {
+        score += 10;
+    }
+
+    // ── HDR / Dolby Vision ────────────────────────────────────────────
+    if title.contains("dolby vision") || title.contains("dovi") {
+        score += 55;
+    } else if title.contains("hdr10+") {
+        score += 52;
+    } else if title.contains("hdr") {
+        score += 50;
+    }
+
+    // ── Audio quality ─────────────────────────────────────────────────
+    if title.contains("truehd") || title.contains("atmos") {
+        score += 15;
+    } else if title.contains("dts-hd") || title.contains("dts-x") || title.contains("dtsx") {
+        score += 13;
+    } else if title.contains("dts") || title.contains("dd+") || title.contains("eac3") {
+        score += 10;
+    } else if title.contains("5.1") || title.contains("7.1") {
+        score += 8;
+    }
+
+    // ── Efficient encoding bonus ───────────────────────────────────────
+    if title.contains("x265") || title.contains("hevc") || title.contains("h265") {
+        score += 5;
+    }
+
+    score
+}
+
+impl Torrentio {
+    fn matches_stream_identity(left: &TorrentioStream, right: &TorrentioStream) -> bool {
+        left.info_hash == right.info_hash
+            && left.file_idx == right.file_idx
+            && left.url == right.url
+    }
+
+    fn matches_torrent_identity(left: &TorrentioStream, right: &TorrentioStream) -> bool {
+        left.info_hash == right.info_hash && left.file_idx == right.file_idx
+    }
+
+    fn build_stream_endpoint(base_url: &str, type_: &str, id: &str) -> Result<String, String> {
+        let mut parsed =
+            reqwest::Url::parse(base_url).map_err(|e| format!("Invalid addon URL: {}", e))?;
+
+        let query = parsed.query().map(|q| q.to_string());
+        let raw_path = parsed.path();
+        let trimmed_path = raw_path.trim_end_matches('/');
+        let base_path = trimmed_path
+            .strip_suffix("/manifest.json")
+            .unwrap_or(trimmed_path);
+
+        let stream_path = if base_path.is_empty() || base_path == "/" {
+            format!("/stream/{}/{}.json", type_, id)
+        } else {
+            format!("{}/stream/{}/{}.json", base_path, type_, id)
+        };
+
+        parsed.set_path(&stream_path);
+        parsed.set_query(query.as_deref());
+        Ok(parsed.to_string())
+    }
+
+    fn is_torrentio_like_host(host: &str) -> bool {
+        host.to_ascii_lowercase().contains("torrentio")
+    }
+
+    fn should_probe_fallback_hosts(base_url: &str) -> bool {
+        reqwest::Url::parse(base_url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(Self::is_torrentio_like_host))
+            .unwrap_or(false)
+    }
+
+    pub fn new() -> Self {
+        // Build a header map that mirrors what a browser / Stremio sends so that
+        // Cloudflare intermediaries in front of Torrentio do not challenge us.
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            header::HeaderValue::from_static("application/json, text/plain, */*"),
+        );
+        headers.insert(
+            header::ACCEPT_LANGUAGE,
+            header::HeaderValue::from_static("en-US,en;q=0.9"),
+        );
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            header::HeaderValue::from_static("gzip, deflate, br"),
+        );
+        headers.insert(
+            header::CONNECTION,
+            header::HeaderValue::from_static("keep-alive"),
+        );
+        headers.insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-cache"),
+        );
+        // Stremio-specific header that Torrentio can use to allow legitimate requests.
+        headers.insert(
+            header::HeaderName::from_static("stremio-addon-transport"),
+            header::HeaderValue::from_static("network/http"),
+        );
+
+        Self {
+            client: Client::builder()
+                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
+                .default_headers(headers)
+                .connect_timeout(Duration::from_secs(12))
+                .timeout(Duration::from_secs(35))
+                .pool_idle_timeout(Duration::from_secs(90))
+                .tcp_keepalive(Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Insert a stream result into the TTL cache, evicting expired entries
+    /// when the cache grows beyond `STREAM_CACHE_MAX_ENTRIES`.
+    fn cache_put(&self, key: &str, streams: &[TorrentioStream]) {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= STREAM_CACHE_MAX_ENTRIES {
+            let now = Instant::now();
+            cache.retain(|_, v| v.expires_at > now);
+        }
+        cache.insert(
+            key.to_string(),
+            CachedStreams {
+                streams: streams.to_vec(),
+                expires_at: Instant::now() + STREAM_CACHE_TTL,
+            },
+        );
+    }
+
+    /// Clear the in-memory cache (e.g. when the user changes their config).
+    pub fn clear_cache(&self) {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    pub async fn get_streams(
+        &self,
+        type_: &str,
+        id: &str,
+        rd_provider: Option<&RealDebrid>,
+        rd_token: Option<&str>,
+        config_url: Option<&str>,
+    ) -> Result<Vec<TorrentioStream>, String> {
+        // id for movies: tt1234567
+        // id for series: tt1234567:1:2
+
+        // ── Cache check ──────────────────────────────────────────────────
+        // Include a config_url segment so different addons never share entries.
+        let cache_key = format!(
+            "{}|{}|{}|{}",
+            type_,
+            id,
+            rd_token_cache_segment(rd_token),
+            config_cache_segment(config_url),
+        );
+        {
+            let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = cache.get(&cache_key) {
+                if entry.expires_at > Instant::now() {
+                    return Ok(entry.streams.clone());
+                }
+            }
+        }
+
+        // Require user-provided config (no fallback to public endpoint)
+        let base_url = if let Some(cfg) = config_url {
+            let cfg = cfg.trim();
+            if cfg.is_empty() {
+                return Ok(vec![]);
+            }
+            let mut url = cfg.to_string();
+            // Clean up if user pasted the full manifest URL
+            if url.ends_with("/manifest.json") {
+                url = url.trim_end_matches("/manifest.json").to_string();
+            }
+            if url.ends_with('/') {
+                url.pop();
+            }
+            url
+        } else {
+            return Ok(vec![]);
+        };
+        let has_custom_config = config_url.is_some();
+        let should_probe_fallbacks =
+            has_custom_config && Self::should_probe_fallback_hosts(&base_url);
+
+        let url = Self::build_stream_endpoint(&base_url, type_, id)?;
+
+        #[cfg(debug_assertions)]
+        eprintln!("Torrentio stream URL: {}", sanitize_torrentio_log(&url));
+
+        // Derive origin from the base URL so the request looks like it's coming
+        // from the same-origin (Stremio-like context).  This satisfies Cloudflare
+        // CORS-aware checks without leaking the user's API key in the Referer.
+        let origin = reqwest::Url::parse(&base_url)
+            .ok()
+            .map(|u| {
+                let mut origin = format!("{}://{}", u.scheme(), u.host_str().unwrap_or_default());
+                if let Some(port) = u.port() {
+                    origin.push_str(&format!(":{}", port));
+                }
+                origin
+            })
+            .unwrap_or_else(|| "https://torrentio.strem.fun".to_string());
+
+        // Max 2 attempts: one fresh request + one retry after a short back-off.
+        let mut last_error = String::new();
+        for attempt in 0u8..2 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+            }
+
+            let res = match self
+                .client
+                .get(&url)
+                .header(header::ORIGIN, &origin)
+                .header(header::REFERER, format!("{}/", &origin))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    last_error = e.to_string();
+                    #[cfg(debug_assertions)]
+                    eprintln!("Torrentio request failed (attempt {}): {}", attempt + 1, e);
+                    continue;
+                }
+            };
+
+            if !res.status().is_success() {
+                let status = res.status();
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "Torrentio Error {} (attempt {}) for {}",
+                    status,
+                    attempt + 1,
+                    sanitize_torrentio_log(&url)
+                );
+
+                // For custom config URLs, a 403 can still be recoverable via
+                // root/public fallback endpoints. Try those before returning.
+                if status == reqwest::StatusCode::FORBIDDEN && should_probe_fallbacks {
+                    let mut fallback_streams =
+                        Self::fetch_fallback_streams(&self.client, &base_url, type_, id).await;
+                    if !fallback_streams.is_empty() {
+                        Self::hydrate_streams(&mut fallback_streams);
+                        Self::dedupe_streams(&mut fallback_streams);
+                        let fallback_streams =
+                            Self::truncate_streams_for_mode(fallback_streams, true);
+                        self.cache_put(&cache_key, &fallback_streams);
+                        return Ok(fallback_streams);
+                    }
+                } else if status == reqwest::StatusCode::FORBIDDEN && has_custom_config {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "Skipping fallback probes for non-Torrentio host: {}",
+                        base_url
+                    );
+                }
+
+                return Err(format!(
+                    "Torrentio returned HTTP {}. Check your Torrentio config URL in Settings → Streaming.",
+                    status.as_u16()
+                ));
+            }
+
+            let body: TorrentioResponse = match res.json::<TorrentioResponse>().await {
+                Ok(b) => b,
+                Err(e) => {
+                    last_error = e.to_string();
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "Torrentio JSON parse error (attempt {}): {}",
+                        attempt + 1,
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            let mut streams = body.streams;
+            Self::hydrate_streams(&mut streams);
+
+            // Parse Metadata (Seeders, Size)
+            // If the user uses a custom config URL with embedded Debrid credentials,
+            // Torrentio often returns direct HTTP links without infoHash metadata.
+            // For Torrent/P2P mode we still need infoHash-capable entries, so we do a
+            // best-effort fallback query against the addon origin root and merge only
+            // torrent-capable results.
+            if should_probe_fallbacks && !streams.iter().any(|s| s.info_hash.is_some()) {
+                let mut fallback_streams =
+                    Self::fetch_fallback_streams(&self.client, &base_url, type_, id).await;
+                Self::hydrate_streams(&mut fallback_streams);
+                Self::merge_torrent_capable_unique(&mut streams, fallback_streams);
+            } else if has_custom_config && !streams.iter().any(|s| s.info_hash.is_some()) {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "Skipping torrent-capable fallback merge for non-Torrentio host: {}",
+                    base_url
+                );
+            }
+
+            // With custom config, only run RD availability when magnet links are present.
+            let needs_rd_check = if has_custom_config {
+                streams
+                    .iter()
+                    .any(|s| s.url.as_deref().is_none_or(|url| url.starts_with("magnet")))
+            } else {
+                true
+            };
+
+            if needs_rd_check && !has_custom_config {
+                if let (Some(rd), Some(token)) = (rd_provider, rd_token) {
+                    let hashes: Vec<String> = streams
+                        .iter()
+                        .filter(|s| !s.cached)
+                        .filter_map(|s| s.info_hash.clone())
+                        .collect();
+
+                    if !hashes.is_empty() {
+                        for chunk in hashes.chunks(50) {
+                            if let Ok(availability) =
+                                rd.check_availability(token, chunk.to_vec()).await
+                            {
+                                for stream in &mut streams {
+                                    if let Some(hash) = &stream.info_hash {
+                                        if let Some(variants) = availability.items.get(hash) {
+                                            if let Some(rd_variants) = variants.get("rd") {
+                                                if let Some(arr) = rd_variants.as_array() {
+                                                    if !arr.is_empty() {
+                                                        stream.cached = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Parse requested season/episode from id (`tt...:S:E`).
+            let (req_season, req_episode) = {
+                let parts: Vec<&str> = id.split(':').collect();
+                if parts.len() == 3 {
+                    (parts[1].parse::<u32>().ok(), parts[2].parse::<u32>().ok())
+                } else {
+                    (None, None)
+                }
+            };
+
+            // Sort priority: cached → non-batch → episode match → quality → size → seeders.
+            streams.sort_by(|a, b| {
+                if a.cached != b.cached {
+                    return b.cached.cmp(&a.cached);
+                }
+
+                let batch_a = stream_contains_batch(a);
+                let batch_b = stream_contains_batch(b);
+                if batch_a != batch_b {
+                    return batch_a.cmp(&batch_b);
+                }
+
+                if let (Some(s), Some(e)) = (req_season, req_episode) {
+                    let match_a = stream_matches_episode(a, s, e);
+                    let match_b = stream_matches_episode(b, s, e);
+                    if match_a != match_b {
+                        return match_b.cmp(&match_a);
+                    }
+                }
+
+                let score_a = Self::get_stream_score(a);
+                let score_b = Self::get_stream_score(b);
+                if score_a != score_b {
+                    return score_b.cmp(&score_a);
+                }
+
+                let size_a = a.size_bytes.unwrap_or(0);
+                let size_b = b.size_bytes.unwrap_or(0);
+
+                // 5. Size penalty: for 4K avoid massive remuxes (>20 GB)
+                let base_res_a = score_a - (score_a % 100);
+                let size_limit: u64 = if base_res_a >= 400 {
+                    20 * 1024 * 1024 * 1024
+                } else {
+                    15 * 1024 * 1024 * 1024
+                };
+                if size_a > size_limit && size_b <= size_limit {
+                    return std::cmp::Ordering::Greater;
+                }
+                if size_b > size_limit && size_a <= size_limit {
+                    return std::cmp::Ordering::Less;
+                }
+
+                // 6. Seeders (P2P tie-break)
+                let seeds_a = a.seeders.unwrap_or(0);
+                let seeds_b = b.seeders.unwrap_or(0);
+                seeds_b.cmp(&seeds_a)
+            });
+
+            // If requesting a specific episode and we have episode-specific results,
+            // cap batch/pack streams at 5 to reduce noise.
+            if req_season.is_some() && req_episode.is_some() {
+                let has_specific = streams.iter().any(|s| !stream_contains_batch(s));
+                if has_specific {
+                    let mut batch_seen = 0u32;
+                    streams.retain(|s| {
+                        if stream_contains_batch(s) {
+                            batch_seen += 1;
+                            batch_seen <= 5
+                        } else {
+                            true
+                        }
+                    });
+                }
+            }
+
+            #[cfg(debug_assertions)]
+            {
+                let batch_count = streams.iter().filter(|s| stream_contains_batch(s)).count();
+                eprintln!(
+                    "Torrentio: {} streams total, {} batch/pack, req s={:?} e={:?}",
+                    streams.len(),
+                    batch_count,
+                    req_season,
+                    req_episode
+                );
+            }
+
+            Self::dedupe_streams(&mut streams);
+            let streams = Self::truncate_streams_for_mode(streams, has_custom_config);
+
+            // ── Cache store ──────────────────────────────────────────────
+            if !streams.is_empty() {
+                self.cache_put(&cache_key, &streams);
+            }
+
+            return Ok(streams);
+        } // end retry loop
+
+        Err(if last_error.is_empty() {
+            "Torrentio request failed after retries".to_string()
+        } else {
+            last_error
+        })
+    }
+
+    fn truncate_streams_for_mode(
+        streams: Vec<TorrentioStream>,
+        has_custom_config: bool,
+    ) -> Vec<TorrentioStream> {
+        if !has_custom_config {
+            let mut compact = streams;
+            compact.truncate(DEFAULT_STREAMS_MAX);
+            return compact;
+        }
+
+        let mut debrid_like: Vec<TorrentioStream> = Vec::new();
+        let mut torrent_like: Vec<TorrentioStream> = Vec::new();
+
+        for s in streams {
+            let is_torrent_capable =
+                s.info_hash.is_some() || s.url.as_deref().is_some_and(|u| u.starts_with("magnet"));
+            let is_debrid_like =
+                s.cached || s.url.as_deref().is_some_and(|u| u.starts_with("http"));
+
+            if is_debrid_like && debrid_like.len() < DEBRID_STREAMS_MAX {
+                debrid_like.push(s.clone());
+            }
+
+            if is_torrent_capable && torrent_like.len() < TORRENT_STREAMS_MAX {
+                torrent_like.push(s);
+            }
+
+            if debrid_like.len() >= DEBRID_STREAMS_MAX && torrent_like.len() >= TORRENT_STREAMS_MAX
+            {
+                break;
+            }
+        }
+
+        let mut merged: Vec<TorrentioStream> = debrid_like;
+        for t in torrent_like {
+            let duplicate = merged
+                .iter()
+                .any(|existing| Self::matches_stream_identity(existing, &t));
+            if !duplicate {
+                merged.push(t);
+            }
+        }
+
+        merged.truncate(TOTAL_STREAMS_MAX);
+        merged
+    }
+
+    fn get_stream_score(stream: &TorrentioStream) -> i32 {
+        stream_quality_score(stream)
+    }
+
+    fn hydrate_streams(streams: &mut [TorrentioStream]) {
+        for stream in streams {
+            Self::hydrate_stream(stream);
+        }
+    }
+
+    fn hydrate_stream(stream: &mut TorrentioStream) {
+        // Try parsing seeders and size from both title and name — different addons
+        // (Torrentio, Comet, StremThru) place metadata in different fields.
+        let combined = format!(
+            "{}\n{}",
+            stream.name.as_deref().unwrap_or(""),
+            stream.title.as_deref().unwrap_or("")
+        );
+
+        if stream.seeders.is_none() {
+            if let Some(caps) = SEEDER_REGEX.captures(&combined) {
+                if let Ok(s) = caps[1].parse::<u32>() {
+                    stream.seeders = Some(s);
+                }
+            }
+        }
+
+        if stream.size_bytes.is_none() {
+            if let Some(caps) = SIZE_REGEX.captures(&combined) {
+                stream.size_bytes = Self::parse_size_to_bytes(&caps[1], &caps[2]);
+            }
+            // Fallback: plain-text size like "1.2 GB" without emoji prefix
+            if stream.size_bytes.is_none() {
+                if let Some(caps) = PLAIN_SIZE_REGEX.captures(&combined) {
+                    stream.size_bytes = Self::parse_size_to_bytes(&caps[1], &caps[2]);
+                }
+            }
+        }
+
+        let name_text = stream.name.as_deref().unwrap_or("");
+        let title_text = stream.title.as_deref().unwrap_or("");
+        let has_lightning = name_text.contains('\u{26A1}') || title_text.contains('\u{26A1}');
+        let has_download_arrow = name_text.contains('\u{2B07}') || title_text.contains('\u{2B07}');
+
+        stream.cached = if has_lightning {
+            true
+        } else if has_download_arrow {
+            false
+        } else if let Some(u) = &stream.url {
+            u.starts_with("http")
+        } else {
+            false
+        };
+    }
+
+    fn parse_size_to_bytes(value: &str, unit: &str) -> Option<u64> {
+        let parsed = value.parse::<f64>().ok()?;
+        let multiplier = match unit.to_uppercase().as_str() {
+            "KB" | "KIB" => 1024.0,
+            "MB" | "MIB" => 1024.0 * 1024.0,
+            "GB" | "GIB" => 1024.0 * 1024.0 * 1024.0,
+            "TB" | "TIB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+            _ => 1.0,
+        };
+        Some((parsed * multiplier) as u64)
+    }
+
+    fn merge_torrent_capable_unique(
+        streams: &mut Vec<TorrentioStream>,
+        fallback_streams: Vec<TorrentioStream>,
+    ) {
+        for stream in fallback_streams
+            .into_iter()
+            .filter(|s| s.info_hash.is_some())
+        {
+            let duplicate = streams
+                .iter()
+                .any(|existing| Self::matches_torrent_identity(existing, &stream));
+            if !duplicate {
+                streams.push(stream);
+            }
+        }
+    }
+
+    fn dedupe_streams(streams: &mut Vec<TorrentioStream>) {
+        use std::hash::{Hash, Hasher};
+        let mut seen = HashSet::new();
+        streams.retain(|s| {
+            let mut hasher = std::hash::DefaultHasher::new();
+            s.info_hash.hash(&mut hasher);
+            s.file_idx.hash(&mut hasher);
+            s.url.hash(&mut hasher);
+            s.name.hash(&mut hasher);
+            s.title.hash(&mut hasher);
+            seen.insert(hasher.finish())
+        });
+    }
+
+    async fn fetch_streams_from_endpoint(
+        client: &Client,
+        url: &str,
+        origin: Option<&str>,
+    ) -> Vec<TorrentioStream> {
+        let mut request = client
+            .get(url)
+            .timeout(Duration::from_secs(FALLBACK_STREAM_REQUEST_TIMEOUT_SECS));
+
+        if let Some(origin) = origin {
+            request = request
+                .header(header::ORIGIN, origin)
+                .header(header::REFERER, format!("{}/", origin));
+        }
+
+        match request.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<TorrentioResponse>().await {
+                    Ok(body) => body.streams,
+                    Err(_) => vec![],
+                }
+            }
+            _ => vec![],
+        }
+    }
+
+    async fn fetch_fallback_streams(
+        client: &Client,
+        base_url: &str,
+        type_: &str,
+        id: &str,
+    ) -> Vec<TorrentioStream> {
+        let origin_fallback = reqwest::Url::parse(base_url).ok().and_then(|parsed| {
+            let host = parsed.host_str()?;
+            let mut origin_root = format!("{}://{}", parsed.scheme(), host);
+            if let Some(port) = parsed.port() {
+                origin_root.push_str(&format!(":{}", port));
+            }
+            let fallback_url = format!("{}/stream/{}/{}.json", origin_root, type_, id);
+            Some((origin_root, fallback_url))
+        });
+
+        if let Some((origin_root, fallback_url)) = origin_fallback {
+            #[cfg(debug_assertions)]
+            eprintln!("Torrentio fallback stream URL: {}", fallback_url);
+            return Self::fetch_streams_from_endpoint(
+                client,
+                fallback_url.as_str(),
+                Some(origin_root.as_str()),
+            )
+            .await;
+        }
+
+        vec![]
+    }
+}
+
+fn sanitize_torrentio_log(value: &str) -> String {
+    static TOKEN_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(realdebrid=)[^/\s]+").expect("valid regex"));
+
+    TOKEN_RE.replace_all(value, "$1[redacted]").into_owned()
+}
+
+impl Default for Torrentio {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ─── Unit Tests ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── episode_matches_text ──────────────────────────────────────────────
+
+    #[test]
+    fn matches_standard_s_xxe_yy_format() {
+        assert!(episode_matches_text("Show.S01E05.1080p", 1, 5));
+    }
+
+    #[test]
+    fn matches_zero_padded_s_format() {
+        assert!(episode_matches_text("Show.S15E52.BluRay", 15, 52));
+    }
+
+    #[test]
+    fn matches_unpadded_s_format() {
+        assert!(episode_matches_text("show s1e5 hdtv", 1, 5));
+    }
+
+    #[test]
+    fn matches_x_nn_format() {
+        assert!(episode_matches_text("Show.1x05.HDTV", 1, 5));
+    }
+
+    #[test]
+    fn matches_episode_keyword() {
+        assert!(episode_matches_text("Show Episode 12 1080p", 1, 12));
+    }
+
+    #[test]
+    fn no_match_wrong_episode() {
+        assert!(!episode_matches_text("Show.S01E10.1080p", 1, 5));
+    }
+
+    #[test]
+    fn no_match_wrong_season() {
+        assert!(!episode_matches_text("Show.S02E05.1080p", 1, 5));
+    }
+
+    #[test]
+    fn no_match_empty_title() {
+        assert!(!episode_matches_text("", 1, 1));
+    }
+
+    // ── BATCH_REGEX ───────────────────────────────────────────────────────
+
+    #[test]
+    fn batch_regex_detects_season_pack() {
+        assert!(BATCH_REGEX.is_match("Show Complete Season Pack 2024"));
+    }
+
+    #[test]
+    fn batch_regex_detects_season_range() {
+        assert!(BATCH_REGEX.is_match("Naruto S01-S23 Complete 1080p"));
+    }
+
+    #[test]
+    fn batch_regex_detects_episode_range() {
+        assert!(BATCH_REGEX.is_match("One.Piece.E001-E1100.HDTV"));
+    }
+
+    #[test]
+    fn batch_regex_does_not_false_positive_single_episode() {
+        // A single episode title should not trigger the batch regex.
+        assert!(!BATCH_REGEX.is_match("Show.S01E05.1080p.BluRay"));
+    }
+
+    #[test]
+    fn batch_regex_does_not_false_positive_plain_title() {
+        assert!(!BATCH_REGEX.is_match("The Dark Knight 2008 1080p BluRay"));
+    }
+
+    #[test]
+    fn stream_contains_batch_works_for_name_or_title() {
+        let stream = TorrentioStream {
+            name: Some("Butter".to_string()),
+            title: Some("Complete Season Pack".to_string()),
+            info_hash: None,
+            url: None,
+            file_idx: None,
+            behavior_hints: None,
+            cached: false,
+            seeders: None,
+            size_bytes: None,
+            source_name: None,
+        };
+        assert!(stream_contains_batch(&stream));
+    }
+
+    #[test]
+    fn stream_matches_episode_works_for_name_or_title() {
+        let stream = TorrentioStream {
+            name: Some("Show.S03E07".to_string()),
+            title: Some("Other text".to_string()),
+            info_hash: None,
+            url: None,
+            file_idx: None,
+            behavior_hints: None,
+            cached: false,
+            seeders: None,
+            size_bytes: None,
+            source_name: None,
+        };
+        assert!(stream_matches_episode(&stream, 3, 7));
+    }
+
+    // ── truncate_streams_for_mode ───────────────────────────────────────
+
+    fn mk_stream(info_hash: Option<&str>, url: Option<&str>, cached: bool) -> TorrentioStream {
+        TorrentioStream {
+            name: Some("src".to_string()),
+            title: Some("title".to_string()),
+            info_hash: info_hash.map(|s| s.to_string()),
+            url: url.map(|s| s.to_string()),
+            file_idx: None,
+            behavior_hints: None,
+            cached,
+            seeders: None,
+            size_bytes: None,
+            source_name: None,
+        }
+    }
+
+    #[test]
+    fn truncate_custom_keeps_torrent_capable_results() {
+        let mut input = Vec::new();
+
+        // Dominant debrid/http streams first (as often happens after ranking).
+        for _ in 0..30 {
+            input.push(mk_stream(None, Some("https://example.com/file.mp4"), true));
+        }
+
+        // Torrent-capable streams later in the ranked list.
+        for i in 0..10 {
+            input.push(mk_stream(
+                Some(&format!("hash{}", i)),
+                Some("magnet:?xt=urn:btih:abc"),
+                false,
+            ));
+        }
+
+        let out = Torrentio::truncate_streams_for_mode(input, true);
+        let torrent_count = out
+            .iter()
+            .filter(|s| {
+                s.info_hash.is_some() || s.url.as_deref().is_some_and(|u| u.starts_with("magnet"))
+            })
+            .count();
+
+        assert!(
+            torrent_count > 0,
+            "expected at least one torrent-capable stream in custom-config output"
+        );
+    }
+
+    #[test]
+    fn truncate_non_custom_stays_compact_top_15() {
+        let mut input = Vec::new();
+        for _ in 0..40 {
+            input.push(mk_stream(None, Some("https://example.com/file.mp4"), true));
+        }
+
+        let out = Torrentio::truncate_streams_for_mode(input, false);
+        assert_eq!(out.len(), DEFAULT_STREAMS_MAX);
+    }
+
+    #[test]
+    fn fallback_probe_hosts_accept_torrentio_domains() {
+        assert!(Torrentio::should_probe_fallback_hosts(
+            "https://torrentio.strem.fun/debridoptions=foo/manifest.json"
+        ));
+        assert!(Torrentio::should_probe_fallback_hosts(
+            "https://torrentio-proxy.example.com/addon"
+        ));
+    }
+
+    #[test]
+    fn fallback_probe_hosts_reject_non_torrentio_domains() {
+        assert!(!Torrentio::should_probe_fallback_hosts(
+            "https://debridmediamanager.com/api/stremio/token/manifest.json"
+        ));
+        assert!(!Torrentio::should_probe_fallback_hosts(
+            "https://mediafusion.elfhosted.com/catalog/series"
+        ));
+    }
+}
