@@ -1,10 +1,9 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { MediaRow } from '@/components/media-row';
 import { Hero } from '@/components/hero';
 import { ResumeSection } from '@/components/resume-section';
-import { api } from '@/lib/api';
+import { api, type MediaItem, type WatchProgress } from '@/lib/api';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { usePrivacy } from '@/contexts/privacy-context';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { Button } from '@/components/ui/button';
 import { WifiOff, Download } from 'lucide-react';
@@ -14,20 +13,131 @@ import { useNavigate } from 'react-router-dom';
 const SECONDARY_ROW_DELAY_MS = 600;
 const ROW_STALE_TIME_MS = 1000 * 60 * 10;
 
-const SECONDARY_ROW_PREFETCHES = [
-  { key: ['trending', 'series'], fn: () => api.getTrendingSeries() },
-  { key: ['netflix', 'movies'], fn: () => api.getNetflixCatalog('nfx', 'movie') },
-  { key: ['disney', 'movies'], fn: () => api.getNetflixCatalog('dnp', 'movie') },
-  { key: ['kitsu', 'trending'], fn: () => api.getKitsuCatalog('kitsu-anime-trending') },
+interface HomeRowConfig {
+  id: string;
+  title: string;
+  queryKey: string[];
+  queryFn: () => Promise<MediaItem[]>;
+  animationDelayMs: number;
+}
+
+const DEFAULT_SECONDARY_ROWS: Array<Omit<HomeRowConfig, 'animationDelayMs'>> = [
+  {
+    id: 'trending-series',
+    title: 'Trending Series',
+    queryKey: ['trending', 'series'],
+    queryFn: () => api.getTrendingSeries(),
+  },
+  {
+    id: 'netflix-movies',
+    title: 'Netflix Movies',
+    queryKey: ['netflix', 'movies'],
+    queryFn: () => api.getNetflixCatalog('nfx', 'movie'),
+  },
+  {
+    id: 'disney-movies',
+    title: 'Disney+ Movies',
+    queryKey: ['disney', 'movies'],
+    queryFn: () => api.getNetflixCatalog('dnp', 'movie'),
+  },
+  {
+    id: 'kitsu-trending',
+    title: 'Trending Anime',
+    queryKey: ['kitsu', 'trending'],
+    queryFn: () => api.getKitsuCatalog('kitsu-anime-trending'),
+  },
 ] as const;
+
+function normalizeRecentMediaType(item: WatchProgress): 'movie' | 'series' | 'anime' {
+  const normalizedType = item.type_.trim().toLowerCase();
+  if (normalizedType === 'movie') return 'movie';
+  if (normalizedType === 'anime') return 'anime';
+  if (normalizedType === 'series' && item.id.trim().toLowerCase().startsWith('kitsu:')) {
+    return 'anime';
+  }
+  return 'series';
+}
+
+function buildPersonalizedSecondaryRow(
+  watchHistory: WatchProgress[],
+): { replaceRowId: string; row: Omit<HomeRowConfig, 'animationDelayMs'> } | null {
+  const recent = watchHistory.slice(0, 6);
+  if (recent.length === 0) return null;
+
+  let animeScore = 0;
+  let seriesScore = 0;
+
+  recent.forEach((item, index) => {
+    const weight = recent.length - index;
+    const mediaType = normalizeRecentMediaType(item);
+    if (mediaType === 'anime') {
+      animeScore += weight;
+      return;
+    }
+    if (mediaType === 'series') {
+      seriesScore += weight;
+    }
+  });
+
+  if (animeScore === 0 && seriesScore === 0) {
+    return null;
+  }
+
+  if (animeScore >= seriesScore) {
+    return {
+      replaceRowId: 'kitsu-trending',
+      row: {
+        id: 'personalized-anime',
+        title: "Because You've Been Watching Anime",
+        queryKey: ['home', 'personalized', 'anime'],
+        queryFn: () => api.getKitsuCatalog('kitsu-anime-trending'),
+      },
+    };
+  }
+
+  return {
+    replaceRowId: 'trending-series',
+    row: {
+      id: 'personalized-series',
+      title: "Because You've Been Watching Series",
+      queryKey: ['home', 'personalized', 'series'],
+      queryFn: () => api.getTrendingSeries(),
+    },
+  };
+}
+
+function withAnimationDelays(rows: Array<Omit<HomeRowConfig, 'animationDelayMs'>>): HomeRowConfig[] {
+  return rows.map((row, index) => ({
+    ...row,
+    animationDelayMs: index * 80,
+  }));
+}
 
 export function Home() {
   const isOnline = useOnlineStatus();
   const navigate = useNavigate();
-  const { isIncognito } = usePrivacy();
   const queryClient = useQueryClient();
   const [showSecondaryRows, setShowSecondaryRows] = useState(false);
   const secondaryRowsFiredRef = useRef(false);
+
+  const { data: watchHistory = [] } = useQuery({
+    queryKey: ['watch-history'],
+    queryFn: api.getWatchHistory,
+    staleTime: ROW_STALE_TIME_MS,
+    enabled: isOnline,
+  });
+
+  const secondaryRows = useMemo(() => {
+    const personalized = buildPersonalizedSecondaryRow(watchHistory);
+    const rows = personalized
+      ? [
+          personalized.row,
+          ...DEFAULT_SECONDARY_ROWS.filter((row) => row.id !== personalized.replaceRowId),
+        ]
+      : DEFAULT_SECONDARY_ROWS;
+
+    return withAnimationDelays(rows);
+  }, [watchHistory]);
 
   // Show secondary rows once — race between hero's first-image onLoad and
   // the 600ms hard fallback so fast cache hits unlock rows immediately.
@@ -55,10 +165,14 @@ export function Home() {
   // Prefetch secondary rows during the deferred window so data is ready
   useEffect(() => {
     if (!showSecondaryRows || !isOnline) return;
-    SECONDARY_ROW_PREFETCHES.forEach(({ key, fn }) => {
-      queryClient.prefetchQuery({ queryKey: [...key], queryFn: fn, staleTime: ROW_STALE_TIME_MS });
+    secondaryRows.forEach((row) => {
+      queryClient.prefetchQuery({
+        queryKey: [...row.queryKey],
+        queryFn: row.queryFn,
+        staleTime: ROW_STALE_TIME_MS,
+      });
     });
-  }, [showSecondaryRows, queryClient, isOnline]);
+  }, [showSecondaryRows, queryClient, secondaryRows, isOnline]);
 
   if (!isOnline) {
     return (
@@ -91,7 +205,7 @@ export function Home() {
       <Hero items={(trendingMovies || []).slice(0, 5)} onFirstImageLoaded={triggerSecondaryRows} />
 
       <div className='mt-0 relative z-10 space-y-8'>
-        {!isIncognito && <ResumeSection />}
+        <ResumeSection />
 
         {/* Primary row — loads immediately */}
         <MediaRow
@@ -105,34 +219,16 @@ export function Home() {
         {/* Secondary rows — deferred for faster first paint */}
         {showSecondaryRows && (
           <>
-            <MediaRow
-              title='Trending Series'
-              queryKey={['trending', 'series']}
-              queryFn={() => api.getTrendingSeries()}
-              className='animate-in fade-in slide-in-from-bottom-6 duration-500'
-              style={{ animationDelay: '0ms', animationFillMode: 'both' }}
-            />
-            <MediaRow
-              title='Netflix Movies'
-              queryKey={['netflix', 'movies']}
-              queryFn={() => api.getNetflixCatalog('nfx', 'movie')}
-              className='animate-in fade-in slide-in-from-bottom-6 duration-500'
-              style={{ animationDelay: '80ms', animationFillMode: 'both' }}
-            />
-            <MediaRow
-              title='Disney+ Movies'
-              queryKey={['disney', 'movies']}
-              queryFn={() => api.getNetflixCatalog('dnp', 'movie')}
-              className='animate-in fade-in slide-in-from-bottom-6 duration-500'
-              style={{ animationDelay: '160ms', animationFillMode: 'both' }}
-            />
-            <MediaRow
-              title='Trending Anime'
-              queryKey={['kitsu', 'trending']}
-              queryFn={() => api.getKitsuCatalog('kitsu-anime-trending')}
-              className='animate-in fade-in slide-in-from-bottom-6 duration-500'
-              style={{ animationDelay: '240ms', animationFillMode: 'both' }}
-            />
+            {secondaryRows.map((row) => (
+              <MediaRow
+                key={row.id}
+                title={row.title}
+                queryKey={[...row.queryKey]}
+                queryFn={row.queryFn}
+                className='animate-in fade-in slide-in-from-bottom-6 duration-500'
+                style={{ animationDelay: `${row.animationDelayMs}ms`, animationFillMode: 'both' }}
+              />
+            ))}
           </>
         )}
       </div>

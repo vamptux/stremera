@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import {
@@ -13,23 +13,15 @@ import {
   Maximize,
   Minimize,
   Volume1,
-  ChevronDown,
-  ChevronUp,
-  Check,
   Download,
-  PictureInPicture2,
   Rewind,
   FastForward,
   StepForward,
   ArrowLeftRight,
-  Settings2,
 } from 'lucide-react';
-import { api, type Episode, type SkipSegment, type PlaybackLanguagePreferences } from '@/lib/api';
+import { api, type Episode, type SkipSegment } from '@/lib/api';
 import { toast } from 'sonner';
-import { usePrivacy } from '@/contexts/privacy-context';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import * as SliderPrimitive from '@radix-ui/react-slider';
 import { StreamSelector } from '@/components/stream-selector';
 import {
   init,
@@ -40,7 +32,6 @@ import {
   MpvObservableProperty,
   destroy,
 } from 'tauri-plugin-libmpv-api';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { cn } from '@/lib/utils';
 import { Sidebar } from '@/components/sidebar';
 import { DownloadModal } from '@/components/download-modal';
@@ -51,30 +42,32 @@ import {
 import { PlayerProgressBar } from '@/components/player-progress-bar';
 import {
   type Track,
-  normalizeLanguageToken,
-  inferTrackPreferredLanguage,
-  findTrackByLanguage,
-  trackMatchesPreferredLanguage,
   normalizeTrackList,
   doesTrackSelectionMatch,
-  formatTrackLabel,
 } from '@/lib/player-track-utils';
 import { useStreamRecovery } from '@/hooks/use-stream-recovery';
-import { usePictureInPicture } from '@/hooks/use-picture-in-picture';
-
-/** Trigger native window drag for PiP mode. Only fires on primary button. */
-function startWindowDrag(e: React.MouseEvent | React.PointerEvent) {
-  if (e.button !== 0) return;
-  // Don't drag if the user clicked an interactive element
-  const target = e.target as HTMLElement;
-  if (target.closest('button, a, input, [role="button"]')) return;
-  e.preventDefault();
-  void getCurrentWindow()
-    .startDragging()
-    .catch(() => {
-      /* PiP drag not critical */
-    });
-}
+import { usePlayerViewportMode } from '@/hooks/use-player-viewport-mode';
+import { PlayerPlaybackSettings } from '@/components/player-playback-settings';
+import { PlayerOsdOverlay, type PlayerOsdAction } from '@/components/player-osd-overlay';
+import { PlayerSlider } from '@/components/player-slider';
+import { PlayerActionOverlays } from '@/components/player-action-overlays';
+import { usePlaybackProgressPersistence } from '@/hooks/use-playback-progress-persistence';
+import { usePlaybackStreamHealth } from '@/hooks/use-playback-stream-health';
+import { usePlayerTrackPreferences } from '@/hooks/use-player-track-preferences';
+import { usePlayerResumeController } from '@/hooks/use-player-resume-controller';
+import { usePlayerStreamSession } from '@/hooks/use-player-stream-session';
+import { usePlayerRouteState } from '@/hooks/use-player-route-state';
+import {
+  usePlayerUpNext,
+  type NextEpisodeStreamCoordinates,
+} from '@/hooks/use-player-up-next';
+import {
+  buildEpisodeStreamTargetLookupKey,
+  buildFallbackEpisodeStreamTarget,
+  resolveEpisodeStreamTarget,
+} from '@/lib/episode-stream-target';
+import { buildPlayerRoute } from '@/lib/player-navigation';
+import { resolveRankedBestStream } from '@/lib/stream-resolution';
 
 // --- Types & Constants ---
 
@@ -85,14 +78,6 @@ const formatTime = (seconds: number) => {
   const s = Math.floor(seconds % 60);
   if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-};
-
-const formatOsdResumeTime = (seconds: number) => {
-  const whole = Math.max(0, Math.floor(seconds));
-  const h = Math.floor(whole / 3600);
-  const m = Math.floor((whole % 3600) / 60);
-  const s = Math.floor(whole % 60);
-  return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 };
 
 /** Maps a segment type to a user-visible "Skip" action label. */
@@ -113,68 +98,9 @@ function getSkipLabel(type: string): string {
   }
 }
 
-interface EpisodeStreamCoordinates {
-  streamLookupId: string;
-  streamSeason: number;
-  streamEpisode: number;
-  absoluteSeason: number;
-  absoluteEpisode: number;
-  aniskipEpisode: number;
-  lookupKey: string;
-}
-
 interface PlayerLoadingCopy {
   headline: string;
   detail: string;
-}
-
-function buildEpisodeStreamCoordinates(
-  mediaType: string,
-  fallbackLookupId: string,
-  ep: Pick<Episode, 'season' | 'episode' | 'imdbId' | 'imdbSeason' | 'imdbEpisode'>,
-): EpisodeStreamCoordinates {
-  const streamLookupId = ep.imdbId || fallbackLookupId;
-  const streamSeason = ep.imdbSeason || ep.season;
-  const streamEpisode = ep.imdbEpisode || ep.episode;
-  const absoluteSeason = ep.season;
-  const absoluteEpisode = ep.episode;
-  const aniskipEpisode = ep.imdbEpisode || ep.episode;
-  const lookupKey = `${mediaType}:${streamLookupId}:${streamSeason}:${streamEpisode}:${absoluteEpisode}`;
-
-  return {
-    streamLookupId,
-    streamSeason,
-    streamEpisode,
-    absoluteSeason,
-    absoluteEpisode,
-    aniskipEpisode,
-    lookupKey,
-  };
-}
-
-function findNextEpisodeCandidate(
-  episodes: Episode[],
-  currentSeason: number,
-  currentEpisode: number,
-): Episode | null {
-  const ordered = [...episodes].sort((left, right) => {
-    if (left.season !== right.season) return left.season - right.season;
-    return left.episode - right.episode;
-  });
-
-  const exactIndex = ordered.findIndex(
-    (ep) => ep.season === currentSeason && ep.episode === currentEpisode,
-  );
-  if (exactIndex >= 0) {
-    return ordered[exactIndex + 1] ?? null;
-  }
-
-  const nextInSeason = ordered.find(
-    (ep) => ep.season === currentSeason && ep.episode > currentEpisode,
-  );
-  if (nextInSeason) return nextInSeason;
-
-  return ordered.find((ep) => ep.season > currentSeason) ?? null;
 }
 
 const OBSERVED_PROPERTIES = [
@@ -193,42 +119,10 @@ const OBSERVED_PROPERTIES = [
 
 const SPEED_OPTIONS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 const TIME_UPDATE_THROTTLE_MS = 350;
+const OPTIMISTIC_SEEK_HOLD_MS = 450;
+const OPTIMISTIC_SEEK_SETTLED_DELTA_SECS = 1.1;
 const TRACK_SWITCH_VERIFY_ATTEMPTS = 8;
 const TRACK_SWITCH_VERIFY_DELAY_MS = 150;
-const RESUME_SEEK_MAX_ATTEMPTS = 6;
-const RESUME_SEEK_RETRY_DELAY_MS = 220;
-const RESUME_SEEK_SETTLE_TOLERANCE_SECS = 2;
-
-const PlayerSlider = React.forwardRef<
-  React.ElementRef<typeof SliderPrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root>
->(({ className, ...props }, ref) => (
-  <SliderPrimitive.Root
-    ref={ref}
-    className={cn(
-      'relative flex w-full touch-none select-none items-center group/slider h-5 cursor-pointer',
-      className,
-    )}
-    onClick={(e) => e.stopPropagation()}
-    onPointerDown={(e) => e.stopPropagation()}
-    {...props}
-  >
-    {/* Larger invisible hit target behind the track */}
-    <SliderPrimitive.Track className='relative h-[4px] w-full grow overflow-hidden rounded-full bg-white/20 group-hover/slider:h-[6px] transition-[height] duration-150'>
-      <SliderPrimitive.Range className='absolute h-full bg-white' />
-    </SliderPrimitive.Track>
-    <SliderPrimitive.Thumb className='block w-4 h-4 opacity-0 cursor-pointer' />
-  </SliderPrimitive.Root>
-));
-PlayerSlider.displayName = SliderPrimitive.Root.displayName;
-
-// --- OSD Action type ---
-
-type OsdAction =
-  | { kind: 'play' | 'pause' }
-  | { kind: 'seek'; direction: 'forward' | 'backward'; seconds: number }
-  | { kind: 'volume'; level: number }
-  | { kind: 'message'; text: string };
 
 // --- Component ---
 
@@ -239,52 +133,65 @@ export function Player() {
 }
 
 function InnerPlayer() {
-  const location = useLocation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { type, id, season, episode } = useParams();
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
   const isNavigatingAwayRef = useRef(false);
 
-  // -- Params --
-  const state = location.state as {
-    streamUrl?: string;
-    title?: string;
-    poster?: string;
-    backdrop?: string;
-    logo?: string;
-    format?: string;
-    selectedStreamKey?: string;
-    startTime?: number;
-    absoluteSeason?: number;
-    absoluteEpisode?: number;
-    streamSeason?: number;
-    streamEpisode?: number;
-    aniskipEpisode?: number;
-    resumeFromHistory?: boolean;
-    streamLookupId?: string;
-    bypassResolveCache?: boolean;
-    from?: string;
-    isOffline?: boolean;
-    openingStreamName?: string;
-    openingStreamSource?: string;
-  } | null;
+  const {
+    backdrop,
+    effectiveResolveMediaType,
+    episodeParam: episode,
+    from,
+    id,
+    isHistoryResume,
+    logo,
+    openingStreamName,
+    openingStreamSource,
+    poster,
+    preparedBackupStream,
+    routeAbsoluteEpisode,
+    routeAbsoluteSeason,
+    routeAniSkipEpisode,
+    routeEpisode,
+    routeFormat,
+    routeMarkedOffline,
+    routeSeason,
+    routeSelectedStreamKey,
+    routeSourceName,
+    routeStreamEpisode,
+    routeStreamFamily,
+    routeStreamLookupId,
+    routeStreamSeason,
+    routeStreamUrl,
+    seasonParam: season,
+    shouldBypassResolveCache,
+    startTime,
+    title,
+    type,
+  } = usePlayerRouteState();
 
   // -- State --
-  const [activeStreamUrl, setActiveStreamUrl] = useState<string | undefined>(
-    state?.streamUrl || undefined,
-  );
-  // Track the last route-provided streamUrl so the sync effect only fires on
-  // genuine navigation changes, not on recovery-driven URL swaps.
-  const lastRouteStreamUrlRef = useRef(state?.streamUrl);
-
-  // Update stream URL if location state changes (e.g. manual stream selection for same episode)
-  useEffect(() => {
-    if (state?.streamUrl && state.streamUrl !== lastRouteStreamUrlRef.current) {
-      lastRouteStreamUrlRef.current = state.streamUrl;
-      setActiveStreamUrl(state.streamUrl);
-    }
-  }, [state?.streamUrl]);
+  const {
+    activeStreamUrl,
+    setActiveStreamUrl,
+    activeStreamFormatRef,
+    activeStreamSourceNameRef,
+    activeStreamFamilyRef,
+    streamLookupIdRef,
+    selectedStreamKeyRef,
+    lastStreamUrlRef,
+    isOffline,
+  } = usePlayerStreamSession({
+    routeStreamUrl,
+    routeFormat,
+    routeSourceName,
+    routeStreamFamily,
+    routeSelectedStreamKey,
+    streamLookupId: routeStreamLookupId || id || undefined,
+    mediaId: id,
+    routeMarkedOffline,
+  });
 
   useEffect(() => {
     setHasPlaybackStarted(false);
@@ -300,7 +207,6 @@ function InnerPlayer() {
   });
   const [isMuted, setIsMuted] = useState(false);
   const [showControls, setShowControls] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [hasPlaybackStarted, setHasPlaybackStarted] = useState(false);
   const [isResolving, setIsResolving] = useState(false);
@@ -321,10 +227,7 @@ function InnerPlayer() {
   });
   const [showEpisodes, setShowEpisodes] = useState(false);
   const [selectedSeason, setSelectedSeason] = useState<number>(() => {
-    if (typeof state?.absoluteSeason === 'number' && Number.isFinite(state.absoluteSeason)) {
-      return state.absoluteSeason;
-    }
-    return season ? parseInt(season, 10) : 1;
+    return routeAbsoluteSeason ?? 1;
   });
   const [isHoveringVolume, setIsHoveringVolume] = useState(false);
   const [subtitleScale, setSubtitleScale] = useState(1.0);
@@ -332,58 +235,18 @@ function InnerPlayer() {
   // Stream Selector State
   const [showStreamSelector, setShowStreamSelector] = useState(false);
   const [selectedEpisodeForStream, setSelectedEpisodeForStream] = useState<Episode | null>(null);
+  const [selectedEpisodeStreamTarget, setSelectedEpisodeStreamTarget] =
+    useState<NextEpisodeStreamCoordinates | null>(null);
 
   const [showDownloadModal, setShowDownloadModal] = useState(false);
 
   // OSD (on-screen display) for keyboard/mouse action feedback
-  const [osdAction, setOsdAction] = useState<OsdAction | null>(null);
+  const [osdAction, setOsdAction] = useState<PlayerOsdAction | null>(null);
   const [osdVisible, setOsdVisible] = useState(false);
-
-  // Up-Next / Auto-Next countdown overlay
-  const [showUpNext, setShowUpNext] = useState(false);
-  const [upNextCountdown, setUpNextCountdown] = useState(10);
-
-  const routeSeason = season ? parseInt(season, 10) : undefined;
-  const routeEpisode = episode ? parseInt(episode, 10) : undefined;
-  const routeAbsoluteSeason =
-    typeof state?.absoluteSeason === 'number' && Number.isFinite(state.absoluteSeason)
-      ? state.absoluteSeason
-      : routeSeason;
-  const routeAniSkipEpisode =
-    typeof state?.aniskipEpisode === 'number' && Number.isFinite(state.aniskipEpisode)
-      ? state.aniskipEpisode
-      : undefined;
-  const routeAbsoluteEpisode =
-    typeof state?.absoluteEpisode === 'number' && Number.isFinite(state.absoluteEpisode)
-      ? state.absoluteEpisode
-      : routeEpisode;
-  const routeStreamSeason =
-    typeof state?.streamSeason === 'number' && Number.isFinite(state.streamSeason)
-      ? state.streamSeason
-      : undefined;
-  const routeStreamEpisode =
-    typeof state?.streamEpisode === 'number' && Number.isFinite(state.streamEpisode)
-      ? state.streamEpisode
-      : undefined;
 
   // Remaining time mode: click the clock to toggle between elapsed and remaining
   const [showRemainingTime, setShowRemainingTime] = useState(false);
   const watchHistoryInvalidatedRef = useRef(false);
-
-  const title = state?.title || 'Unknown Title';
-  const backdrop = state?.backdrop;
-  const startTime = state?.startTime;
-  const isHistoryResume = !!state?.resumeFromHistory;
-  const routeStreamLookupId = state?.streamLookupId;
-  const shouldBypassResolveCache = !!state?.bypassResolveCache;
-  const isOffline =
-    !!state?.isOffline || (!!activeStreamUrl && !activeStreamUrl.startsWith('http'));
-  const effectiveResolveMediaType: 'movie' | 'series' | 'anime' =
-    type === 'anime' || (type === 'series' && (id?.startsWith('kitsu:') ?? false))
-      ? 'anime'
-      : type === 'movie'
-        ? 'movie'
-        : 'series';
 
   const restoreCursorVisibility = useCallback(() => {
     if (playerContainerRef.current) playerContainerRef.current.style.cursor = '';
@@ -403,15 +266,14 @@ function InnerPlayer() {
     restoreBackgroundPresentation();
   }, [restoreBackgroundPresentation, restoreCursorVisibility]);
 
-  const exitFullscreenIfNeeded = useCallback(async () => {
-    if (!document.fullscreenElement) return;
-    await document.exitFullscreen().catch(() => undefined);
-    setIsFullscreen(false);
-  }, []);
-
-  const { isPiP, togglePiP, exitPiPAndRestore } = usePictureInPicture({
-    onBeforeEnter: async () => {
-      await exitFullscreenIfNeeded();
+  const {
+    beginPlayerExit,
+    cleanupViewportOnUnmount,
+    isFullscreen,
+    prepareForInternalPlayerNavigation,
+    toggleFullscreen,
+  } = usePlayerViewportMode({
+    onBeforeEnterFullscreen: () => {
       setShowEpisodes(false);
     },
   });
@@ -419,25 +281,33 @@ function InnerPlayer() {
   const invalidateWatchHistoryOnce = useCallback(() => {
     if (watchHistoryInvalidatedRef.current) return;
     watchHistoryInvalidatedRef.current = true;
+    void queryClient.invalidateQueries({ queryKey: ['continue-watching'] });
     void queryClient.invalidateQueries({ queryKey: ['watch-history'] });
+  }, [queryClient]);
+
+  const flushPlaybackBeforeNavigation = useCallback(async () => {
+    try {
+      await saveProgressRef.current?.();
+    } finally {
+      if (!watchHistoryInvalidatedRef.current) {
+        watchHistoryInvalidatedRef.current = true;
+        void queryClient.invalidateQueries({ queryKey: ['continue-watching'] });
+        void queryClient.invalidateQueries({ queryKey: ['watch-history'] });
+      }
+    }
   }, [queryClient]);
 
   // Intelligent back navigation: replace the player in history so pressing back
   // from the destination page never re-launches the player.
-  const navigateBack = useCallback(() => {
+  const navigateBack = useCallback(async () => {
     if (isNavigatingAwayRef.current) return;
     isNavigatingAwayRef.current = true;
-
-    void exitPiPAndRestore();
 
     setShowControls(true);
     setShowEpisodes(false);
     restorePlayerSurface();
-    void exitFullscreenIfNeeded();
-
-    // Invalidate the watch-history cache so Continue Watching updates immediately
-    // on the home page without waiting for the stale-time window to expire.
-    invalidateWatchHistoryOnce();
+    await flushPlaybackBeforeNavigation();
+    await beginPlayerExit();
 
     const backSeason = selectedEpisodeForStream?.season ?? routeAbsoluteSeason;
     const backEpisode = selectedEpisodeForStream?.episode ?? routeAbsoluteEpisode;
@@ -448,7 +318,6 @@ function InnerPlayer() {
       reopenStartTime: currentTimeRef.current > 5 ? currentTimeRef.current : undefined,
     };
 
-    const from = state?.from;
     // If we have a valid non-player origin, go there (replacing player in stack)
     if (from && !from.startsWith('/player')) {
       if (from.startsWith('/details/')) {
@@ -465,14 +334,13 @@ function InnerPlayer() {
     }
   }, [
     navigate,
-    invalidateWatchHistoryOnce,
     selectedEpisodeForStream?.season,
     selectedEpisodeForStream?.episode,
     routeAbsoluteSeason,
     routeAbsoluteEpisode,
-    exitFullscreenIfNeeded,
-    exitPiPAndRestore,
-    state?.from,
+    beginPlayerExit,
+    from,
+    flushPlaybackBeforeNavigation,
     effectiveResolveMediaType,
     id,
     restorePlayerSurface,
@@ -482,64 +350,40 @@ function InnerPlayer() {
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const forceShowTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const lastTimeUpdateRef = useRef(0);
+  const pendingSeekDeadlineRef = useRef(0);
+  const pendingSeekTargetRef = useRef<number | null>(null);
   const currentTimeRef = useRef(0);
   const durationRef = useRef(0);
   const isDestroyedRef = useRef(false);
   const mountedRef = useRef(true);
-  const initialTimeRef = useRef(0);
-  const resumeTimeRef = useRef(0);
-  const resumeAppliedRef = useRef(false);
-  const resumeSeekAttemptsRef = useRef(0);
-  const resumeSeekInFlightRef = useRef(false);
-  const resumeSeekRetryTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const resumePausePendingRef = useRef(false);
-  const resumeOsdShownRef = useRef(false);
-  const lastStreamUrlRef = useRef(activeStreamUrl);
+  const mpvInitializedRef = useRef(false);
   const volumeRef = useRef(volume);
   const isLoadingRef = useRef(true);
-  const saveProgressInFlightRef = useRef(false);
-  const saveProgressQueuedRef = useRef(false);
   // Stable refs for callbacks used in the MPV init effect — avoids restarting MPV
   // when async data (details, nextEpisode) changes these callback identities.
   const saveProgressRef = useRef<(() => Promise<void>) | undefined>(undefined);
   const handleEndedRef = useRef<(() => void) | undefined>(undefined);
   const lastAutoResolveLookupIdRef = useRef<string | null>(null);
-  const upNextIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const errorRef = useRef<string | null>(error);
-  const activeStreamFormatRef = useRef<string | undefined>(state?.format);
-
-  const nextEpisodePrefetchRef = useRef<{
-    lookupKey: string;
-    season: number;
-    episode: number;
-    url: string;
-    format: string;
-  } | null>(null);
-  const nextEpisodePrefetchInFlightRef = useRef(false);
-  const nextEpisodePrefetchLookupKeyRef = useRef<string | null>(null);
   const osdTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const osdClearTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const osdAnimationFrameRef = useRef<number | null>(null);
+  const selectorOpenRequestIdRef = useRef(0);
   /** Always-current playing state — used in closures to avoid stale captures. */
   const isPlayingRef = useRef(false);
   const isDev = import.meta.env.DEV;
-  const autoAppliedTrackPrefsRef = useRef<{ audio: boolean; sub: boolean }>({
-    audio: false,
-    sub: false,
-  });
-  const autoApplyingTrackPrefsRef = useRef<{ audio: boolean; sub: boolean }>({
-    audio: false,
-    sub: false,
-  });
   const trackSwitchingRef = useRef<{ audio: boolean; sub: boolean }>({
     audio: false,
     sub: false,
   });
   const trackListRef = useRef<Track[]>([]);
-  const streamLookupIdRef = useRef<string | undefined>(routeStreamLookupId || id || undefined);
-  const selectedStreamKeyRef = useRef<string | undefined>(state?.selectedStreamKey);
-  const leftTapTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const rightTapTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const centerTapTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const applyResumeIfReadyRef = useRef<() => Promise<void>>(async () => undefined);
+  const setTrackRef = useRef<
+    (
+      type: 'audio' | 'sub',
+      id: number | 'no',
+      options?: { silent?: boolean; persistPreference?: boolean },
+    ) => Promise<void> | void
+  >(async () => undefined);
 
   // Component mount state must survive stream swaps so stale-link recovery can
   // tear down MPV and immediately re-enter auto-resolve on the same screen.
@@ -552,28 +396,14 @@ function InnerPlayer() {
   }, []);
 
   useEffect(() => {
-    lastStreamUrlRef.current = activeStreamUrl;
+    currentTimeRef.current = 0;
+    durationRef.current = 0;
+    pendingSeekTargetRef.current = null;
+    pendingSeekDeadlineRef.current = 0;
+    lastTimeUpdateRef.current = 0;
+    setCurrentTime(0);
+    setDuration(0);
   }, [activeStreamUrl]);
-
-  useEffect(() => {
-    if (state?.streamUrl && activeStreamUrl === state.streamUrl) {
-      activeStreamFormatRef.current = state?.format;
-    }
-  }, [state?.streamUrl, state?.format, activeStreamUrl]);
-
-  useEffect(() => {
-    if (!state?.streamUrl) {
-      selectedStreamKeyRef.current = undefined;
-      return;
-    }
-
-    if (activeStreamUrl === state.streamUrl) {
-      selectedStreamKeyRef.current = state.selectedStreamKey?.trim() || undefined;
-      return;
-    }
-
-    selectedStreamKeyRef.current = undefined;
-  }, [activeStreamUrl, state?.streamUrl, state?.selectedStreamKey]);
 
   // -- Queries --
   const { data: details, isLoading: isLoadingDetails } = useQuery({
@@ -621,85 +451,21 @@ function InnerPlayer() {
 
   const currentEpisodeStream = useMemo(() => {
     if (!sidebarCurrentEpisode || !type || !id) return null;
-    return buildEpisodeStreamCoordinates(
-      type,
+    const target = buildFallbackEpisodeStreamTarget(
       routeStreamLookupId || details?.imdbId || id,
       sidebarCurrentEpisode,
     );
-  }, [sidebarCurrentEpisode, type, id, routeStreamLookupId, details?.imdbId]);
 
-  const { data: playbackLanguagePreferences } = useQuery({
-    queryKey: ['playbackLanguagePreferences'],
-    queryFn: api.getPlaybackLanguagePreferences,
-    staleTime: 1000 * 60 * 5,
-  });
-
-  const playbackPrefsRef = useRef<PlaybackLanguagePreferences>({});
-  const playbackPrefsHydratedRef = useRef(false);
-  const savePlaybackPrefsQueueRef = useRef(Promise.resolve());
-
-  useEffect(() => {
-    const normalized = {
-      preferredAudioLanguage:
-        normalizeLanguageToken(playbackLanguagePreferences?.preferredAudioLanguage) || undefined,
-      preferredSubtitleLanguage:
-        normalizeLanguageToken(playbackLanguagePreferences?.preferredSubtitleLanguage) || undefined,
+    return {
+      streamLookupId: target.streamId,
+      streamSeason: target.season,
+      streamEpisode: target.episode,
+      absoluteSeason: target.absoluteSeason,
+      absoluteEpisode: target.absoluteEpisode,
+      aniskipEpisode: target.aniskipEpisode,
+      lookupKey: buildEpisodeStreamTargetLookupKey(type, target),
     };
-    playbackPrefsRef.current = normalized;
-    playbackPrefsHydratedRef.current = true;
-    queryClient.setQueryData(['playbackLanguagePreferences'], normalized);
-  }, [
-    playbackLanguagePreferences?.preferredAudioLanguage,
-    playbackLanguagePreferences?.preferredSubtitleLanguage,
-    queryClient,
-  ]);
-
-  const savePlaybackPreferencesPatch = useCallback(
-    (patch: Partial<PlaybackLanguagePreferences>) => {
-      const normalizedPatch: Partial<PlaybackLanguagePreferences> = {
-        preferredAudioLanguage:
-          patch.preferredAudioLanguage === undefined
-            ? undefined
-            : normalizeLanguageToken(patch.preferredAudioLanguage) || undefined,
-        preferredSubtitleLanguage:
-          patch.preferredSubtitleLanguage === undefined
-            ? undefined
-            : normalizeLanguageToken(patch.preferredSubtitleLanguage) || undefined,
-      };
-
-      const saveTask = async () => {
-        if (!playbackPrefsHydratedRef.current) {
-          const fresh = await api.getPlaybackLanguagePreferences();
-          playbackPrefsRef.current = {
-            preferredAudioLanguage:
-              normalizeLanguageToken(fresh?.preferredAudioLanguage) || undefined,
-            preferredSubtitleLanguage:
-              normalizeLanguageToken(fresh?.preferredSubtitleLanguage) || undefined,
-          };
-          playbackPrefsHydratedRef.current = true;
-        }
-
-        const next: PlaybackLanguagePreferences = {
-          ...playbackPrefsRef.current,
-          ...normalizedPatch,
-        };
-
-        playbackPrefsRef.current = next;
-
-        await api.savePlaybackLanguagePreferences(
-          next.preferredAudioLanguage,
-          next.preferredSubtitleLanguage,
-        );
-
-        queryClient.setQueryData(['playbackLanguagePreferences'], next);
-      };
-
-      const queued = savePlaybackPrefsQueueRef.current.then(saveTask);
-      savePlaybackPrefsQueueRef.current = queued.catch(() => undefined);
-      return queued;
-    },
-    [queryClient],
-  );
+  }, [sidebarCurrentEpisode, type, id, routeStreamLookupId, details?.imdbId]);
 
   // -- Skip Times --
   // Anime: normalized from explicit anime routes and kitsu-backed series routes.
@@ -783,21 +549,6 @@ function InnerPlayer() {
     return () => window.clearTimeout(timer);
   }, [resolvedAbsoluteSeason, seasons, selectedSeason, sidebarCurrentEpisode?.season]);
 
-  const nextEpisode = useMemo(() => {
-    if (
-      details?.episodes &&
-      resolvedAbsoluteSeason !== undefined &&
-      resolvedAbsoluteEpisode !== undefined
-    ) {
-      return findNextEpisodeCandidate(
-        details.episodes,
-        resolvedAbsoluteSeason,
-        resolvedAbsoluteEpisode,
-      );
-    }
-    return null;
-  }, [details?.episodes, resolvedAbsoluteEpisode, resolvedAbsoluteSeason]);
-
   const episodeCountInSeason = useMemo(() => {
     const seasonForCount = sidebarCurrentEpisode?.season ?? resolvedAbsoluteSeason;
     if (seasonForCount === undefined || !details?.episodes) return null;
@@ -823,10 +574,6 @@ function InnerPlayer() {
         !currentEpisodeStream))
   );
 
-  useEffect(() => {
-    streamLookupIdRef.current = streamLookupId || undefined;
-  }, [streamLookupId]);
-
   const playerLoadingCopy = useMemo<PlayerLoadingCopy>(() => {
     if (isResolving) {
       return {
@@ -838,17 +585,17 @@ function InnerPlayer() {
     }
 
     if (activeStreamUrl) {
-      if (isHistoryResume && state?.streamUrl && activeStreamUrl === state.streamUrl) {
+      if (isHistoryResume && routeStreamUrl && activeStreamUrl === routeStreamUrl) {
         return {
           headline: startTime && startTime > 5 ? 'Restoring saved stream' : 'Opening saved stream',
           detail: 'Using your last working stream first so Continue Watching feels immediate.',
         };
       }
 
-      if (state?.openingStreamName) {
+      if (openingStreamName) {
         return {
           headline: 'Opening selected stream',
-          detail: state.openingStreamSource?.trim() || state.openingStreamName.trim(),
+          detail: openingStreamSource?.trim() || openingStreamName.trim(),
         };
       }
 
@@ -887,9 +634,9 @@ function InnerPlayer() {
     resolveStatus,
     shouldWaitForResolvedLookupId,
     startTime,
-    state?.openingStreamName,
-    state?.openingStreamSource,
-    state?.streamUrl,
+    openingStreamName,
+    openingStreamSource,
+    routeStreamUrl,
   ]);
 
   /**
@@ -914,37 +661,77 @@ function InnerPlayer() {
   );
   const subtitlesOff = subTracks.length > 0 && !activeSubTrack;
 
-  const audioTrackLabels = useMemo(() => {
-    const counts = new Map<string, number>();
-    audioTracks.forEach((track) => {
-      const label = formatTrackLabel(track);
-      counts.set(label, (counts.get(label) ?? 0) + 1);
+  const { saveProgress } = usePlaybackProgressPersistence({
+    mediaId: id,
+    mediaType: type,
+    title: title || 'Unknown',
+    poster,
+    backdrop,
+    absoluteSeason: resolvedAbsoluteSeason,
+    absoluteEpisode: resolvedAbsoluteEpisode,
+    streamSeason: resolvedStreamSeason,
+    streamEpisode: resolvedStreamEpisode,
+    aniskipEpisode: resolvedAniSkipEpisode,
+    isPlaying,
+    currentTime,
+    duration,
+    activeStreamUrl,
+    currentTimeRef,
+    durationRef,
+    lastStreamUrlRef,
+    activeStreamFormatRef,
+    activeStreamSourceNameRef,
+    activeStreamFamilyRef,
+    streamLookupIdRef,
+    selectedStreamKeyRef,
+  });
+
+  const { reportFailure: reportStreamFailure, reportVerified: reportStreamVerified } =
+    usePlaybackStreamHealth({
+      mediaId: id,
+      mediaType: type,
+      absoluteSeason: resolvedAbsoluteSeason,
+      absoluteEpisode: resolvedAbsoluteEpisode,
+      activeStreamUrl,
+      activeStreamFormatRef,
+      activeStreamSourceNameRef,
+      activeStreamFamilyRef,
+      streamLookupIdRef,
+      selectedStreamKeyRef,
     });
 
-    return new Map<number, string>(
-      audioTracks.map((track) => {
-        const label = formatTrackLabel(track);
-        if ((counts.get(label) ?? 0) > 1) return [track.id, `${label} #${track.id}`];
-        return [track.id, label];
-      }),
-    );
-  }, [audioTracks]);
+  const {
+    dismissUpNext,
+    getFreshPrefetchedPlan,
+    nextPlaybackPlan,
+    showUpNext,
+    startUpNextCountdown,
+    upNextCountdown,
+  } = usePlayerUpNext({
+    mediaType: effectiveResolveMediaType,
+    mediaId: id,
+    currentSeason: resolvedAbsoluteSeason,
+    currentEpisode: resolvedAbsoluteEpisode,
+    currentStreamLookupId: streamLookupId,
+    currentTime,
+    duration,
+    hasPlaybackStarted,
+  });
 
-  const subTrackLabels = useMemo(() => {
-    const counts = new Map<string, number>();
-    subTracks.forEach((track) => {
-      const label = formatTrackLabel(track);
-      counts.set(label, (counts.get(label) ?? 0) + 1);
-    });
+  const nextEpisode = useMemo(() => {
+    if (!nextPlaybackPlan) return null;
+    return {
+      title: nextPlaybackPlan.canonical.title,
+      episode: nextPlaybackPlan.canonical.episode,
+    };
+  }, [nextPlaybackPlan]);
 
-    return new Map<number, string>(
-      subTracks.map((track) => {
-        const label = formatTrackLabel(track);
-        if ((counts.get(label) ?? 0) > 1) return [track.id, `${label} #${track.id}`];
-        return [track.id, label];
-      }),
-    );
-  }, [subTracks]);
+  const nextEpisodeLabel = useMemo(() => {
+    if (!nextPlaybackPlan) return '';
+    const trimmedTitle = nextPlaybackPlan.canonical.title?.trim();
+    if (trimmedTitle) return trimmedTitle;
+    return `Episode ${nextPlaybackPlan.canonical.episode}`;
+  }, [nextPlaybackPlan]);
 
   // -- Helpers --
 
@@ -980,7 +767,8 @@ function InnerPlayer() {
     recoverFromStaleSavedStream,
   } = useStreamRecovery({
     activeStreamUrl,
-    initialStreamUrl: state?.streamUrl,
+    initialStreamUrl: routeStreamUrl,
+    preparedBackupStream,
     isHistoryResume,
     isOffline,
     mediaType: effectiveResolveMediaType,
@@ -994,6 +782,8 @@ function InnerPlayer() {
     mountedRef,
     lastStreamUrlRef,
     activeStreamFormatRef,
+    activeStreamSourceNameRef,
+    activeStreamFamilyRef,
     errorRef,
     beginLoading,
     stopLoading,
@@ -1001,6 +791,7 @@ function InnerPlayer() {
     setIsResolving,
     setResolveStatus,
     setActiveStreamUrl,
+    reportStreamFailure,
   });
 
   const markPlaybackReady = useCallback(() => {
@@ -1008,7 +799,8 @@ function InnerPlayer() {
     stopLoading(true);
     setHasPlaybackStarted(true);
     setError(null);
-  }, [markPlaybackStarted, stopLoading]);
+    reportStreamVerified();
+  }, [markPlaybackStarted, reportStreamVerified, stopLoading]);
 
   const clearUiTimers = useCallback(() => {
     if (controlsTimeoutRef.current) {
@@ -1023,32 +815,13 @@ function InnerPlayer() {
       clearTimeout(osdTimerRef.current);
       osdTimerRef.current = null;
     }
-    if (upNextIntervalRef.current) {
-      clearInterval(upNextIntervalRef.current);
-      upNextIntervalRef.current = null;
+    if (osdClearTimerRef.current) {
+      clearTimeout(osdClearTimerRef.current);
+      osdClearTimerRef.current = null;
     }
-  }, []);
-
-  const clearResumeRetryTimer = useCallback(() => {
-    if (resumeSeekRetryTimerRef.current) {
-      clearTimeout(resumeSeekRetryTimerRef.current);
-      resumeSeekRetryTimerRef.current = null;
-    }
-  }, []);
-
-  const releaseResumePause = useCallback(async () => {
-    if (!resumePausePendingRef.current || !mountedRef.current || isDestroyedRef.current) return;
-
-    resumePausePendingRef.current = false;
-
-    try {
-      await setProperty('pause', false);
-    } catch {
-      try {
-        await command('set', ['pause', 'no']);
-      } catch {
-        // Best-effort only.
-      }
+    if (osdAnimationFrameRef.current !== null) {
+      cancelAnimationFrame(osdAnimationFrameRef.current);
+      osdAnimationFrameRef.current = null;
     }
   }, []);
 
@@ -1056,81 +829,59 @@ function InnerPlayer() {
    * Briefly show a centred on-screen indicator for keyboard/pointer actions.
    * The indicator fades out after ~1.1 s and is fully removed after the transition.
    */
-  const triggerOsd = useCallback((action: OsdAction) => {
-    setOsdAction(action);
-    setOsdVisible(true);
+  const triggerOsd = useCallback((action: PlayerOsdAction) => {
     if (osdTimerRef.current) clearTimeout(osdTimerRef.current);
+    if (osdClearTimerRef.current) clearTimeout(osdClearTimerRef.current);
+    if (osdAnimationFrameRef.current !== null) {
+      cancelAnimationFrame(osdAnimationFrameRef.current);
+      osdAnimationFrameRef.current = null;
+    }
+
+    setOsdVisible(false);
+    setOsdAction(action);
+    osdAnimationFrameRef.current = window.requestAnimationFrame(() => {
+      osdAnimationFrameRef.current = null;
+      setOsdVisible(true);
+    });
+
     // Play/pause feedback is more intrusive — dismiss it faster than seek/volume.
     const visibleMs =
       action.kind === 'play' || action.kind === 'pause'
-        ? 550
+        ? 340
         : action.kind === 'message'
           ? 1600
-          : 1000;
+          : 900;
     osdTimerRef.current = setTimeout(() => {
       setOsdVisible(false);
-      osdTimerRef.current = setTimeout(() => setOsdAction(null), 200);
+      osdTimerRef.current = null;
+      osdClearTimerRef.current = setTimeout(() => {
+        osdClearTimerRef.current = null;
+        setOsdAction(null);
+      }, 120);
     }, visibleMs);
   }, []);
-
-  const { isIncognito } = usePrivacy();
 
   useEffect(() => {
     errorRef.current = error;
   }, [error]);
 
-  const saveProgress = useCallback(async () => {
-    if (!type || !id || id === 'local' || currentTimeRef.current < 5) return;
-    if (isIncognito) return;
-
-    if (saveProgressInFlightRef.current) {
-      saveProgressQueuedRef.current = true;
-      return;
-    }
-
-    saveProgressInFlightRef.current = true;
-
-    try {
-      do {
-        saveProgressQueuedRef.current = false;
-
-        await api.saveWatchProgress({
-          id,
-          type_: type,
-          season: resolvedAbsoluteSeason,
-          episode: resolvedAbsoluteEpisode,
-          absolute_season: resolvedAbsoluteSeason,
-          absolute_episode: resolvedAbsoluteEpisode,
-          stream_season: resolvedStreamSeason,
-          stream_episode: resolvedStreamEpisode,
-          aniskip_episode: resolvedAniSkipEpisode,
-          position: currentTimeRef.current,
-          duration: durationRef.current,
-          last_watched: Date.now(),
-          title: title || 'Unknown',
-          poster: state?.poster,
-          backdrop: state?.backdrop,
-          last_stream_url: lastStreamUrlRef.current,
-          last_stream_format: activeStreamFormatRef.current,
-          last_stream_lookup_id: streamLookupIdRef.current,
-          last_stream_key: selectedStreamKeyRef.current,
-        });
-      } while (saveProgressQueuedRef.current);
-    } finally {
-      saveProgressInFlightRef.current = false;
-    }
-  }, [
-    type,
-    id,
-    resolvedAbsoluteSeason,
-    resolvedAbsoluteEpisode,
-    resolvedStreamSeason,
-    resolvedStreamEpisode,
-    resolvedAniSkipEpisode,
-    title,
-    state,
-    isIncognito,
-  ]);
+  const { applyResumeIfReady, clearResumeRetryTimer, prepareForStreamLoad } =
+    usePlayerResumeController({
+      mediaId: id,
+      mediaType: type,
+      activeStreamUrl,
+      startTime,
+      absoluteSeason: resolvedAbsoluteSeason,
+      absoluteEpisode: resolvedAbsoluteEpisode,
+      isHistoryResume,
+      mountedRef,
+      isDestroyedRef,
+      currentTimeRef,
+      durationRef,
+      onResumeMessage: (text) => {
+        triggerOsd({ kind: 'message', text });
+      },
+    });
 
   const updateTracks = useCallback((rawTracks: unknown) => {
     const normalizedTracks = normalizeTrackList(rawTracks);
@@ -1161,76 +912,88 @@ function InnerPlayer() {
     saveProgressRef.current = saveProgress;
   }, [saveProgress]);
 
+  const prepareForPlayerNavigation = useCallback(async () => {
+    prepareForInternalPlayerNavigation();
+    setShowControls(true);
+    setShowEpisodes(false);
+    await flushPlaybackBeforeNavigation();
+  }, [flushPlaybackBeforeNavigation, prepareForInternalPlayerNavigation]);
+
   const handleEnded = useCallback(() => {
     setIsPlaying(false);
     saveProgressRef.current?.();
-    if (nextEpisode) {
+    if (nextPlaybackPlan) {
       setShowControls(true);
-      setShowUpNext(true);
-      setUpNextCountdown(10);
-      if (upNextIntervalRef.current) clearInterval(upNextIntervalRef.current);
-      upNextIntervalRef.current = setInterval(() => {
-        setUpNextCountdown((prev) => {
-          if (prev <= 1) {
-            if (upNextIntervalRef.current) {
-              clearInterval(upNextIntervalRef.current);
-              upNextIntervalRef.current = null;
-            }
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
+      startUpNextCountdown();
     }
-  }, [nextEpisode]);
+  }, [nextPlaybackPlan, startUpNextCountdown]);
 
   useEffect(() => {
     handleEndedRef.current = handleEnded;
   }, [handleEnded]);
 
-  const dismissUpNext = useCallback(() => {
-    setShowUpNext(false);
-    if (upNextIntervalRef.current) {
-      clearInterval(upNextIntervalRef.current);
-      upNextIntervalRef.current = null;
-    }
+  const clearOptimisticSeek = useCallback(() => {
+    pendingSeekTargetRef.current = null;
+    pendingSeekDeadlineRef.current = 0;
   }, []);
+
+  const primeOptimisticSeek = useCallback(
+    (targetTime: number) => {
+      const effectiveDuration = durationRef.current > 0 ? durationRef.current : duration;
+      const boundedTarget = Math.max(
+        0,
+        effectiveDuration > 0 ? Math.min(effectiveDuration, targetTime) : targetTime,
+      );
+
+      pendingSeekTargetRef.current = boundedTarget;
+      pendingSeekDeadlineRef.current = performance.now() + OPTIMISTIC_SEEK_HOLD_MS;
+      currentTimeRef.current = boundedTarget;
+      lastTimeUpdateRef.current = performance.now();
+      setCurrentTime(boundedTarget);
+
+      return boundedTarget;
+    },
+    [duration],
+  );
 
   const togglePlay = useCallback(async () => {
     await command('cycle', ['pause']);
   }, []);
 
-  const seek = useCallback(async (seconds: number) => {
-    await command('seek', [seconds.toString(), 'absolute']);
-    setCurrentTime(seconds);
-  }, []);
+  const seek = useCallback(
+    async (seconds: number) => {
+      const boundedTarget = primeOptimisticSeek(seconds);
+
+      try {
+        await command('seek', [boundedTarget.toString(), 'absolute']);
+      } catch (error) {
+        clearOptimisticSeek();
+        throw error;
+      }
+    },
+    [clearOptimisticSeek, primeOptimisticSeek],
+  );
 
   const seekRelative = useCallback(
     async (seconds: number) => {
-      await command('seek', [seconds.toString(), 'relative']);
+      const baseTime = pendingSeekTargetRef.current ?? currentTimeRef.current;
+      const boundedTarget = primeOptimisticSeek(baseTime + seconds);
+
+      try {
+        await command('seek', [(boundedTarget - baseTime).toString(), 'relative']);
+      } catch (error) {
+        clearOptimisticSeek();
+        throw error;
+      }
+
       triggerOsd({
         kind: 'seek',
         direction: seconds > 0 ? 'forward' : 'backward',
         seconds: Math.abs(seconds),
       });
     },
-    [triggerOsd],
+    [clearOptimisticSeek, primeOptimisticSeek, triggerOsd],
   );
-
-  const toggleFullscreen = useCallback(async () => {
-    try {
-      if (!document.fullscreenElement) {
-        await document.documentElement.requestFullscreen();
-        setIsFullscreen(true);
-      } else {
-        await document.exitFullscreen();
-        setIsFullscreen(false);
-      }
-    } catch {
-      // Fallback: just toggle sidebar visibility if Fullscreen API unavailable
-      setIsFullscreen((prev) => !prev);
-    }
-  }, []);
 
   const applySubtitleDelay = useCallback(async (value: number) => {
     const next = Math.max(-5, Math.min(5, Math.round(value * 10) / 10));
@@ -1266,159 +1029,82 @@ function InnerPlayer() {
     lastAutoResolveLookupIdRef.current = null;
   }, [id, season, episode]);
 
-  const finalizeResume = useCallback(
-    async (resumeTime: number, didSeek: boolean) => {
-      if (!resumeAppliedRef.current) {
-        resumeAppliedRef.current = true;
-      }
-
-      resumeSeekInFlightRef.current = false;
-      resumeSeekAttemptsRef.current = 0;
-      clearResumeRetryTimer();
-
-      if (didSeek && isHistoryResume && resumeTime > 60 && !resumeOsdShownRef.current) {
-        resumeOsdShownRef.current = true;
-        triggerOsd({ kind: 'message', text: `Resuming from ${formatOsdResumeTime(resumeTime)}` });
-      }
-
-      await releaseResumePause();
-    },
-    [clearResumeRetryTimer, isHistoryResume, releaseResumePause, triggerOsd],
-  );
-
-  const scheduleResumeRetry = useCallback((delayMs = RESUME_SEEK_RETRY_DELAY_MS) => {
-    if (resumeAppliedRef.current || resumeSeekRetryTimerRef.current) return;
-
-    resumeSeekRetryTimerRef.current = setTimeout(() => {
-      resumeSeekRetryTimerRef.current = null;
-      void applyResumeIfReadyRef.current();
-    }, delayMs);
-  }, []);
-
-  const applyResumeIfReady = useCallback(async () => {
-    const resumeTime = resumeTimeRef.current || initialTimeRef.current;
-
-    if (resumeAppliedRef.current) {
-      await releaseResumePause();
-      return;
-    }
-
-    if (resumeTime <= 5) {
-      clearResumeRetryTimer();
-      await releaseResumePause();
-      return;
-    }
-
-    const durationValue = durationRef.current;
-    if (durationValue > 0 && resumeTime >= Math.max(5, durationValue - 5)) {
-      await finalizeResume(resumeTime, false);
-      return;
-    }
-
-    const satisfiedResumeTime = Math.max(0, resumeTime - RESUME_SEEK_SETTLE_TOLERANCE_SECS);
-    if (currentTimeRef.current >= satisfiedResumeTime) {
-      await finalizeResume(resumeTime, true);
-      return;
-    }
-
-    if (resumeSeekInFlightRef.current) return;
-
-    if (resumeSeekAttemptsRef.current >= RESUME_SEEK_MAX_ATTEMPTS) {
-      await finalizeResume(resumeTime, false);
-      return;
-    }
-
-    resumeSeekInFlightRef.current = true;
-    resumeSeekAttemptsRef.current += 1;
-
-    try {
-      await command('seek', [resumeTime.toString(), 'absolute']);
-    } catch {
-      // MPV may reject early seeks before stream metadata is ready.
-    } finally {
-      resumeSeekInFlightRef.current = false;
-    }
-
-    if (currentTimeRef.current >= satisfiedResumeTime) {
-      await finalizeResume(resumeTime, true);
-      return;
-    }
-
-    scheduleResumeRetry(durationValue > 0 ? 140 : RESUME_SEEK_RETRY_DELAY_MS);
-  }, [clearResumeRetryTimer, finalizeResume, releaseResumePause, scheduleResumeRetry]);
-
-  useEffect(() => {
-    applyResumeIfReadyRef.current = applyResumeIfReady;
-  }, [applyResumeIfReady]);
-
-  useEffect(() => {
-    resumeAppliedRef.current = false;
-    resumeSeekAttemptsRef.current = 0;
-    resumeSeekInFlightRef.current = false;
-    resumePausePendingRef.current = false;
-    resumeOsdShownRef.current = false;
-    clearResumeRetryTimer();
-  }, [activeStreamUrl, clearResumeRetryTimer]);
-
   const playNext = useCallback(async () => {
-    if (!nextEpisode || !type || !id) return;
+    if (!nextPlaybackPlan || !id) return;
 
-    const nextEpisodeStream = buildEpisodeStreamCoordinates(
-      type,
-      streamLookupId || id,
-      nextEpisode,
+    const targetRoute = buildPlayerRoute(
+      effectiveResolveMediaType,
+      id,
+      nextPlaybackPlan.canonical.season,
+      nextPlaybackPlan.canonical.episode,
     );
 
-    const targetRoute = `/player/${effectiveResolveMediaType}/${id}/${nextEpisodeStream.absoluteSeason}/${nextEpisodeStream.absoluteEpisode}`;
-
-    const nextEpisodeLookupKey = nextEpisodeStream.lookupKey;
-
-    const prefetched = nextEpisodePrefetchRef.current;
+    const prefetchedPlan = getFreshPrefetchedPlan(nextPlaybackPlan.lookupKey);
     const hasPrefetched =
-      prefetched &&
-      prefetched.lookupKey === nextEpisodeLookupKey &&
-      prefetched.season === nextEpisodeStream.absoluteSeason &&
-      prefetched.episode === nextEpisodeStream.absoluteEpisode;
+      prefetchedPlan &&
+      prefetchedPlan.canonical.season === nextPlaybackPlan.canonical.season &&
+      prefetchedPlan.canonical.episode === nextPlaybackPlan.canonical.episode;
 
     const baseState = {
       title,
-      poster: state?.poster,
+      poster,
       backdrop,
-      logo: state?.logo,
+      logo,
       startTime: 0,
-      absoluteSeason: nextEpisodeStream.absoluteSeason,
-      absoluteEpisode: nextEpisodeStream.absoluteEpisode,
-      streamSeason: nextEpisodeStream.streamSeason,
-      streamEpisode: nextEpisodeStream.streamEpisode,
-      aniskipEpisode: nextEpisodeStream.aniskipEpisode,
-      streamLookupId: nextEpisodeStream.streamLookupId,
-      from: state?.from, // Propagate origin so back nav stays consistent
+      absoluteSeason: nextPlaybackPlan.canonical.season,
+      absoluteEpisode: nextPlaybackPlan.canonical.episode,
+      streamSeason: nextPlaybackPlan.source.season,
+      streamEpisode: nextPlaybackPlan.source.episode,
+      aniskipEpisode: nextPlaybackPlan.source.aniskipEpisode,
+      streamLookupId: nextPlaybackPlan.source.lookupId,
+      from, // Propagate origin so back nav stays consistent
     };
 
     if (hasPrefetched) {
+      await prepareForPlayerNavigation();
       navigate(targetRoute, {
         state: {
           ...baseState,
-          streamUrl: prefetched.url,
-          format: prefetched.format,
+          streamUrl: prefetchedPlan.primaryStream?.url,
+          streamSourceName: prefetchedPlan.primaryStream?.sourceName,
+          streamFamily: prefetchedPlan.primaryStream?.streamFamily,
+          format: prefetchedPlan.primaryStream?.format,
+          preparedBackupStream: prefetchedPlan.backupStream
+            ? {
+                url: prefetchedPlan.backupStream.url,
+                format: prefetchedPlan.backupStream.format,
+                sourceName: prefetchedPlan.backupStream.sourceName,
+                streamFamily: prefetchedPlan.backupStream.streamFamily,
+              }
+            : undefined,
         },
       });
       return;
     }
 
     try {
-      const resolved = await api.resolveBestStream(
-        effectiveResolveMediaType,
-        nextEpisodeStream.streamLookupId,
-        nextEpisodeStream.streamSeason,
-        nextEpisodeStream.streamEpisode,
-        nextEpisodeStream.absoluteEpisode,
-      );
+      const resolved = await resolveRankedBestStream({
+        mediaType: effectiveResolveMediaType,
+        mediaId: id,
+        streamLookupId: nextPlaybackPlan.source.lookupId,
+        streamSeason: nextPlaybackPlan.source.season,
+        streamEpisode: nextPlaybackPlan.source.episode,
+        absoluteEpisode: nextPlaybackPlan.canonical.episode,
+        rankingTarget: {
+          mediaId: id,
+          mediaType: effectiveResolveMediaType,
+          season: nextPlaybackPlan.canonical.season,
+          episode: nextPlaybackPlan.canonical.episode,
+        },
+      });
 
+      await prepareForPlayerNavigation();
       navigate(targetRoute, {
         state: {
           ...baseState,
           streamUrl: resolved.url,
+          streamSourceName: resolved.source_name,
+          streamFamily: resolved.stream_family,
           format: resolved.format,
         },
       });
@@ -1427,35 +1113,38 @@ function InnerPlayer() {
       // Fallback to route transition and let page auto-resolve.
     }
 
+    await prepareForPlayerNavigation();
     navigate(targetRoute, {
       state: {
         ...baseState,
       },
     });
   }, [
-    nextEpisode,
+    getFreshPrefetchedPlan,
     navigate,
-    type,
     effectiveResolveMediaType,
     id,
+    nextPlaybackPlan,
     title,
-    state?.poster,
-    state?.logo,
-    state?.from,
+    poster,
+    logo,
+    from,
     backdrop,
-    streamLookupId,
+    prepareForPlayerNavigation,
   ]);
 
   // Auto-navigate when the up-next countdown expires
   useEffect(() => {
     if (showUpNext && upNextCountdown === 0) {
-      setShowUpNext(false);
+      dismissUpNext();
       void playNext();
     }
-  }, [showUpNext, upNextCountdown, playNext]);
+  }, [dismissUpNext, showUpNext, upNextCountdown, playNext]);
 
   const playEpisode = useCallback(
     async (ep: Episode) => {
+      if (!id) return;
+
       // Instead of auto-playing, open the stream selector
       // We pause current playback just in case, but keep player visible until new selection
       try {
@@ -1465,21 +1154,71 @@ function InnerPlayer() {
       }
       setIsPlaying(false);
       dismissUpNext();
+      const requestId = ++selectorOpenRequestIdRef.current;
+
+      const target = await resolveEpisodeStreamTarget(
+        effectiveResolveMediaType,
+        id,
+        streamLookupId || id,
+        ep,
+      );
+
+      if (requestId !== selectorOpenRequestIdRef.current) {
+        return;
+      }
 
       setSelectedEpisodeForStream(ep);
+      setSelectedEpisodeStreamTarget({
+        streamLookupId: target.streamId,
+        streamSeason: target.season,
+        streamEpisode: target.episode,
+        absoluteSeason: target.absoluteSeason,
+        absoluteEpisode: target.absoluteEpisode,
+        aniskipEpisode: target.aniskipEpisode,
+        lookupKey: buildEpisodeStreamTargetLookupKey(effectiveResolveMediaType, target),
+      });
       setShowStreamSelector(true);
       setShowEpisodes(false);
     },
-    [dismissUpNext],
+    [dismissUpNext, effectiveResolveMediaType, id, streamLookupId],
   );
 
-  const openInlineStreamSelector = useCallback(() => {
-    if (!isSeriesLike || !id) return;
+  const openInlineStreamSelector = useCallback(async () => {
+    if (!isSeriesLike || !id || !sidebarCurrentEpisode) return;
     dismissUpNext();
+    const requestId = ++selectorOpenRequestIdRef.current;
+
+    const target = await resolveEpisodeStreamTarget(
+      effectiveResolveMediaType,
+      id,
+      streamLookupId || id,
+      sidebarCurrentEpisode,
+    );
+
+    if (requestId !== selectorOpenRequestIdRef.current) {
+      return;
+    }
+
     setSelectedEpisodeForStream(sidebarCurrentEpisode);
+    setSelectedEpisodeStreamTarget({
+      streamLookupId: target.streamId,
+      streamSeason: target.season,
+      streamEpisode: target.episode,
+      absoluteSeason: target.absoluteSeason,
+      absoluteEpisode: target.absoluteEpisode,
+      aniskipEpisode: target.aniskipEpisode,
+      lookupKey: buildEpisodeStreamTargetLookupKey(effectiveResolveMediaType, target),
+    });
     setShowStreamSelector(true);
     setShowEpisodes(false);
-  }, [isSeriesLike, id, sidebarCurrentEpisode, dismissUpNext]);
+  }, [
+    dismissUpNext,
+    effectiveResolveMediaType,
+    id,
+    isSeriesLike,
+    sidebarCurrentEpisode,
+    streamLookupId,
+  ]);
 
   const handleVolumeChange = useCallback(
     async (newVol: number) => {
@@ -1525,6 +1264,32 @@ function InnerPlayer() {
     });
   }, []);
 
+  const requestTrackChange = useCallback(
+    (
+      type: 'audio' | 'sub',
+      id: number | 'no',
+      options?: { silent?: boolean; persistPreference?: boolean },
+    ) => setTrackRef.current(type, id, options),
+    [],
+  );
+
+  const { persistSelectedTrackPreference } = usePlayerTrackPreferences({
+    mediaId: id,
+    mediaType: effectiveResolveMediaType,
+    activeStreamUrl,
+    hasPlaybackStarted,
+    isLoading,
+    isResolving,
+    resetKey: `${activeStreamUrl ?? 'stream'}:${id ?? 'id'}:${season ?? 'season'}:${episode ?? 'episode'}`,
+    audioTracks,
+    subTracks,
+    activeAudioTrack,
+    activeSubTrack,
+    subtitlesOff,
+    trackSwitching,
+    setTrack: requestTrackChange,
+  });
+
   const setTrack = useCallback(
     async (
       type: 'audio' | 'sub',
@@ -1549,24 +1314,7 @@ function InnerPlayer() {
 
       const persistSelection = () => {
         if (!persistPreference) return;
-
-        if (type === 'audio') {
-          const selectedAudio = audioTracks.find((track) => track.id === id);
-          const pref = inferTrackPreferredLanguage(selectedAudio ?? { id: -1, type: 'audio' });
-          if (!pref) return;
-          void savePlaybackPreferencesPatch({ preferredAudioLanguage: pref });
-          return;
-        }
-
-        if (id === 'no') {
-          void savePlaybackPreferencesPatch({ preferredSubtitleLanguage: 'off' });
-          return;
-        }
-
-        const selectedSubtitle = subTracks.find((track) => track.id === id);
-        const pref = inferTrackPreferredLanguage(selectedSubtitle ?? { id: -1, type: 'sub' });
-        if (!pref) return;
-        void savePlaybackPreferencesPatch({ preferredSubtitleLanguage: pref });
+        persistSelectedTrackPreference(type, id);
       };
 
       if (alreadySelected) {
@@ -1599,18 +1347,18 @@ function InnerPlayer() {
     [
       activeAudioTrack?.id,
       activeSubTrack?.id,
-      audioTracks,
       confirmTrackSwitch,
-      savePlaybackPreferencesPatch,
+      persistSelectedTrackPreference,
       setTrackSwitchingFlag,
-      subTracks,
       subtitlesOff,
     ],
   );
 
   useEffect(() => {
-    autoAppliedTrackPrefsRef.current = { audio: false, sub: false };
-    autoApplyingTrackPrefsRef.current = { audio: false, sub: false };
+    setTrackRef.current = setTrack;
+  }, [setTrack]);
+
+  useEffect(() => {
     trackSwitchingRef.current = { audio: false, sub: false };
 
     const timer = window.setTimeout(() => {
@@ -1619,93 +1367,6 @@ function InnerPlayer() {
 
     return () => window.clearTimeout(timer);
   }, [activeStreamUrl, id, season, episode]);
-
-  useEffect(() => {
-    const audioPref = normalizeLanguageToken(playbackLanguagePreferences?.preferredAudioLanguage);
-    if (isLoading) return;
-    if (!audioPref) return;
-    if (autoAppliedTrackPrefsRef.current.audio || autoApplyingTrackPrefsRef.current.audio) return;
-    if (trackSwitching.audio || trackSwitching.sub) return;
-    if (audioTracks.length === 0) return;
-
-    const selectedAudio = audioTracks.find((track) => !!track.selected) ?? null;
-    if (trackMatchesPreferredLanguage(selectedAudio, audioPref)) {
-      autoAppliedTrackPrefsRef.current.audio = true;
-      return;
-    }
-
-    const match = findTrackByLanguage(audioTracks, audioPref);
-    if (!match) {
-      autoAppliedTrackPrefsRef.current.audio = true;
-      return;
-    }
-
-    autoApplyingTrackPrefsRef.current.audio = true;
-    void setTrack('audio', match.id, { silent: true }).finally(() => {
-      autoApplyingTrackPrefsRef.current.audio = false;
-      autoAppliedTrackPrefsRef.current.audio = true;
-    });
-  }, [
-    audioTracks,
-    playbackLanguagePreferences?.preferredAudioLanguage,
-    isLoading,
-    setTrack,
-    trackSwitching.audio,
-    trackSwitching.sub,
-  ]);
-
-  useEffect(() => {
-    const subtitlePref = normalizeLanguageToken(
-      playbackLanguagePreferences?.preferredSubtitleLanguage,
-    );
-    if (isLoading) return;
-    if (!subtitlePref) return;
-    if (autoApplyingTrackPrefsRef.current.audio) return;
-    if (autoAppliedTrackPrefsRef.current.sub || autoApplyingTrackPrefsRef.current.sub) return;
-    if (trackSwitching.audio || trackSwitching.sub) return;
-
-    if (subtitlePref === 'off') {
-      const hasSelectedSubtitle = subTracks.some((track) => !!track.selected);
-      if (!hasSelectedSubtitle) {
-        autoAppliedTrackPrefsRef.current.sub = true;
-        return;
-      }
-
-      autoApplyingTrackPrefsRef.current.sub = true;
-      void setTrack('sub', 'no', { silent: true }).finally(() => {
-        autoApplyingTrackPrefsRef.current.sub = false;
-        autoAppliedTrackPrefsRef.current.sub = true;
-      });
-      return;
-    }
-
-    if (subTracks.length === 0) return;
-
-    const selectedSubtitle = subTracks.find((track) => !!track.selected) ?? null;
-    if (trackMatchesPreferredLanguage(selectedSubtitle, subtitlePref)) {
-      autoAppliedTrackPrefsRef.current.sub = true;
-      return;
-    }
-
-    const match = findTrackByLanguage(subTracks, subtitlePref);
-    if (!match) {
-      autoAppliedTrackPrefsRef.current.sub = true;
-      return;
-    }
-
-    autoApplyingTrackPrefsRef.current.sub = true;
-    void setTrack('sub', match.id, { silent: true }).finally(() => {
-      autoApplyingTrackPrefsRef.current.sub = false;
-      autoAppliedTrackPrefsRef.current.sub = true;
-    });
-  }, [
-    isLoading,
-    playbackLanguagePreferences?.preferredSubtitleLanguage,
-    setTrack,
-    subTracks,
-    trackSwitching.audio,
-    trackSwitching.sub,
-  ]);
 
   // -- Hotkeys --
   useEffect(() => {
@@ -1751,10 +1412,6 @@ function InnerPlayer() {
           e.preventDefault();
           toggleMute();
           break;
-        case 'p':
-          e.preventDefault();
-          void togglePiP();
-          break;
         case 'n':
           e.preventDefault();
           if (nextEpisode) void playNext();
@@ -1781,7 +1438,6 @@ function InnerPlayer() {
     toggleMute,
     handleVolumeChange,
     triggerOsd,
-    togglePiP,
     dismissUpNext,
     nextEpisode,
     playNext,
@@ -1828,14 +1484,21 @@ function InnerPlayer() {
 
         setResolveStatus('Selecting best stream...');
         const result = await Promise.race([
-          api.resolveBestStream(
-            effectiveResolveMediaType,
-            lookupId,
-            s,
-            e,
-            abs,
-            shouldBypassResolveCache ? { bypassCache: true } : undefined,
-          ),
+          resolveRankedBestStream({
+            mediaType: effectiveResolveMediaType,
+            mediaId: id,
+            streamLookupId: lookupId,
+            streamSeason: s,
+            streamEpisode: e,
+            absoluteEpisode: abs,
+            bypassCache: shouldBypassResolveCache,
+            rankingTarget: {
+              mediaId: id,
+              mediaType: effectiveResolveMediaType,
+              season: resolvedAbsoluteSeason,
+              episode: resolvedAbsoluteEpisode,
+            },
+          }),
           new Promise<never>((_, reject) =>
             setTimeout(() => {
               timedOut = true;
@@ -1847,6 +1510,8 @@ function InnerPlayer() {
         if (timedOut) return;
         if (isDev) console.warn('Stream resolved.');
         activeStreamFormatRef.current = result.format;
+        activeStreamSourceNameRef.current = result.source_name?.trim() || undefined;
+        activeStreamFamilyRef.current = result.stream_family?.trim() || undefined;
         setActiveStreamUrl(result.url);
         setIsResolving(false);
         setResolveStatus('');
@@ -1868,6 +1533,7 @@ function InnerPlayer() {
     id,
     resolvedStreamSeason,
     resolvedStreamEpisode,
+    resolvedAbsoluteSeason,
     resolvedAbsoluteEpisode,
     isResolving,
     error,
@@ -1876,130 +1542,12 @@ function InnerPlayer() {
     shouldWaitForResolvedLookupId,
     streamLookupId,
     preferredStreamLookupId,
+    activeStreamFormatRef,
+    activeStreamFamilyRef,
+    activeStreamSourceNameRef,
+    setActiveStreamUrl,
     stopLoading,
   ]);
-
-  // Prefetch best stream for next episode in the background.
-  // Wait until playback has genuinely started so we don't overlap initial resolve
-  // retries with prefetch work on stalled starts.
-  useEffect(() => {
-    if (!hasPlaybackStarted) return;
-
-    if (!nextEpisode || !type || !id) {
-      nextEpisodePrefetchRef.current = null;
-      nextEpisodePrefetchLookupKeyRef.current = null;
-      nextEpisodePrefetchInFlightRef.current = false;
-      return;
-    }
-
-    const nextEpisodeStream = buildEpisodeStreamCoordinates(
-      type,
-      streamLookupId || id,
-      nextEpisode,
-    );
-    const currentNextEpisodeLookupKey = nextEpisodeStream.lookupKey;
-
-    const alreadyPrefetched =
-      nextEpisodePrefetchRef.current &&
-      nextEpisodePrefetchRef.current.lookupKey === currentNextEpisodeLookupKey &&
-      nextEpisodePrefetchRef.current.season === nextEpisodeStream.absoluteSeason &&
-      nextEpisodePrefetchRef.current.episode === nextEpisodeStream.absoluteEpisode;
-
-    if (
-      alreadyPrefetched ||
-      (nextEpisodePrefetchInFlightRef.current &&
-        nextEpisodePrefetchLookupKeyRef.current === currentNextEpisodeLookupKey)
-    ) {
-      return;
-    }
-
-    let cancelled = false;
-    nextEpisodePrefetchLookupKeyRef.current = currentNextEpisodeLookupKey;
-    nextEpisodePrefetchInFlightRef.current = true;
-
-    api
-      .resolveBestStream(
-        effectiveResolveMediaType,
-        nextEpisodeStream.streamLookupId,
-        nextEpisodeStream.streamSeason,
-        nextEpisodeStream.streamEpisode,
-        nextEpisodeStream.absoluteEpisode,
-      )
-      .then((result) => {
-        if (cancelled || !result?.url) return;
-        if (nextEpisodePrefetchLookupKeyRef.current !== currentNextEpisodeLookupKey) return;
-        nextEpisodePrefetchRef.current = {
-          lookupKey: currentNextEpisodeLookupKey,
-          season: nextEpisodeStream.absoluteSeason,
-          episode: nextEpisodeStream.absoluteEpisode,
-          url: result.url,
-          format: result.format,
-        };
-      })
-      .catch(() => {
-        if (!cancelled && nextEpisodePrefetchLookupKeyRef.current === currentNextEpisodeLookupKey) {
-          nextEpisodePrefetchRef.current = null;
-        }
-      })
-      .finally(() => {
-        if (!cancelled && nextEpisodePrefetchLookupKeyRef.current === currentNextEpisodeLookupKey) {
-          nextEpisodePrefetchInFlightRef.current = false;
-          nextEpisodePrefetchLookupKeyRef.current = null;
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      if (nextEpisodePrefetchLookupKeyRef.current === currentNextEpisodeLookupKey) {
-        nextEpisodePrefetchInFlightRef.current = false;
-        nextEpisodePrefetchLookupKeyRef.current = null;
-      }
-    };
-  }, [nextEpisode, type, effectiveResolveMediaType, id, streamLookupId, hasPlaybackStarted]);
-
-  // 1. Fetch Watch Progress
-  useEffect(() => {
-    if (typeof startTime === 'number' && startTime > 0) {
-      resumeTimeRef.current = startTime;
-      initialTimeRef.current = startTime;
-      resumeAppliedRef.current = false;
-      resumeOsdShownRef.current = false;
-
-      if (activeStreamUrl && (durationRef.current > 0 || currentTimeRef.current > 0)) {
-        void applyResumeIfReadyRef.current();
-      }
-    }
-  }, [activeStreamUrl, startTime]);
-
-  useEffect(() => {
-    if (!type || !id || id === 'local') return;
-    api
-      .getWatchProgress(id, type, resolvedAbsoluteSeason, resolvedAbsoluteEpisode)
-      .then((progress) => {
-        if (progress?.position && progress.position > 0) {
-          const candidate = progress.position;
-          if (candidate > (resumeTimeRef.current || 0)) {
-            resumeTimeRef.current = candidate;
-            resumeAppliedRef.current = false;
-            resumeOsdShownRef.current = false;
-
-            if (activeStreamUrl && (durationRef.current > 0 || currentTimeRef.current > 0)) {
-              void applyResumeIfReadyRef.current();
-            }
-          }
-          initialTimeRef.current = resumeTimeRef.current;
-        }
-      });
-  }, [activeStreamUrl, type, id, resolvedAbsoluteSeason, resolvedAbsoluteEpisode, isOffline]);
-
-  // Sync fullscreen state with browser API (e.g. user presses Escape)
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
-    };
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
-  }, []);
 
   // 2. Initialize MPV
   useEffect(() => {
@@ -2016,6 +1564,7 @@ function InnerPlayer() {
     }
 
     isDestroyedRef.current = false;
+  mpvInitializedRef.current = false;
 
     // Local cancelled flag prevents stale async continuations (fixes StrictMode double-fire race)
     let cancelled = false;
@@ -2041,16 +1590,13 @@ function InnerPlayer() {
         await new Promise((r) => setTimeout(r, 150));
         if (cancelled) return;
 
-        const initialResumeTime = Math.max(resumeTimeRef.current || 0, initialTimeRef.current || 0);
-        const shouldPauseForResume = initialResumeTime > 5;
-        const shouldStartPaused = shouldPauseForResume;
-        resumePausePendingRef.current = shouldPauseForResume;
+        const shouldStartPaused = prepareForStreamLoad();
 
         const mpvConfig: MpvConfig = {
           initialOptions: {
-            vo: 'gpu',
-            hwdec: 'auto', // Try auto for better performance/compatibility
-            'gpu-context': 'd3d11', // Switch to d3d11 for visibility on Windows
+            vo: 'gpu-next',
+            hwdec: 'auto',
+            'gpu-context': 'd3d11',
             'keep-open': 'yes',
             cache: 'yes',
             volume: volumeRef.current.toString(),
@@ -2075,6 +1621,7 @@ function InnerPlayer() {
           const parsed = parseFloat(savedSpeed);
           if (!isNaN(parsed) && parsed !== 1.0) await setProperty('speed', parsed);
         }
+        mpvInitializedRef.current = true;
 
         unlisten = await observeProperties(OBSERVED_PROPERTIES, (event) => {
           if (cancelled || !mountedRef.current || isDestroyedRef.current) return;
@@ -2083,9 +1630,21 @@ function InnerPlayer() {
           switch (name) {
             case 'time-pos':
               if (typeof data === 'number') {
+                const now = performance.now();
+                const pendingSeekTarget = pendingSeekTargetRef.current;
+                if (pendingSeekTarget !== null) {
+                  const seekSettled =
+                    Math.abs(data - pendingSeekTarget) <= OPTIMISTIC_SEEK_SETTLED_DELTA_SECS;
+
+                  if (!seekSettled && now < pendingSeekDeadlineRef.current) {
+                    break;
+                  }
+
+                  clearOptimisticSeek();
+                }
+
                 const prevTime = currentTimeRef.current;
                 currentTimeRef.current = data;
-                const now = performance.now();
                 if (
                   now - lastTimeUpdateRef.current > TIME_UPDATE_THROTTLE_MS ||
                   Math.abs(prevTime - data) > 2
@@ -2154,6 +1713,7 @@ function InnerPlayer() {
                 if (isHistoryResume && recoverFromStaleSavedStream()) break;
 
                 const duringInitialLoad = isLoadingRef.current;
+                reportStreamFailure(duringInitialLoad ? 'load-failed' : 'disconnected', currentUrl);
                 void recoverFromSlowStartup(currentUrl).then((didRecover) => {
                   if (didRecover || !mountedRef.current || errorRef.current) return;
 
@@ -2186,7 +1746,6 @@ function InnerPlayer() {
         }
 
         if (isDev) console.warn('Loading stream...');
-        resumeAppliedRef.current = false;
         await command('loadfile', [activeStreamUrl, 'replace']);
         loadfileSent = true;
         if (cancelled) return;
@@ -2207,6 +1766,7 @@ function InnerPlayer() {
             forceShowTimeoutRef.current = setTimeout(() => {
               if (cancelled || !mountedRef.current || errorRef.current) return;
               if (durationRef.current > 0 && currentTimeRef.current > 0.1) return;
+              reportStreamFailure('load-failed');
               setError('Stream failed to load. Try another stream.');
               stopLoading();
             }, 5000);
@@ -2216,6 +1776,7 @@ function InnerPlayer() {
         if (cancelled) return; // Don't set error for cancelled inits
         if (recoverFromStaleSavedStream()) return;
         if (isDev) console.error('MPV Init Error:', err);
+        reportStreamFailure('load-failed');
         if (mountedRef.current) {
           setError('Failed to initialize player. Please try a different stream.');
           stopLoading();
@@ -2228,13 +1789,13 @@ function InnerPlayer() {
     return () => {
       cancelled = true;
       isDestroyedRef.current = true;
+      mpvInitializedRef.current = false;
       if (unlisten) unlisten();
       clearUiTimers();
       clearResumeRetryTimer();
       clearRecoveryTimers();
       destroy().catch(() => {});
       restorePlayerSurface();
-      void exitFullscreenIfNeeded();
       saveProgressRef.current?.();
     };
     // Intentionally scoped dependencies: this effect owns MPV init/teardown and should
@@ -2248,45 +1809,15 @@ function InnerPlayer() {
     clearRecoveryTimers,
     clearResumeRetryTimer,
     clearUiTimers,
-    exitFullscreenIfNeeded,
     isDev,
     markPlaybackReady,
     restorePlayerSurface,
+    prepareForStreamLoad,
     stopLoading,
+    clearOptimisticSeek,
     recoverFromStaleSavedStream,
+    isAnime,
   ]);
-
-  // 3. Save Progress Interval
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (isPlaying && currentTimeRef.current > 5) {
-        saveProgress();
-      }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [isPlaying, saveProgress]);
-
-  useEffect(() => {
-    const flushProgress = () => {
-      void saveProgress();
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        flushProgress();
-      }
-    };
-
-    window.addEventListener('beforeunload', flushProgress);
-    window.addEventListener('pagehide', flushProgress);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    return () => {
-      window.removeEventListener('beforeunload', flushProgress);
-      window.removeEventListener('pagehide', flushProgress);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
-  }, [saveProgress]);
 
   const handleMouseMove = () => {
     setShowControls(true);
@@ -2319,28 +1850,18 @@ function InnerPlayer() {
       clearUiTimers();
       clearRecoveryTimers();
       clearResumeRetryTimer();
-      if (leftTapTimerRef.current) clearTimeout(leftTapTimerRef.current);
-      if (rightTapTimerRef.current) clearTimeout(rightTapTimerRef.current);
-      if (centerTapTimerRef.current) clearTimeout(centerTapTimerRef.current);
     };
   }, [clearRecoveryTimers, clearResumeRetryTimer, clearUiTimers]);
 
-  // Restore window when player unmounts (covers navigation paths that bypass navigateBack)
+  // Restore or preserve viewport mode on unmount depending on the navigation path.
   useEffect(() => {
     return () => {
-      if (!isNavigatingAwayRef.current) {
-        void exitPiPAndRestore();
-      }
+      cleanupViewportOnUnmount();
       // Ensure Continue Watching is always fresh after leaving the player,
       // regardless of which navigation path was taken.
       invalidateWatchHistoryOnce();
     };
-  }, [exitPiPAndRestore, invalidateWatchHistoryOnce]);
-
-  // Per-zone double-tap timers:
-  //   left/right zone: double-tap → seek ±10s; single tap → no-op (just shows controls)
-  //   center zone:     double-tap → fullscreen; single tap → toggle play
-  const DBL_TAP_MS = 300;
+  }, [cleanupViewportOnUnmount, invalidateWatchHistoryOnce]);
 
   const handlePlayerClick = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
@@ -2364,75 +1885,18 @@ function InnerPlayer() {
 
       if (isLoading || isResolving || error) return;
 
-      const rect = event.currentTarget.getBoundingClientRect();
-      const relX = (event.clientX - rect.left) / rect.width;
-      const ZONE = 0.25;
-
-      if (relX < ZONE) {
-        // Left zone: double-tap to seek backward
-        if (leftTapTimerRef.current) {
-          clearTimeout(leftTapTimerRef.current);
-          leftTapTimerRef.current = null;
-          triggerOsd({ kind: 'seek', direction: 'backward', seconds: 10 });
-          void seekRelative(-10);
-        } else {
-          leftTapTimerRef.current = setTimeout(() => {
-            leftTapTimerRef.current = null;
-            // single tap on edge zone — show controls but do nothing else
-          }, DBL_TAP_MS);
-        }
-        return;
-      }
-
-      if (relX > 1 - ZONE) {
-        // Right zone: double-tap to seek forward
-        if (rightTapTimerRef.current) {
-          clearTimeout(rightTapTimerRef.current);
-          rightTapTimerRef.current = null;
-          triggerOsd({ kind: 'seek', direction: 'forward', seconds: 10 });
-          void seekRelative(10);
-        } else {
-          rightTapTimerRef.current = setTimeout(() => {
-            rightTapTimerRef.current = null;
-            // single tap on edge zone — show controls but do nothing else
-          }, DBL_TAP_MS);
-        }
-        return;
-      }
-
-      // Center zone: double-tap → fullscreen, single tap → toggle play
-      if (centerTapTimerRef.current) {
-        clearTimeout(centerTapTimerRef.current);
-        centerTapTimerRef.current = null;
-        toggleFullscreen();
-      } else {
-        centerTapTimerRef.current = setTimeout(() => {
-          centerTapTimerRef.current = null;
-          triggerOsd({ kind: isPlayingRef.current ? 'pause' : 'play' });
-          togglePlay();
-        }, 250);
-      }
+      setShowControls(true);
+      triggerOsd({ kind: isPlayingRef.current ? 'pause' : 'play' });
+      void togglePlay();
     },
-    [
-      showEpisodes,
-      isLoading,
-      isResolving,
-      error,
-      toggleFullscreen,
-      togglePlay,
-      triggerOsd,
-      seekRelative,
-    ],
+    [showEpisodes, isLoading, isResolving, error, togglePlay, triggerOsd],
   );
 
   // -- Render Logic --
   // Don't show error overlay in the brief window before auto-resolve starts
   const showErrorOverlay = error && !isResolving && !isLoading;
 
-  const selectorEpisodeStream =
-    selectedEpisodeForStream && type && id
-      ? buildEpisodeStreamCoordinates(type, streamLookupId || id, selectedEpisodeForStream)
-      : null;
+  const selectorEpisodeStream = selectedEpisodeStreamTarget;
 
   const selectorAbsoluteSeason = selectorEpisodeStream?.absoluteSeason ?? resolvedAbsoluteSeason;
   const selectorAbsoluteEpisode = selectorEpisodeStream?.absoluteEpisode ?? resolvedAbsoluteEpisode;
@@ -2445,8 +1909,8 @@ function InnerPlayer() {
     selectorAbsoluteEpisode === resolvedAbsoluteEpisode;
   const selectorStartTime = isSelectorForCurrentEpisode ? currentTimeRef.current : 0;
   const currentSelectorStreamKey =
-    state?.selectedStreamKey && state?.streamUrl && activeStreamUrl === state.streamUrl
-      ? state.selectedStreamKey
+    routeSelectedStreamKey && routeStreamUrl && activeStreamUrl === routeStreamUrl
+      ? routeSelectedStreamKey
       : undefined;
   const selectorEpisodeOverview = details?.episodes?.find(
     (e) => e.season === selectorAbsoluteSeason && e.episode === selectorAbsoluteEpisode,
@@ -2459,14 +1923,14 @@ function InnerPlayer() {
       ref={playerContainerRef}
       className={cn(
         'relative w-full h-screen overflow-hidden bg-transparent text-white group',
-        !isFullscreen && !isPiP && 'pl-[60px]',
+        !isFullscreen && 'pl-[60px]',
       )}
       onMouseMove={handleMouseMove}
       onMouseLeave={() => isPlaying && setShowControls(false)}
       onClick={handlePlayerClick}
       id='mpv-container'
     >
-      {!isFullscreen && !isPiP && (
+      {!isFullscreen && (
         <div
           className='fixed left-0 top-0 z-[70] pointer-events-auto'
           onClick={(e) => e.stopPropagation()}
@@ -2474,49 +1938,6 @@ function InnerPlayer() {
         >
           <Sidebar className='flex' playerMode />
         </div>
-      )}
-
-      {/* Picture-in-Picture drag bar — covers the top strip of the window.
-           Uses imperative startDragging() so it works even though libmpv
-           renders a native surface that swallows OS pointer events before
-           Tauri's data-tauri-drag-region listener fires.
-           The close button stops propagation on its own pointerdown to
-           prevent an accidental drag when the user clicks to exit PiP. */}
-      {isPiP && (
-        <div
-          className='absolute top-0 left-0 right-0 h-8 z-[80] flex items-center justify-between px-2 cursor-grab active:cursor-grabbing select-none'
-          onPointerDown={startWindowDrag}
-          onMouseDown={startWindowDrag}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <span className='text-[9px] font-medium text-white/60 truncate max-w-[calc(100%-32px)] pointer-events-none'>
-            {title}
-          </span>
-          <button
-            type='button'
-            title='Exit Picture-in-Picture (P)'
-            className='p-1 rounded hover:bg-white/20 text-white/60 hover:text-white transition-colors shrink-0 cursor-pointer'
-            onClick={(e) => {
-              e.stopPropagation();
-              void togglePiP();
-            }}
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            <PictureInPicture2 className='w-3.5 h-3.5' />
-          </button>
-        </div>
-      )}
-
-      {/* PiP: invisible full-area drag layer (below controls z-40) so the user
-           can drag the window by clicking anywhere on the video that isn't a
-           control. onClick is stopped so it doesn't bubble to handlePlayerClick. */}
-      {isPiP && (
-        <div
-          className='absolute inset-0 z-[35] cursor-grab active:cursor-grabbing'
-          onPointerDown={startWindowDrag}
-          onMouseDown={startWindowDrag}
-          onClick={(e) => e.stopPropagation()}
-        />
       )}
       {/* Background / Poster (Visible when loading or audio) */}
       <div
@@ -2543,8 +1964,7 @@ function InnerPlayer() {
             <Button
               variant='outline'
               onClick={() => {
-                setSelectedEpisodeForStream(sidebarCurrentEpisode);
-                setShowStreamSelector(true);
+                void openInlineStreamSelector();
               }}
             >
               Choose Stream
@@ -2591,35 +2011,34 @@ function InnerPlayer() {
       {/* Controls Overlay */}
       <div
         className={cn(
-          'absolute inset-0 z-40 flex flex-col pr-6 transition-opacity duration-300 bg-gradient-to-b from-black/80 via-transparent to-black/90',
-          // PiP: justify-end keeps the single bottom-bar child at the bottom
-          isPiP ? 'justify-end pt-8 pb-3 pl-3' : 'justify-between pt-6 pb-6',
-          !isPiP && (isFullscreen ? 'pl-6' : 'pl-[84px]'),
+          'absolute inset-0 z-40 pointer-events-none flex flex-col pr-6 transition-opacity duration-300 bg-gradient-to-b from-black/80 via-transparent to-black/90',
+          'justify-between pt-6 pb-6',
+          isFullscreen ? 'pl-6' : 'pl-[84px]',
           showControls || !isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none',
         )}
       >
-        {/* Top Bar — hidden in PiP (the drag bar replaces it) */}
-        {!isPiP && (
-          <div className='flex items-center justify-between' onClick={(e) => e.stopPropagation()}>
-            <Button
-              variant='ghost'
-              size='icon'
-              onClick={navigateBack}
-              className='text-white hover:bg-white/20'
-            >
-              <ArrowLeft className='w-6 h-6' />
-            </Button>
-            <div className='text-center'>
-              <h1 className='text-lg font-bold line-clamp-1'>{title}</h1>
-              {season && episode && (
-                <p className='text-sm text-gray-300'>
-                  S{season}:E{episode}
-                </p>
-              )}
-            </div>
-            <div className='w-10' /> {/* Spacer */}
+        <div
+          className='pointer-events-auto flex items-center justify-between'
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Button
+            variant='ghost'
+            size='icon'
+            onClick={navigateBack}
+            className='text-white hover:bg-white/20'
+          >
+            <ArrowLeft className='w-6 h-6' />
+          </Button>
+          <div className='text-center'>
+            <h1 className='text-lg font-bold line-clamp-1'>{title}</h1>
+            {season && episode && (
+              <p className='text-sm text-gray-300'>
+                S{season}:E{episode}
+              </p>
+            )}
           </div>
-        )}
+          <div className='w-10' />
+        </div>
 
         {/* Center Play — shown when paused and no OSD is active (osdAction null = fully faded) */}
         <div className='absolute inset-0 flex items-center justify-center pointer-events-none'>
@@ -2639,7 +2058,10 @@ function InnerPlayer() {
         </div>
 
         {/* Bottom Bar */}
-        <div className='space-y-0' onClick={(e) => e.stopPropagation()}>
+        <div
+          className='pointer-events-auto space-y-0'
+          onClick={(e) => e.stopPropagation()}
+        >
           {/* Progress info row — title/episode left · time right */}
           <div className='flex items-center justify-between px-0.5 pb-2'>
             <div className='min-w-0 flex-1'>
@@ -2789,11 +2211,20 @@ function InnerPlayer() {
                     variant='ghost'
                     size='sm'
                     className='text-white font-mono hover:bg-white/20'
+                    onClick={(event) => {
+                      event.stopPropagation();
+                    }}
                   >
                     {playbackSpeed}x
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent side='top' className='w-20 p-1 bg-black/90 border-white/10'>
+                <PopoverContent
+                  side='top'
+                  className='w-20 p-1 bg-black/90 border-white/10'
+                  onClick={(event) => {
+                    event.stopPropagation();
+                  }}
+                >
                   <div className='flex flex-col gap-1'>
                     {SPEED_OPTIONS.map((s) => (
                       <Button
@@ -2833,7 +2264,7 @@ function InnerPlayer() {
               )}
 
               {/* Episodes List Toggle */}
-              {details?.episodes && !isPiP && (
+              {details?.episodes && (
                 <PlayerEpisodesToggleButton
                   open={showEpisodes}
                   onToggle={() => setShowEpisodes((prev) => !prev)}
@@ -2849,7 +2280,7 @@ function InnerPlayer() {
                   title='Choose Stream / Quality'
                   onClick={(e) => {
                     e.stopPropagation();
-                    openInlineStreamSelector();
+                    void openInlineStreamSelector();
                   }}
                 >
                   <ArrowLeftRight className='w-5 h-5' strokeWidth={2.5} />
@@ -2857,256 +2288,33 @@ function InnerPlayer() {
               )}
 
               {/* Playback Settings */}
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button
-                    variant='ghost'
-                    size='icon'
-                    className={cn(
-                      'text-white hover:bg-white/20 relative',
-                      (activeAudioTrack || activeSubTrack) && 'text-primary bg-white/10',
-                    )}
-                    title='Playback Settings'
-                  >
-                    <Settings2 className='w-5 h-5' strokeWidth={2.5} />
-                    {(activeAudioTrack || activeSubTrack) && (
-                      <span className='absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-primary' />
-                    )}
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent
-                  side='top'
-                  align='end'
-                  className='w-[300px] p-2.5 bg-black/90 border-white/10'
-                >
-                  <ScrollArea className='max-h-[50vh] pr-1 [&>[data-radix-scroll-area-viewport]>div]:!block'>
-                    <div className='space-y-3'>
-                      <div>
-                        <h4 className='text-xs font-bold text-gray-400 mb-2 px-1 uppercase tracking-wider'>
-                          Audio
-                        </h4>
-                        {audioTracks.length > 0 ? (
-                          <div className='space-y-1'>
-                            {audioTracks.map((t) => {
-                              const label = audioTrackLabels.get(t.id) || formatTrackLabel(t);
-                              return (
-                                <Button
-                                  key={t.id}
-                                  variant='ghost'
-                                  size='sm'
-                                  className={cn(
-                                    'w-full justify-between text-xs overflow-hidden rounded-md',
-                                    t.selected && 'text-primary bg-white/5',
-                                    trackSwitching.audio && 'opacity-70',
-                                  )}
-                                  title={label}
-                                  disabled={trackSwitching.audio}
-                                  onClick={() =>
-                                    void setTrack('audio', t.id, { persistPreference: true })
-                                  }
-                                >
-                                  <span className='truncate'>{label}</span>
-                                  {trackSwitching.audio && t.selected ? (
-                                    <Loader2 className='h-3.5 w-3.5 shrink-0 animate-spin' />
-                                  ) : t.selected ? (
-                                    <Check className='h-3.5 w-3.5 shrink-0' />
-                                  ) : null}
-                                </Button>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <p className='text-xs text-zinc-500 px-1'>No alternate audio tracks</p>
-                        )}
-                      </div>
-
-                      <div className='h-px bg-white/10' />
-
-                      <div>
-                        <div className='flex items-center justify-between px-1 mb-2'>
-                          <h4 className='text-xs font-bold text-gray-400 uppercase tracking-wider'>
-                            Subtitles
-                          </h4>
-                          <Button
-                            variant='ghost'
-                            size='sm'
-                            className='h-6 px-2 text-[10px] text-gray-300 hover:text-white'
-                            onClick={() => {
-                              void applySubtitleDelay(0);
-                              void applySubtitlePos(100);
-                              void applySubtitleScale(1.0);
-                            }}
-                          >
-                            Reset
-                          </Button>
-                        </div>
-
-                        <div className='space-y-3'>
-                          <div className='space-y-2 px-1'>
-                            <div className='flex items-center justify-between text-[11px] text-gray-400'>
-                              <span>Sync</span>
-                              <span className='font-mono text-gray-300'>
-                                {subtitleDelay.toFixed(1)}s
-                              </span>
-                            </div>
-                            <div className='flex items-center gap-2'>
-                              <Button
-                                variant='ghost'
-                                size='sm'
-                                className='h-7 px-2 text-xs'
-                                onClick={() => void applySubtitleDelay(subtitleDelay - 0.5)}
-                              >
-                                -0.5s
-                              </Button>
-                              <PlayerSlider
-                                value={[subtitleDelay]}
-                                min={-5}
-                                max={5}
-                                step={0.1}
-                                onValueChange={(val) => void applySubtitleDelay(val[0])}
-                                className='flex-1'
-                              />
-                              <Button
-                                variant='ghost'
-                                size='sm'
-                                className='h-7 px-2 text-xs'
-                                onClick={() => void applySubtitleDelay(subtitleDelay + 0.5)}
-                              >
-                                +0.5s
-                              </Button>
-                            </div>
-                          </div>
-
-                          <div className='space-y-2 px-1'>
-                            <div className='flex items-center justify-between text-[11px] text-gray-400'>
-                              <span>Position</span>
-                              <span className='font-mono text-gray-300'>
-                                {Math.round(subtitlePos)}%
-                              </span>
-                            </div>
-                            <div className='flex items-center gap-2'>
-                              <Button
-                                variant='ghost'
-                                size='icon'
-                                className='h-7 w-7'
-                                onClick={() => void applySubtitlePos(subtitlePos - 2)}
-                              >
-                                <ChevronUp className='h-4 w-4' />
-                              </Button>
-                              <PlayerSlider
-                                value={[subtitlePos]}
-                                min={65}
-                                max={100}
-                                step={1}
-                                onValueChange={(val) => void applySubtitlePos(val[0])}
-                                className='flex-1'
-                              />
-                              <Button
-                                variant='ghost'
-                                size='icon'
-                                className='h-7 w-7'
-                                onClick={() => void applySubtitlePos(subtitlePos + 2)}
-                              >
-                                <ChevronDown className='h-4 w-4' />
-                              </Button>
-                            </div>
-                          </div>
-
-                          <div className='space-y-2 px-1'>
-                            <div className='flex items-center justify-between text-[11px] text-gray-400'>
-                              <span>Size</span>
-                              <span className='font-mono text-gray-300'>
-                                ×{subtitleScale.toFixed(2)}
-                              </span>
-                            </div>
-                            <div className='flex items-center gap-2'>
-                              <Button
-                                variant='ghost'
-                                size='sm'
-                                className='h-7 px-2 text-xs'
-                                onClick={() => void applySubtitleScale(subtitleScale - 0.1)}
-                              >
-                                A−
-                              </Button>
-                              <PlayerSlider
-                                value={[subtitleScale]}
-                                min={0.25}
-                                max={3.0}
-                                step={0.05}
-                                onValueChange={(val) => void applySubtitleScale(val[0])}
-                                className='flex-1'
-                              />
-                              <Button
-                                variant='ghost'
-                                size='sm'
-                                className='h-7 px-2 text-xs'
-                                onClick={() => void applySubtitleScale(subtitleScale + 0.1)}
-                              >
-                                A+
-                              </Button>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className='mt-4'>
-                          <p className='text-[10px] font-semibold text-gray-500 uppercase tracking-wider px-1 mb-1'>
-                            Tracks
-                          </p>
-                          <div className='space-y-1'>
-                            <Button
-                              variant='ghost'
-                              size='sm'
-                              className={cn(
-                                'w-full justify-between text-xs overflow-hidden rounded-md',
-                                subtitlesOff ? 'text-primary bg-white/5' : 'text-red-400',
-                                trackSwitching.sub && 'opacity-70',
-                              )}
-                              disabled={trackSwitching.sub}
-                              onClick={() =>
-                                void setTrack('sub', 'no', { persistPreference: true })
-                              }
-                            >
-                              <span className='truncate'>Off</span>
-                              {trackSwitching.sub && subtitlesOff ? (
-                                <Loader2 className='h-3.5 w-3.5 shrink-0 animate-spin' />
-                              ) : subtitlesOff ? (
-                                <Check className='h-3.5 w-3.5 shrink-0' />
-                              ) : null}
-                            </Button>
-                            {subTracks.map((t) => {
-                              const label = subTrackLabels.get(t.id) || formatTrackLabel(t);
-                              return (
-                                <Button
-                                  key={t.id}
-                                  variant='ghost'
-                                  size='sm'
-                                  className={cn(
-                                    'w-full justify-between text-xs overflow-hidden rounded-md',
-                                    t.selected && 'text-primary bg-white/5',
-                                    trackSwitching.sub && 'opacity-70',
-                                  )}
-                                  title={label}
-                                  disabled={trackSwitching.sub}
-                                  onClick={() =>
-                                    void setTrack('sub', t.id, { persistPreference: true })
-                                  }
-                                >
-                                  <span className='truncate'>{label}</span>
-                                  {trackSwitching.sub && t.selected ? (
-                                    <Loader2 className='h-3.5 w-3.5 shrink-0 animate-spin' />
-                                  ) : t.selected ? (
-                                    <Check className='h-3.5 w-3.5 shrink-0' />
-                                  ) : null}
-                                </Button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </ScrollArea>
-                </PopoverContent>
-              </Popover>
+              <PlayerPlaybackSettings
+                audioTracks={audioTracks}
+                subTracks={subTracks}
+                showActiveIndicator={Boolean(activeAudioTrack || activeSubTrack)}
+                subtitlesOff={subtitlesOff}
+                trackSwitching={trackSwitching}
+                subtitleDelay={subtitleDelay}
+                subtitlePos={subtitlePos}
+                subtitleScale={subtitleScale}
+                onResetSubtitleSettings={() => {
+                  void applySubtitleDelay(0);
+                  void applySubtitlePos(100);
+                  void applySubtitleScale(1.0);
+                }}
+                onApplySubtitleDelay={(value) => {
+                  void applySubtitleDelay(value);
+                }}
+                onApplySubtitlePos={(value) => {
+                  void applySubtitlePos(value);
+                }}
+                onApplySubtitleScale={(value) => {
+                  void applySubtitleScale(value);
+                }}
+                onSelectTrack={(trackType, trackId, options) => {
+                  void setTrack(trackType, trackId, options);
+                }}
+              />
 
               {/* Fullscreen */}
               <Button
@@ -3117,18 +2325,6 @@ function InnerPlayer() {
                 disabled={!activeStreamUrl}
               >
                 <Download className='w-6 h-6' strokeWidth={2.5} />
-              </Button>
-              <Button
-                variant='ghost'
-                size='icon'
-                onClick={() => void togglePiP()}
-                className={cn(
-                  'text-white hover:bg-white/20 h-10 w-10',
-                  isPiP && 'bg-white/20 text-sky-300',
-                )}
-                title='Picture-in-Picture (P)'
-              >
-                <PictureInPicture2 className='w-6 h-6' strokeWidth={2.5} />
               </Button>
               <Button
                 variant='ghost'
@@ -3146,163 +2342,39 @@ function InnerPlayer() {
           </div>
         </div>
       </div>
-      {/* ── OSD Flash Indicator ────────────────────────────────────────────────
-           Independent z-50 layer so it appears over the controls overlay regardless
-           of whether controls are currently visible.                              */}
-      {osdAction && !isLoading && !isResolving && (
-        <div
-          className={cn(
-            'absolute inset-0 z-50 flex items-center justify-center pointer-events-none transition-opacity duration-150',
-            osdVisible ? 'opacity-100' : 'opacity-0',
-          )}
-          aria-live='polite'
-          aria-atomic='true'
-        >
-          {/* Play / Pause flash — bare icon, no circle, matches playback bar */}
-          {(osdAction.kind === 'play' || osdAction.kind === 'pause') && (
-            <div
-              className={cn(
-                'transition-all duration-200',
-                osdVisible ? 'scale-100 opacity-100' : 'scale-110 opacity-0',
-              )}
-            >
-              {osdAction.kind === 'play' ? (
-                <Play className='w-10 h-10 fill-white text-white drop-shadow-[0_2px_16px_rgba(0,0,0,0.8)]' />
-              ) : (
-                <Pause className='w-10 h-10 fill-white text-white drop-shadow-[0_2px_16px_rgba(0,0,0,0.8)]' />
-              )}
-            </div>
-          )}
+      <PlayerOsdOverlay
+        action={osdAction}
+        visible={osdVisible}
+        isLoading={isLoading}
+        isResolving={isResolving}
+      />
 
-          {/* Seek indicator */}
-          {osdAction.kind === 'seek' && (
-            <div className='bg-black/50 backdrop-blur-2xl rounded-2xl px-6 py-3.5 border border-white/15 shadow-xl flex items-center gap-3'>
-              {osdAction.direction === 'forward' ? (
-                <FastForward className='w-5 h-5 text-white/90' strokeWidth={2.5} />
-              ) : (
-                <Rewind className='w-5 h-5 text-white/90' strokeWidth={2.5} />
-              )}
-              <span className='text-white font-semibold text-xl tabular-nums tracking-tight'>
-                {osdAction.direction === 'forward' ? '+' : '−'}
-                {osdAction.seconds}s
-              </span>
-            </div>
-          )}
-
-          {/* Volume indicator */}
-          {osdAction.kind === 'volume' && (
-            <div className='bg-black/50 backdrop-blur-2xl rounded-2xl px-5 py-3.5 border border-white/15 shadow-xl flex flex-col items-center gap-2.5 min-w-[130px]'>
-              <div className='flex items-center gap-2'>
-                {osdAction.level === 0 ? (
-                  <VolumeX className='w-5 h-5 text-white/90' strokeWidth={2.5} />
-                ) : osdAction.level < 50 ? (
-                  <Volume1 className='w-5 h-5 text-white/90' strokeWidth={2.5} />
-                ) : (
-                  <Volume2 className='w-5 h-5 text-white/90' strokeWidth={2.5} />
-                )}
-                <span className='text-white font-semibold text-base tabular-nums'>
-                  {Math.round(osdAction.level)}%
-                </span>
-              </div>
-              <div className='w-28 h-[3px] bg-white/20 rounded-full overflow-hidden'>
-                <div
-                  className='h-full bg-white rounded-full'
-                  style={{ width: `${Math.min(100, Math.round(osdAction.level))}%` }}
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Generic text message */}
-          {osdAction.kind === 'message' && (
-            <div className='bg-black/55 backdrop-blur-2xl rounded-2xl px-5 py-3 border border-white/15 shadow-xl'>
-              <span className='text-white font-semibold text-sm tracking-wide'>
-                {osdAction.text}
-              </span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── Skip Segment Button ────────────────────────────────────────────────
-           z-[55]: above controls (z-40) & OSD (z-50) but below episode panel backdrop
-           (z-50 overlap) — renders on top reliably during normal playback.        */}
-      {activeSkipSegment && !isLoading && !isResolving && !error && (
-        <div
-          className='absolute z-[55] pointer-events-auto bottom-[116px] right-6'
-          onClick={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          <Button
-            onClick={() => void seek(activeSkipSegment.end_time)}
-            variant='outline'
-            className={cn(
-              'h-auto px-5 py-2.5 text-sm font-semibold rounded-lg',
-              'bg-zinc-900 hover:bg-zinc-800 text-white',
-              'border border-white/20 hover:border-white/40',
-              'shadow-2xl',
-              'flex items-center gap-2 transition-all duration-150',
-              'animate-in fade-in slide-in-from-right-4 duration-300',
-            )}
-          >
-            <FastForward className='w-4 h-4 flex-shrink-0' strokeWidth={2.5} />
-            <span>{getSkipLabel(activeSkipSegment.type)}</span>
-          </Button>
-        </div>
-      )}
-
-      {/* ── Up-Next / Auto-Next Countdown ────────────────────────────────────────
-           Appears at same position as skip button after episode ends.
-           Countdown fill animates left→right; user can dismiss or click to navigate. */}
-      {showUpNext && nextEpisode && !isLoading && !isResolving && !error && (
-        <div
-          className='absolute z-[55] pointer-events-auto bottom-[116px] right-6'
-          onClick={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          <div className='flex items-center gap-2 animate-in fade-in slide-in-from-right-4 duration-300'>
-            {/* Dismiss button */}
-            <Button
-              size='icon'
-              variant='ghost'
-              onClick={dismissUpNext}
-              className='h-8 w-8 rounded-lg bg-zinc-900/80 border border-white/10 text-zinc-400 hover:text-white hover:bg-zinc-800 shadow-xl'
-              title='Dismiss'
-            >
-              <X className='w-3.5 h-3.5' />
-            </Button>
-
-            {/* Countdown play button with fill animation */}
-            <button
-              onClick={() => {
-                dismissUpNext();
-                void playNext();
-              }}
-              className={cn(
-                'relative h-auto px-5 py-2.5 text-sm font-semibold rounded-lg overflow-hidden',
-                'bg-zinc-900 text-white border border-white/20 hover:border-white/40',
-                'shadow-2xl cursor-pointer',
-                'flex items-center gap-2 transition-colors duration-150',
-              )}
-            >
-              {/* Countdown fill — animates over 10s total; clamp at 100% visually */}
-              <div
-                className='absolute inset-0 bg-white/10 origin-left transition-none pointer-events-none'
-                style={{
-                  transform: `scaleX(${1 - upNextCountdown / 10})`,
-                  transformOrigin: 'left',
-                  transition: upNextCountdown < 10 ? 'transform 1s linear' : 'none',
-                }}
-              />
-              <FastForward className='w-4 h-4 flex-shrink-0 relative z-10' strokeWidth={2.5} />
-              <span className='relative z-10'>
-                Next Episode
-                <span className='ml-1.5 tabular-nums text-zinc-400'>{upNextCountdown}s</span>
-              </span>
-            </button>
-          </div>
-        </div>
-      )}
+      <PlayerActionOverlays
+        hidden={isLoading || isResolving || !!error}
+        skipAction={
+          activeSkipSegment
+            ? {
+                label: getSkipLabel(activeSkipSegment.type),
+                onSkip: () => {
+                  void seek(activeSkipSegment.end_time);
+                },
+              }
+            : null
+        }
+        upNextAction={
+          showUpNext && nextEpisode
+            ? {
+                countdown: upNextCountdown,
+                title: nextEpisodeLabel,
+                onDismiss: dismissUpNext,
+                onPlayNext: () => {
+                  dismissUpNext();
+                  void playNext();
+                },
+              }
+            : null
+        }
+      />
 
       <PlayerEpisodesPanel
         open={showEpisodes}
@@ -3328,9 +2400,12 @@ function InnerPlayer() {
           <StreamSelector
             open={showStreamSelector}
             onClose={() => {
+              selectorOpenRequestIdRef.current += 1;
               setShowStreamSelector(false);
               setSelectedEpisodeForStream(null);
+              setSelectedEpisodeStreamTarget(null);
             }}
+            onBeforePlayerNavigation={prepareForPlayerNavigation}
             type={effectiveResolveMediaType}
             id={id}
             streamId={selectorStreamLookupId}
@@ -3342,10 +2417,10 @@ function InnerPlayer() {
             startTime={selectorStartTime}
             title={details?.title || title}
             overview={selectorEpisodeOverview || details?.description}
-            poster={state?.poster}
+            poster={poster}
             backdrop={backdrop}
-            logo={state?.logo}
-            from={state?.from}
+            logo={logo}
+            from={from}
             currentStreamKey={currentSelectorStreamKey}
             currentStreamUrl={activeStreamUrl}
           />
@@ -3359,7 +2434,7 @@ function InnerPlayer() {
           title={title}
           url={activeStreamUrl || ''}
           fileName={`${title.replace(/[^a-zA-Z0-9]/g, '_')}.mp4`}
-          poster={state?.poster}
+          poster={poster}
           mediaType={effectiveResolveMediaType}
           mediaId={id}
           season={season ? parseInt(season, 10) : undefined}

@@ -211,3 +211,22 @@ export function doesTrackSelectionMatch(
 export function formatTrackLabel(track: Track): string {
   return track.title || track.lang?.toUpperCase() || `Track ${track.id}`;
 }
+
+export function buildTrackLabelMap(tracks: Track[]): Map<number, string> {
+  const counts = new Map<string, number>();
+
+  for (const track of tracks) {
+    const label = formatTrackLabel(track);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+
+  return new Map<number, string>(
+    tracks.map((track) => {
+      const label = formatTrackLabel(track);
+      if ((counts.get(label) ?? 0) > 1) {
+        return [track.id, `${label} #${track.id}`];
+      }
+      return [track.id, label];
+    }),
+  );
+}

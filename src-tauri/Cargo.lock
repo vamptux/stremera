@@ -4076,7 +4076,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "streamy"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "futures-util",
  "regex",
@@ -4089,7 +4089,6 @@ dependencies = [
  "tauri-plugin-http",
  "tauri-plugin-libmpv",
  "tauri-plugin-opener",
- "tauri-plugin-process",
  "tauri-plugin-store",
  "tauri-plugin-updater",
  "tokio",
@@ -4547,16 +4546,6 @@ dependencies = [
  "url",
  "windows",
  "zbus",
-]
-
-[[package]]
-name = "tauri-plugin-process"
-version = "2.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d55511a7bf6cd70c8767b02c97bf8134fa434daf3926cfc1be0a0f94132d165a"
-dependencies = [
- "tauri",
- "tauri-plugin",
 ]
 
 [[package]]

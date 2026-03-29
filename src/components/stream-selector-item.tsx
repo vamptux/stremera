@@ -1,19 +1,8 @@
 import { type TorrentioStream } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import {
-  Cpu,
-  Download,
-  FileVideo,
-  HardDrive,
-  Headphones,
-  Monitor,
-  Sun,
-  Volume2,
-  Zap,
-  type LucideIcon,
-} from 'lucide-react';
-import { getAddonSourceName, isBatchStream } from '@/lib/stream-selector-utils';
+import { Download } from 'lucide-react';
+import { getAddonSourceName, getStreamPresentation } from '@/lib/stream-selector-utils';
 
 export function StreamItem({
   stream,
@@ -30,126 +19,20 @@ export function StreamItem({
   isResolving: boolean;
   disabled: boolean;
 }) {
-  const fullText = `${stream.name ?? ''}\n${stream.title ?? ''}`.toLowerCase();
-  const isBatchLike = isBatchStream(stream);
-
-  // Resolution
-  const is4k = fullText.includes('2160p') || fullText.includes('4k');
-  const is1080p = fullText.includes('1080p');
-  const is720p = fullText.includes('720p');
-  // HDR / DV
-  const isDV = fullText.includes('dolby vision') || fullText.includes('dovi') || /\bdv\b/.test(fullText);
-  const isHDR10p = fullText.includes('hdr10+');
-  const isHDR = fullText.includes('hdr');
-  const hdrLabel = isDV ? 'DV' : isHDR10p ? 'HDR10+' : isHDR ? 'HDR' : null;
-
-  // Audio quality
-  const isAtmos = fullText.includes('atmos') || fullText.includes('truehd');
-  const isDTSHD = fullText.includes('dts-hd') || fullText.includes('dtsx') || fullText.includes('dts-x');
-  const isDTS = !isDTSHD && fullText.includes('dts');
-  const isEAC3 =
-    fullText.includes('eac3') || fullText.includes('dd+') || fullText.includes('ddp') || fullText.includes('dd5.1');
-  const isAAC = !isAtmos && !isDTSHD && !isDTS && !isEAC3 && fullText.includes('aac');
-  const audioLabel = isAtmos ? 'Atmos' : isDTSHD ? 'DTS-HD' : isDTS ? 'DTS' : isEAC3 ? 'DD+' : isAAC ? 'AAC' : null;
-
-  // Codec
-  const isHEVC =
-    fullText.includes('x265') || fullText.includes('hevc') || fullText.includes('h265') || fullText.includes('h.265');
-  const isAV1 = /\bav1\b/.test(fullText);
-  const codecLabel = isAV1 ? 'AV1' : isHEVC ? 'HEVC' : null;
-
-  // Explicit language codes [ENG], [JPN], [ITA] etc.
-  const rawText = `${stream.name ?? ''} ${stream.title ?? ''}`;
-  const langMatches = [...rawText.matchAll(/\[([A-Z]{2,3})\]/g)].map((m) => m[1]);
-
-  // Multi-audio detection — useful for anime/foreign content with dub + original
-  const isDualAudio =
-    langMatches.length === 2 ||
-    /dual[.\-\s]?audio/i.test(rawText) ||
-    (/\beng(?:lish)?\b/i.test(rawText) && /\bjap(?:anese)?\b/i.test(rawText)) ||
-    (/dubbed/i.test(rawText) && /sub/i.test(rawText));
-  const isMultiAudio =
-    langMatches.length > 2 ||
-    /multi[.\-\s]?audio/i.test(rawText) ||
-    /multi[.\-\s]?lang/i.test(rawText) ||
-    /multi[.\-\s]?sub/i.test(rawText);
-  const multiAudioLabel = isMultiAudio ? 'MULTI' : isDualAudio ? 'DUAL' : null;
-
-  // Source / cache status — defined early so badge builder can use it
-  const isHTTP = !!stream.url?.startsWith('http');
-  const isCached = stream.cached === true;
-
-  // Size
-  const sizeMatch = rawText.match(/([\d.]+)\s*(GB|MB|GiB|MiB)/i);
-  let sizeLabel: string | null = null;
-  if (sizeMatch) {
-    sizeLabel = `${sizeMatch[1]}${sizeMatch[2].toUpperCase().replace('GIB', 'GB').replace('MIB', 'MB')}`;
-  } else if (stream.size_bytes) {
-    const gb = stream.size_bytes / 1073741824;
-    sizeLabel =
-      gb >= 1
-        ? `${gb.toFixed(1)}GB`
-        : `${Math.round(stream.size_bytes / 1048576)}MB`;
-  }
-
-  // Source label / icon
-  const sourceLabel = isCached ? 'RD+' : isHTTP ? 'HTTP' : 'Direct';
-  const sourceCls = isCached
-    ? 'text-emerald-400'
-    : isHTTP
-      ? 'text-sky-400'
-      : 'text-zinc-500';
-  const SourceIcon = isCached ? Zap : HardDrive;
-
-  // --- Derive display strings ---
-  // Torrentio format: name = "⚡ [Source]\nRelease.Name.1080p..." , title = "💾 1.2 GB\n👤 42"
-  // Comet/StremThru may: put release info in title line 1 and metadata in name, or vice-versa.
-  // Strategy: use the first newline-split segment of name as the header, and title first line as subtitle.
-  // If name looks like pure metadata (emoji-heavy / very short), swap them.
-  const rawName = stream.name ?? '';
-  const rawTitle = stream.title ?? '';
-  const nameFirstLine = rawName.split('\n')[0]?.trim() || '';
-  const titleFirstLine = rawTitle.split('\n')[0]?.trim() || '';
-
-  // Heuristic: if the name first line is mostly emoji/metadata markers and title has a real filename, swap
-  const EMOJI_META = /[\u26A1\u2B07\uD83D\uDCBE\uD83D\uDC64\uD83C\uDF31\s[\]|]/gu;
-  const isMetaOnly = (s: string) =>
-    s.length < 6 || s.replace(EMOJI_META, '').trim().length === 0;
-  const looksLikeFilename = (s: string) =>
-    /[\w].*\d{3,4}p/i.test(s) || /S\d{1,2}E\d{1,4}/i.test(s) || s.length > 30;
-
-  let sourceName: string;
-  let streamTitle: string;
-  if (isMetaOnly(nameFirstLine) && looksLikeFilename(titleFirstLine)) {
-    // Name is pure metadata, title has the actual release info
-    sourceName = titleFirstLine;
-    streamTitle = rawName.split('\n').slice(1).join(' ').trim() || titleFirstLine;
-  } else {
-    sourceName = nameFirstLine || titleFirstLine || 'Unknown';
-    streamTitle = titleFirstLine || nameFirstLine || 'Unknown';
-  }
-  // Strip leading emoji/bracket metadata from the source name for display
-  sourceName = sourceName.replace(/^[\u26A1\u2B07\uD83D\uDCBE\uD83D\uDC64\uD83C\uDF31\s]+/u, '').trim() || 'Unknown';
+  const {
+    isCached,
+    isHttp,
+    sourceName,
+    streamTitle,
+    sourceLabel,
+    sourceClassName,
+    sourceIcon: SourceIcon,
+    sizeLabel,
+    techBadges,
+  } = getStreamPresentation(stream);
 
   const addonSourceName = getAddonSourceName(stream);
-
-  // Build right-side tech spec badges — only the most useful info
-  type TechBadge = { label: string; cls: string; Icon?: LucideIcon };
-  const techBadges: TechBadge[] = [];
-  techBadges.push(
-    is4k
-      ? { label: '4K', cls: 'bg-purple-500/15 text-purple-300 border-purple-500/25', Icon: Monitor }
-      : is1080p
-        ? { label: '1080p', cls: 'bg-blue-500/15 text-blue-300 border-blue-500/25', Icon: Monitor }
-        : is720p
-          ? { label: '720p', cls: 'bg-sky-500/15 text-sky-300 border-sky-500/20', Icon: Monitor }
-          : { label: 'SD', cls: 'bg-zinc-700/40 text-zinc-400 border-zinc-600/30', Icon: Monitor },
-  );
-  if (hdrLabel) techBadges.push({ label: hdrLabel, cls: isDV ? 'bg-violet-500/15 text-violet-300 border-violet-500/25' : 'bg-amber-500/15 text-amber-300 border-amber-500/25', Icon: Sun });
-  if (multiAudioLabel) techBadges.push({ label: multiAudioLabel, cls: multiAudioLabel === 'MULTI' ? 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/25' : 'bg-pink-500/15 text-pink-300 border-pink-500/25', Icon: Headphones });
-  if (audioLabel) techBadges.push({ label: audioLabel, cls: 'bg-orange-500/15 text-orange-300 border-orange-500/25', Icon: Volume2 });
-  if (codecLabel) techBadges.push({ label: codecLabel, cls: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/25', Icon: Cpu });
-  if (isBatchLike) techBadges.push({ label: 'PACK', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/25', Icon: FileVideo });
+  const recommendationReasons = stream.recommendation_reasons?.filter(Boolean).slice(0, 2) ?? [];
 
   return (
     <div
@@ -176,7 +59,7 @@ export function StreamItem({
           'mt-0.5 w-5 h-5 rounded flex items-center justify-center flex-shrink-0',
           isCached
             ? 'text-emerald-400'
-            : isHTTP
+            : isHttp
               ? 'text-sky-400'
               : 'text-zinc-500',
         )}>
@@ -239,7 +122,7 @@ export function StreamItem({
                 <span className='text-zinc-700/60 text-[9px]'>·</span>
               </>
             )}
-            <span className={cn('text-[9px] font-semibold', sourceCls)}>
+            <span className={cn('text-[9px] font-semibold', sourceClassName)}>
               {sourceLabel}
             </span>
             {sizeLabel && (
@@ -255,6 +138,19 @@ export function StreamItem({
               </>
             )}
           </div>
+
+          {recommendationReasons.length > 0 && (
+            <div className='mt-1.5 flex flex-wrap gap-1'>
+              {recommendationReasons.map((reason) => (
+                <span
+                  key={reason}
+                  className='rounded-[4px] border border-sky-500/15 bg-sky-500/8 px-1.5 py-[2px] text-[9px] font-medium leading-none text-sky-200/80'
+                >
+                  {reason}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

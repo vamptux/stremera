@@ -28,6 +28,12 @@ src-tauri/.cargo
 # AI / IDE agent rule directories (local only)
 .claude/
 .trae/
+.kilocode/
+
+# Local scratch and temp artifacts
+%TEMP%/
+details.txt
+git_diff.txt
 
 # Dev-only tracking files
 implementation_tracker.md

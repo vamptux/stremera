@@ -10,7 +10,6 @@ import {
   X,
   LayoutList,
   Check,
-  VenetianMask,
   Settings2,
   Search,
   ArrowUpAZ,
@@ -34,7 +33,6 @@ import {
   WATCH_STATUS_COLORS,
 } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { usePrivacy } from '@/contexts/privacy-context';
 import { ListsManager } from '@/components/list/lists-manager';
 import { useLocalProfile, LocalProfile } from '@/hooks/use-local-profile';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -74,18 +72,10 @@ function isWatchStatusValue(value: string): value is WatchStatus {
 
 export function Profile() {
   const location = useLocation();
-  const { isIncognito } = usePrivacy();
   const { profile, updateProfile } = useLocalProfile();
 
   const defaultTab = location.pathname === '/library' ? 'library' : 'history';
-  const [activeTab, setActiveTab] = useState<string>(
-    isIncognito && defaultTab !== 'library' ? 'library' : defaultTab,
-  );
-
-  const effectiveTab =
-    isIncognito && (activeTab === 'history' || activeTab === 'continue-watching')
-      ? 'library'
-      : activeTab;
+  const [activeTab, setActiveTab] = useState<string>(defaultTab);
 
   const { data: library, isLoading: libraryLoading } = useQuery({
     queryKey: ['library'],
@@ -95,7 +85,11 @@ export function Profile() {
   const { data: history, isLoading: historyLoading } = useQuery({
     queryKey: ['watch-history'],
     queryFn: api.getWatchHistory,
-    enabled: !isIncognito,
+  });
+
+  const { data: continueWatching, isLoading: continueWatchingLoading } = useQuery({
+    queryKey: ['continue-watching'],
+    queryFn: api.getContinueWatching,
   });
 
   const { data: lists } = useQuery({
@@ -174,7 +168,7 @@ export function Profile() {
     return counts as Record<WatchStatus, number>;
   }, [library, allWatchStatuses]);
 
-  const totalWatched = isIncognito ? 0 : (history?.length ?? 0);
+  const totalWatched = history?.length ?? 0;
   const libraryCount = library?.length ?? 0;
   const listsCount = lists?.length ?? 0;
 
@@ -186,33 +180,10 @@ export function Profile() {
     return history.filter((item) => item.title.toLowerCase().includes(q));
   }, [history, historySearch]);
 
-  const continueWatchingItems = useMemo(() => {
-    if (!history) return [];
-    const inProgress = history.filter((item) => {
-      if (item.duration <= 0) return true;
-      return item.position / item.duration < 0.95;
-    });
-    const seriesLatest = new Map<string, (typeof inProgress)[number]>();
-    const nonSeriesItems: typeof inProgress = [];
-    for (const item of inProgress) {
-      if (item.type_ !== 'series') {
-        nonSeriesItems.push(item);
-        continue;
-      }
-
-      const existing = seriesLatest.get(item.id);
-      if (!existing || item.last_watched > existing.last_watched) {
-        seriesLatest.set(item.id, item);
-      }
-    }
-
-    return [...nonSeriesItems, ...Array.from(seriesLatest.values())].sort(
-      (a, b) => b.last_watched - a.last_watched,
-    );
-  }, [history]);
+  const continueWatchingItems = useMemo(() => continueWatching ?? [], [continueWatching]);
 
   const initial = profile.username.charAt(0).toUpperCase();
-  const accentColor = isIncognito ? '#ffffff' : profile.accentColor;
+  const accentColor = profile.accentColor;
 
   return (
     <div className='relative min-h-screen'>
@@ -240,82 +211,63 @@ export function Profile() {
             <div className='flex flex-col sm:flex-row gap-6 items-start sm:items-center justify-between'>
               {/* Avatar + Identity */}
               <div className='flex items-center gap-5'>
-                <div className='relative group flex-shrink-0'>
-                  <div
-                    className='absolute -inset-1 rounded-full opacity-0 group-hover:opacity-60 transition-opacity duration-300 blur-md'
-                    style={{ background: `radial-gradient(circle, ${accentColor}60, transparent)` }}
-                  />
-                  <Avatar className='h-20 w-20 rounded-full border-2 border-white/10 ring-1 ring-white/10 shadow-xl relative transition-transform duration-300 group-hover:scale-105'>
+                <div className='relative flex-shrink-0'>
+                  <Avatar className='h-20 w-20 rounded-full border-2 border-white/10 ring-1 ring-white/10 shadow-xl relative'>
                     <AvatarFallback
                       className='text-2xl font-black transition-colors duration-300'
-                      style={
-                        isIncognito
-                          ? { backgroundColor: 'rgba(39,39,42,0.6)', color: '#71717a' }
-                          : { backgroundColor: `${accentColor}22`, color: accentColor }
-                      }
+                      style={{ backgroundColor: `${accentColor}22`, color: accentColor }}
                     >
-                      {isIncognito ? <VenetianMask className='w-7 h-7' /> : initial}
+                      {initial}
                     </AvatarFallback>
                   </Avatar>
                 </div>
 
                 <div className='space-y-1 min-w-0'>
-                  {isIncognito ? (
-                    <div className='flex items-center gap-3 flex-wrap'>
-                      <h1 className='text-3xl font-black tracking-tight text-zinc-500 select-none'>
-                        Incognito
-                      </h1>
-                      <ProfileSettingsPopover profile={profile} onUpdate={updateProfile} />
-                    </div>
-                  ) : (
-                    <div className='flex items-center gap-3 flex-wrap'>
-                      <h1 className='text-3xl font-black tracking-tight text-white truncate'>
-                        {profile.username}
-                      </h1>
-                      <ProfileSettingsPopover profile={profile} onUpdate={updateProfile} />
-                    </div>
-                  )}
-                {!isIncognito && profile.bio && (
+                  <div className='flex items-center gap-3 flex-wrap'>
+                    <h1 className='text-3xl font-black tracking-tight text-white truncate'>
+                      {profile.username}
+                    </h1>
+                    <ProfileSettingsPopover profile={profile} onUpdate={updateProfile} />
+                  </div>
+                {profile.bio && (
                   <p className='text-sm text-zinc-500 max-w-[32ch] leading-relaxed'>
                     {profile.bio}
                   </p>
                 )}
-                {!isIncognito && !profile.bio && (
+                {!profile.bio && (
                   <p className='text-xs text-zinc-700 italic'>No tagline set</p>
                 )}
                 </div>
               </div>
-            </div>
 
-            {/* Stats row */}
-            <div className='flex items-center gap-1 flex-wrap rounded-xl bg-black/30 border border-white/[0.05] px-3 py-2'>
-              <StatChip value={libraryCount} label='Library' accentColor={accentColor} />
-              <StatDivider />
-              <StatChip value={listsCount} label='Lists' />
-              <StatDivider />
-              <StatChip value={totalWatched} label='Watched' />
-              {(['watching', 'watched', 'plan_to_watch', 'dropped'] as WatchStatus[]).map((s) => {
-                const count = statusCounts[s] ?? 0;
-                if (count === 0) return null;
-                const colors = WATCH_STATUS_COLORS[s];
-                return (
-                  <span key={s} className='flex items-center gap-1'>
-                    <StatDivider />
-                    <StatusChip count={count} colors={colors} label={WATCH_STATUS_LABELS[s]} />
-                  </span>
-                );
-              })}
+              {/* Stats — right side */}
+              <div className='flex items-center gap-1 flex-wrap rounded-xl bg-black/30 border border-white/[0.05] px-3 py-2 flex-shrink-0'>
+                <StatChip value={libraryCount} label='Library' accentColor={accentColor} />
+                <StatDivider />
+                <StatChip value={listsCount} label='Lists' />
+                <StatDivider />
+                <StatChip value={totalWatched} label='Watched' />
+                {(['watching', 'watched', 'plan_to_watch', 'dropped'] as WatchStatus[]).map((s) => {
+                  const count = statusCounts[s] ?? 0;
+                  if (count === 0) return null;
+                  const colors = WATCH_STATUS_COLORS[s];
+                  return (
+                    <span key={s} className='flex items-center gap-1'>
+                      <StatDivider />
+                      <StatusChip count={count} colors={colors} label={WATCH_STATUS_LABELS[s]} />
+                    </span>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
 
         {/* Tabs */}
-        <Tabs value={effectiveTab} onValueChange={setActiveTab} className='space-y-6'>
+        <Tabs value={activeTab} onValueChange={setActiveTab} className='space-y-6'>
           <div className='flex items-center gap-3 flex-wrap'>
             <TabsList className='bg-zinc-900/60 border border-white/5 p-1 rounded-xl h-auto inline-flex gap-0.5'>
               {['library', 'lists', 'history', 'continue-watching'].map((tab) => {
-                if (isIncognito && (tab === 'history' || tab === 'continue-watching')) return null;
-
                 const icons: Record<string, React.ReactNode> = {
                   library: <Library className='w-3 h-3' />,
                   lists: <LayoutList className='w-3 h-3' />,
@@ -342,7 +294,7 @@ export function Profile() {
               })}
             </TabsList>
 
-            {effectiveTab === 'library' && (
+            {activeTab === 'library' && (
               <div className='flex items-center gap-2 flex-1 min-w-0 flex-wrap'>
                 {/* Type filter */}
                 <div className='flex items-center gap-0.5 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06] flex-shrink-0'>
@@ -538,111 +490,111 @@ export function Profile() {
           </TabsContent>
 
           {/* History */}
-          {!isIncognito && (
-            <TabsContent
-              value='history'
-              className='space-y-4 animate-in fade-in slide-in-from-bottom-1 duration-200'
-            >
-              {history && history.length > 0 && (
-                <div className='flex items-center gap-2'>
-                  <div className='relative flex-1'>
-                    <Search className='absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600 pointer-events-none' />
-                    <Input
-                      placeholder='Search history…'
-                      value={historySearch}
-                      onChange={(e) => setHistorySearch(e.target.value)}
-                      className='pl-8 pr-8 h-9 text-sm bg-white/[0.03] border-white/[0.07] text-white placeholder:text-zinc-600 focus-visible:ring-white/10 rounded-xl'
-                    />
-                    {historySearch && (
-                      <button
-                        type='button'
-                        onClick={() => setHistorySearch('')}
-                        className='absolute right-3 top-1/2 -translate-y-1/2 text-zinc-600 hover:text-white transition-colors'
-                      >
-                        <X className='w-3.5 h-3.5' />
-                      </button>
-                    )}
-                  </div>
-                  <ViewToggle viewMode={viewMode} onChange={updateViewMode} />
-                </div>
-              )}
-              {historyLoading ? (
-                <MediaGrid>
-                  {Array.from({ length: 12 }).map((_, i) => (
-                    <MediaCardSkeleton key={i} />
-                  ))}
-                </MediaGrid>
-              ) : filteredHistory.length > 0 ? (
-                viewMode === 'grid' ? (
-                  <MediaGrid>
-                    {filteredHistory.map((item) => (
-                      <HistoryItem key={`${item.id}-${item.season}-${item.episode}`} item={item} />
-                    ))}
-                  </MediaGrid>
-                ) : (
-                  <HistoryListView items={filteredHistory} />
-                )
-              ) : historySearch ? (
-                <EmptyState
-                  icon={<Search className='w-6 h-6 text-zinc-600' />}
-                  title='No results'
-                  subtitle={`Nothing in your history matches "${historySearch}".`}
-                  action={
+          <TabsContent
+            value='history'
+            className='space-y-4 animate-in fade-in slide-in-from-bottom-1 duration-200'
+          >
+            {history && history.length > 0 && (
+              <div className='flex items-center gap-2'>
+                <div className='relative flex-1'>
+                  <Search className='absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600 pointer-events-none' />
+                  <Input
+                    placeholder='Search history…'
+                    value={historySearch}
+                    onChange={(e) => setHistorySearch(e.target.value)}
+                    className='pl-8 pr-8 h-9 text-sm bg-white/[0.03] border-white/[0.07] text-white placeholder:text-zinc-600 focus-visible:ring-white/10 rounded-xl'
+                  />
+                  {historySearch && (
                     <button
                       type='button'
-                      className='text-xs text-zinc-500 hover:text-zinc-300 transition-colors'
                       onClick={() => setHistorySearch('')}
+                      className='absolute right-3 top-1/2 -translate-y-1/2 text-zinc-600 hover:text-white transition-colors'
                     >
-                      Clear search →
+                      <X className='w-3.5 h-3.5' />
                     </button>
-                  }
-                />
-              ) : (
-                <EmptyState
-                  icon={<History className='w-6 h-6 text-zinc-600' />}
-                  title='No watch history yet'
-                  subtitle='Start watching to see it here.'
-                />
-              )}
-            </TabsContent>
-          )}
-
-          {/* Continue Watching */}
-          {!isIncognito && (
-            <TabsContent
-              value='continue-watching'
-              className='space-y-4 animate-in fade-in slide-in-from-bottom-1 duration-200'
-            >
-              {continueWatchingItems.length > 0 && !historyLoading && (
-                <div className='flex items-center justify-end'>
-                  <ViewToggle viewMode={viewMode} onChange={updateViewMode} />
+                  )}
                 </div>
-              )}
-              {historyLoading ? (
+                <ViewToggle viewMode={viewMode} onChange={updateViewMode} />
+              </div>
+            )}
+            {historyLoading ? (
+              <MediaGrid>
+                {Array.from({ length: 12 }).map((_, i) => (
+                  <MediaCardSkeleton key={i} />
+                ))}
+              </MediaGrid>
+            ) : filteredHistory.length > 0 ? (
+              viewMode === 'grid' ? (
                 <MediaGrid>
-                  {Array.from({ length: 6 }).map((_, i) => (
-                    <MediaCardSkeleton key={i} />
+                  {filteredHistory.map((item) => (
+                    <HistoryItem key={`${item.id}-${item.season}-${item.episode}`} item={item} />
                   ))}
                 </MediaGrid>
-              ) : continueWatchingItems.length > 0 ? (
-                viewMode === 'grid' ? (
-                  <MediaGrid>
-                    {continueWatchingItems.map((item) => (
-                      <HistoryItem key={`${item.id}-${item.season}-${item.episode}`} item={item} />
-                    ))}
-                  </MediaGrid>
-                ) : (
-                  <HistoryListView items={continueWatchingItems} />
-                )
               ) : (
-                <EmptyState
-                  icon={<Play className='w-6 h-6 text-zinc-600 ml-0.5' />}
-                  title='Nothing to continue'
-                  subtitle='You have no unfinished items.'
-                />
-              )}
-            </TabsContent>
-          )}
+                <HistoryListView items={filteredHistory} />
+              )
+            ) : historySearch ? (
+              <EmptyState
+                icon={<Search className='w-6 h-6 text-zinc-600' />}
+                title='No results'
+                subtitle={`Nothing in your history matches "${historySearch}".`}
+                action={
+                  <button
+                    type='button'
+                    className='text-xs text-zinc-500 hover:text-zinc-300 transition-colors'
+                    onClick={() => setHistorySearch('')}
+                  >
+                    Clear search →
+                  </button>
+                }
+              />
+            ) : (
+              <EmptyState
+                icon={<History className='w-6 h-6 text-zinc-600' />}
+                title='No watch history yet'
+                subtitle='Start watching to see it here.'
+              />
+            )}
+          </TabsContent>
+
+          {/* Continue Watching */}
+          <TabsContent
+            value='continue-watching'
+            className='space-y-4 animate-in fade-in slide-in-from-bottom-1 duration-200'
+          >
+            {continueWatchingItems.length > 0 && !continueWatchingLoading && (
+              <div className='flex items-center justify-end'>
+                <ViewToggle viewMode={viewMode} onChange={updateViewMode} />
+              </div>
+            )}
+            {continueWatchingLoading ? (
+              <MediaGrid>
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <MediaCardSkeleton key={i} />
+                ))}
+              </MediaGrid>
+            ) : continueWatchingItems.length > 0 ? (
+              viewMode === 'grid' ? (
+                <MediaGrid>
+                  {continueWatchingItems.map((item) => (
+                    <HistoryItem
+                      key={`${item.id}-${item.season}-${item.episode}`}
+                      item={item}
+                      showLibraryContext
+                    />
+                  ))}
+                </MediaGrid>
+              ) : (
+                <HistoryListView items={continueWatchingItems} />
+              )
+            ) : (
+              <EmptyState
+                icon={<Play className='w-6 h-6 text-zinc-600 ml-0.5' />}
+                title='Nothing to continue'
+                subtitle='You have no unfinished items.'
+              />
+            )}
+          </TabsContent>
         </Tabs>
       </div>
     </div>
@@ -807,6 +759,7 @@ function HistoryListRow({ item }: { item: WatchProgress }) {
       await api.removeFromWatchHistory(item.id, item.type_, item.season, item.episode);
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['continue-watching'] });
       queryClient.invalidateQueries({ queryKey: ['watch-history'] });
       toast.success('Removed from history');
     },
@@ -1165,7 +1118,13 @@ function ProfileSettingsPopover({
 
 // History item
 
-function HistoryItem({ item }: { item: WatchProgress }) {
+function HistoryItem({
+  item,
+  showLibraryContext = false,
+}: {
+  item: WatchProgress;
+  showLibraryContext?: boolean;
+}) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const location = useLocation();
@@ -1188,6 +1147,7 @@ function HistoryItem({ item }: { item: WatchProgress }) {
       await api.removeFromWatchHistory(item.id, item.type_, item.season, item.episode);
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['continue-watching'] });
       queryClient.invalidateQueries({ queryKey: ['watch-history'] });
       toast.success('Removed from history');
     },
@@ -1223,6 +1183,7 @@ function HistoryItem({ item }: { item: WatchProgress }) {
         item={mediaItem}
         progress={progress}
         onPlay={handlePlayHistory}
+        showLibraryContext={showLibraryContext}
         subtitle={
           typeof item.season === 'number' && typeof item.episode === 'number'
             ? `S${item.season}:E${item.episode}`

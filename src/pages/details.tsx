@@ -1,23 +1,24 @@
 import { useParams, useLocation, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Play, Plus, Youtube, Check, Loader2, Star, ArrowLeft, ChevronDown, Search, X } from 'lucide-react';
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { Play, Plus, Youtube, Check, Loader2, Star, ArrowLeft, Search, X } from 'lucide-react';
+import { useState, useMemo, useEffect, useEffectEvent, useCallback, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { api, Episode, MediaItem, WatchProgress } from '@/lib/api';
+import { DetailsAnimeMetadataSection } from '@/components/details-anime-metadata-section';
+import { SeasonSwitcher } from '@/components/details-season-switcher';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { StreamSelector } from '@/components/stream-selector';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { MediaCard } from '@/components/media-card';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
-import { usePrivacy } from '@/contexts/privacy-context';
 import { useSpoilerProtection } from '@/hooks/use-spoiler-protection';
 import { buildHistoryPlaybackPlan } from '@/lib/history-playback';
+import { resolveEpisodeStreamTarget } from '@/lib/episode-stream-target';
 
 const EPISODES_PAGE_SIZE = 50;
 
@@ -53,6 +54,39 @@ function animeRelationScore(baseTokens: string[], relationTitle: string): number
     if (relationTokens.has(token)) shared += 1;
   }
   return shared / baseTokens.length;
+}
+
+function formatRelationRoleLabel(role?: string | null): string | null {
+  if (!role) return null;
+  const trimmed = role.trim();
+  if (!trimmed) return null;
+
+  return trimmed
+    .split('_')
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1).toLowerCase())
+    .join(' ');
+}
+
+function relationRolePriority(role?: string | null): number {
+  switch ((role ?? '').trim().toLowerCase()) {
+    case 'sequel':
+    case 'prequel':
+      return 5;
+    case 'side_story':
+    case 'spin_off':
+    case 'spinoff':
+      return 4;
+    case 'alternative_setting':
+    case 'alternative_version':
+      return 3;
+    case 'parent_story':
+    case 'full_story':
+    case 'summary':
+      return 2;
+    default:
+      return 1;
+  }
 }
 
 // Maps lowercase Roman numeral suffixes (II–X) to season numbers.
@@ -150,6 +184,30 @@ function extractSeasonInfoFromTitle(title: string): { season: number; part?: num
   return null;
 }
 
+function formatSeasonInfoLabel(seasonInfo: { season: number; part?: number }): string {
+  return `Season ${seasonInfo.season}${seasonInfo.part ? ` Part ${seasonInfo.part}` : ''}`;
+}
+
+function formatRelatedSeasonCandidateLabel(candidate: Pick<RelatedSeasonCandidate, 'seasonNumber' | 'part' | 'year'>): string {
+  const seasonLabel = formatSeasonInfoLabel({
+    season: candidate.seasonNumber,
+    part: candidate.part,
+  });
+
+  return candidate.year ? `${seasonLabel} • ${candidate.year}` : seasonLabel;
+}
+
+function buildRelationContextLabel(relation: MediaItem): string | null {
+  const seasonInfo = extractSeasonInfoFromTitle(relation.title || '');
+  const year = parseYearFromText(relation.year);
+
+  if (!seasonInfo && year === null) return null;
+  if (!seasonInfo) return `${year}`;
+
+  const seasonLabel = formatSeasonInfoLabel(seasonInfo);
+  return year !== null ? `${seasonLabel} • ${year}` : seasonLabel;
+}
+
 interface RelatedSeasonCandidate {
   id: string;
   title: string;
@@ -161,6 +219,8 @@ interface RelatedSeasonCandidate {
   /** Unique key: `"${seasonNumber}-${part ?? 0}"` */
   itemKey: string;
 }
+
+type DetailsTab = 'episodes' | 'relations' | 'anime-metadata';
 
 function isLikelyStandaloneAnimeEntry(title: string): boolean {
   const normalized = title.toLowerCase();
@@ -179,9 +239,14 @@ export function Details() {
   }, [type, id]);
 
   return (
-    <div className='min-h-screen bg-background selection:bg-white/20'>
+    <motion.div
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.18, ease: [0.25, 0.46, 0.45, 0.94] }}
+      className='min-h-screen bg-background selection:bg-white/20'
+    >
       <DetailsContent key={`${type}-${id}`} />
-    </div>
+    </motion.div>
   );
 }
 
@@ -203,7 +268,6 @@ function DetailsContent() {
   const location = useLocation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { isIncognito } = usePrivacy();
   const { spoilerProtection } = useSpoilerProtection();
 
   const {
@@ -221,19 +285,27 @@ function DetailsContent() {
   });
 
   // Watch history (used for resume + episode progress)
-  const { data: watchHistory } = useQuery({
+  const { data: watchHistory, isLoading: isLoadingWatchHistory } = useQuery({
     queryKey: ['watch-history'],
     queryFn: api.getWatchHistory,
-    enabled: !isIncognito,
     staleTime: 1000 * 60 * 3,
   });
 
-  const { data: watchHistoryForItem, isLoading: isLoadingWatchHistoryForItem } = useQuery({
-    queryKey: ['watch-history-for-id', item?.id],
-    queryFn: () => (item?.id ? api.getWatchHistoryForId(item.id) : Promise.resolve([])),
-    enabled: !isIncognito && item?.type === 'series' && !!item?.id,
+  const { data: continueWatching } = useQuery({
+    queryKey: ['continue-watching'],
+    queryFn: api.getContinueWatching,
+    enabled: item?.type === 'series' && !!item?.id,
     staleTime: 1000 * 60 * 3,
   });
+
+  const itemId = item?.id;
+  const watchHistoryForItem = useMemo(() => {
+    if (!itemId || !watchHistory?.length) return [];
+    return watchHistory.filter((entry) => entry.id === itemId);
+  }, [watchHistory, itemId]);
+
+  const isLoadingWatchHistoryForItem =
+    item?.type === 'series' && isLoadingWatchHistory;
 
   const episodeProgressMap = useMemo(() => {
     const map = new Map<string, WatchProgress>();
@@ -337,6 +409,20 @@ function DetailsContent() {
     return seasons.includes(1) ? 1 : seasons[0];
   }, [selectedSeasonHint, seasons]);
 
+  const syncPagedSeasonSelection = useEffectEvent((nextSeason: number) => {
+    setUserSelectedSeason((prev) => (prev === nextSeason ? prev : nextSeason));
+  });
+
+  const syncBaseSeasonsSnapshot = useEffectEvent((nextSeasons: number[]) => {
+    setBaseSeasonsSnapshot((prev) => {
+      if (prev.length === nextSeasons.length && prev.every((seasonNumber, index) => seasonNumber === nextSeasons[index])) {
+        return prev;
+      }
+
+      return nextSeasons;
+    });
+  });
+
   useEffect(() => {
     if (!shouldUsePagedEpisodes) return;
     if (seasons.length === 0) return;
@@ -344,11 +430,7 @@ function DetailsContent() {
     if (selectedSeasonHint !== null && seasons.includes(selectedSeasonHint)) return;
 
     const nextSeason = seasons.includes(1) ? 1 : seasons[0];
-    const timer = window.setTimeout(() => {
-      setUserSelectedSeason(nextSeason);
-    }, 0);
-
-    return () => window.clearTimeout(timer);
+    syncPagedSeasonSelection(nextSeason);
   }, [shouldUsePagedEpisodes, selectedSeasonHint, seasons]);
 
   // Keep a snapshot of the base item's seasons so the dropdown can show them
@@ -356,13 +438,8 @@ function DetailsContent() {
   useEffect(() => {
     if (scopedInlineTarget) return;
     if (seasons.length === 0) return;
-    const timer = window.setTimeout(() => {
-      setBaseSeasonsSnapshot((prev) => {
-        if (prev.length === seasons.length && prev.every((s, i) => s === seasons[i])) return prev;
-        return seasons;
-      });
-    }, 0);
-    return () => window.clearTimeout(timer);
+
+    syncBaseSeasonsSnapshot(seasons);
   }, [seasons, scopedInlineTarget]);
 
   const seasonYearLabelMap = useMemo(() => {
@@ -402,7 +479,7 @@ function DetailsContent() {
   }, [pagedEpisodesData?.seasonYears, pagedEpisodesData?.episodes, shouldUsePagedEpisodes, item?.episodes]);
 
   const isAnimeLike = !!(isKitsuRoute || effectiveRouteType === 'anime' || item?.id?.startsWith('kitsu:'));
-  const [activeTab, setActiveTab] = useState<'episodes' | 'relations'>('episodes');
+  const [activeTab, setActiveTab] = useState<DetailsTab>('episodes');
 
   const formatSeasonLabel = useCallback(
     (seasonNumber: number) => {
@@ -411,6 +488,40 @@ function DetailsContent() {
       return `Season ${seasonNumber} • ${yearLabel}`;
     },
     [seasonYearLabelMap],
+  );
+
+  const prefetchInlineDetailsTarget = useCallback(
+    (nextType: string, nextId: string, preferredSeason?: number | null) => {
+      const normalizedType = nextType.trim();
+      const normalizedId = nextId.trim();
+      if (!normalizedType || !normalizedId) return;
+
+      const targetType = normalizedId.startsWith('kitsu:') ? 'anime' : normalizedType;
+      const shouldIncludeEpisodes = !(normalizedId.startsWith('kitsu:') && targetType === 'anime');
+
+      void queryClient.prefetchQuery({
+        queryKey: ['details', targetType, normalizedId],
+        queryFn: () =>
+          api.getMediaDetails(targetType, normalizedId, {
+            includeEpisodes: shouldIncludeEpisodes,
+          }),
+        staleTime: 1000 * 60 * 30,
+      });
+
+      if (
+        !shouldIncludeEpisodes &&
+        typeof preferredSeason === 'number' &&
+        Number.isFinite(preferredSeason) &&
+        preferredSeason > 0
+      ) {
+        void queryClient.prefetchQuery({
+          queryKey: ['media-episodes', targetType, normalizedId, preferredSeason, 0, EPISODES_PAGE_SIZE],
+          queryFn: () => api.getMediaEpisodes(targetType, normalizedId, preferredSeason, 0, EPISODES_PAGE_SIZE),
+          staleTime: 1000 * 60 * 5,
+        });
+      }
+    },
+    [queryClient],
   );
 
   const handleInlineDetailsSwitch = useCallback(
@@ -473,6 +584,7 @@ function DetailsContent() {
       return {
         relation,
         score,
+        rolePriority: relationRolePriority(relation.relationRole),
         year: parseYearFromText(relation.year),
       };
     });
@@ -484,6 +596,7 @@ function DetailsContent() {
 
     effective.sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
+      if (b.rolePriority !== a.rolePriority) return b.rolePriority - a.rolePriority;
       if (a.year !== null && b.year !== null && a.year !== b.year) return a.year - b.year;
       if (a.year === null && b.year !== null) return 1;
       if (a.year !== null && b.year === null) return -1;
@@ -544,12 +657,50 @@ function DetailsContent() {
     });
   }, [item, isAnimeLike, intelligentRelations, seasons]);
 
+  const localSeasonEntries = useMemo(
+    () =>
+      (scopedInlineTarget ? baseSeasonsSnapshot : seasons).map((seasonNumber) => ({
+        number: seasonNumber,
+        label: formatSeasonLabel(seasonNumber),
+      })),
+    [baseSeasonsSnapshot, formatSeasonLabel, scopedInlineTarget, seasons],
+  );
+
+  const relatedSeasonEntries = useMemo(
+    () =>
+      relatedSeasonCandidates.map((candidate) => ({
+        itemKey: candidate.itemKey,
+        label: formatRelatedSeasonCandidateLabel(candidate),
+        routeType: candidate.routeType,
+        id: candidate.id,
+        seasonNumber: candidate.seasonNumber,
+      })),
+    [relatedSeasonCandidates],
+  );
+
+  useEffect(() => {
+    if (relatedSeasonCandidates.length === 0) return;
+
+    for (const candidate of relatedSeasonCandidates.slice(0, 3)) {
+      prefetchInlineDetailsTarget(candidate.routeType, candidate.id, candidate.seasonNumber);
+    }
+  }, [prefetchInlineDetailsTarget, relatedSeasonCandidates]);
+
   const hasEpisodesTab =
     item?.type === 'series' &&
     (shouldUsePagedEpisodes || !!item?.episodes?.length || seasons.length > 0);
   const hasRelationsTab = intelligentRelations.length > 0;
-  const resolvedActiveTab: 'episodes' | 'relations' =
-    activeTab === 'episodes' && !hasEpisodesTab && hasRelationsTab ? 'relations' : activeTab;
+  const hasAnimeMetadataTab = !!item?.id?.startsWith('kitsu:');
+  const availableTabs = useMemo(() => {
+    const tabs: DetailsTab[] = [];
+    if (hasEpisodesTab) tabs.push('episodes');
+    if (hasRelationsTab) tabs.push('relations');
+    if (hasAnimeMetadataTab) tabs.push('anime-metadata');
+    return tabs;
+  }, [hasAnimeMetadataTab, hasEpisodesTab, hasRelationsTab]);
+  const resolvedActiveTab: DetailsTab = availableTabs.includes(activeTab)
+    ? activeTab
+    : (availableTabs[0] ?? 'episodes');
 
   const filteredEpisodes = useMemo(() => {
     if (selectedSeason === null) return [];
@@ -644,11 +795,10 @@ function DetailsContent() {
     ? Math.min((activeEpisodePageIndex + 1) * EPISODES_PAGE_SIZE, totalEpisodesForSeason)
     : visibleEpisodes.length;
   const shouldShowEpisodeProgressSkeleton =
-    item?.type === 'series' && !isIncognito && isLoadingWatchHistoryForItem;
+    item?.type === 'series' && isLoadingWatchHistoryForItem;
 
   // Stream Selector State
-  const [streamSelectorOpen, setStreamSelectorOpen] = useState(false);
-  const [streamParams, setStreamParams] = useState<{
+  type StreamParams = {
     id: string;
     streamId: string;
     season?: number;
@@ -659,18 +809,18 @@ function DetailsContent() {
     startTime?: number;
     title: string;
     overview?: string;
-  } | null>(null);
+  };
+
+  const [streamSelectorOpen, setStreamSelectorOpen] = useState(false);
+  const [streamParams, setStreamParams] = useState<StreamParams | null>(null);
 
   const preferredStreamId = useMemo(() => {
     if (!item) return undefined;
-    // Stream providers (Torrentio) key primarily on IMDb IDs; fall back to source ID.
+    // Stremio-style stream addons key primarily on IMDb IDs; fall back to source ID.
     return item.imdbId || item.id;
   }, [item]);
   const [reopenSelectorConsumed, setReopenSelectorConsumed] = useState(false);
 
-  // For Kitsu anime, episodes have imdbSeason/imdbEpisode that map to IMDB's
-  // season/episode numbering. Torrentio uses IMDB-based IDs (tt:season:episode),
-  // so we must translate Kitsu episodes to IMDB coordinates for stream lookups.
   const isKitsuAnime = !!(item?.id?.startsWith('kitsu:'));
   const streamSelectorType: 'movie' | 'series' | 'anime' =
     item?.type === 'movie'
@@ -732,27 +882,46 @@ function DetailsContent() {
     setStreamSelectorOpen(true);
   };
 
-  const handleWatchEpisode = (ep: Episode) => {
-    if (!item || !preferredStreamId) return;
-    // For Kitsu anime with IMDB mapping, use the IMDB season/episode for stream lookup
-    // so that Torrentio can find the correct streams (e.g. One Piece S21E5 instead of S1E1000)
-    const streamSeason = (isKitsuAnime && ep.imdbSeason) ? ep.imdbSeason : ep.season;
-    const streamEpisode = (isKitsuAnime && ep.imdbEpisode) ? ep.imdbEpisode : ep.episode;
-    // When IMDB mapping exists, also use the IMDB ID for the stream lookup
-    const effectiveStreamId = (isKitsuAnime && ep.imdbId) ? ep.imdbId : preferredStreamId;
+  const openEpisodeStreamSelector = useCallback(
+    async (
+      episodeInput: Pick<Episode, 'season' | 'episode' | 'imdbId' | 'imdbSeason' | 'imdbEpisode'>,
+      options?: {
+        overview?: string;
+        startTime?: number;
+        title?: string;
+      },
+    ) => {
+      if (!item || !preferredStreamId) return;
 
-    setStreamParams({
-      id: item.id,
-      streamId: effectiveStreamId,
-      season: streamSeason,
-      episode: streamEpisode,
-      absoluteSeason: ep.season,
-      absoluteEpisode: ep.episode,
-      aniskipEpisode: ep.imdbEpisode || ep.episode,
-      title: `${item.title} S${ep.season}E${ep.episode}`,
-      overview: ep.overview || item.description,
+      const target = await resolveEpisodeStreamTarget(
+        streamSelectorType,
+        item.id,
+        preferredStreamId,
+        episodeInput,
+      );
+
+      setStreamParams({
+        id: item.id,
+        streamId: target.streamId,
+        season: target.season,
+        episode: target.episode,
+        absoluteSeason: target.absoluteSeason,
+        absoluteEpisode: target.absoluteEpisode,
+        aniskipEpisode: target.aniskipEpisode,
+        title:
+          options?.title || `${item.title} S${episodeInput.season}E${episodeInput.episode}`,
+        overview: options?.overview,
+        startTime: options?.startTime,
+      });
+      setStreamSelectorOpen(true);
+    },
+    [item, preferredStreamId, streamSelectorType],
+  );
+
+  const handleWatchEpisode = (ep: Episode) => {
+    void openEpisodeStreamSelector(ep, {
+      overview: ep.overview || item?.description,
     });
-    setStreamSelectorOpen(true);
   };
 
   const handleBack = () => {
@@ -769,8 +938,10 @@ function DetailsContent() {
     navigate('/', { replace: true });
   };
 
-  const autoReopenStreamParams = useMemo(() => {
-    if (reopenSelectorConsumed || !item || !preferredStreamId || streamParams) return null;
+  useEffect(() => {
+    if (reopenSelectorConsumed || !item || !preferredStreamId || streamParams || streamSelectorOpen) {
+      return;
+    }
 
     const navState = location.state as
       | {
@@ -781,67 +952,92 @@ function DetailsContent() {
         }
       | undefined;
 
-    if (!navState?.reopenStreamSelector) return null;
+    if (!navState?.reopenStreamSelector) return;
 
     const startTime =
       typeof navState.reopenStartTime === 'number' && navState.reopenStartTime > 0
         ? navState.reopenStartTime
         : undefined;
 
-    if (item.type === 'movie') {
-      return {
-        id: item.id,
-        streamId: preferredStreamId,
-        title: item.title,
-        overview: item.description,
-        startTime,
-      };
-    }
-
     const reopenSeason =
       typeof navState.reopenStreamSeason === 'number' ? navState.reopenStreamSeason : undefined;
     const reopenEpisode =
       typeof navState.reopenStreamEpisode === 'number' ? navState.reopenStreamEpisode : undefined;
+    let cancelled = false;
 
-    const targetEpisode =
-      reopenSeason !== undefined && reopenEpisode !== undefined
-        ? item.episodes?.find((ep) => ep.season === reopenSeason && ep.episode === reopenEpisode)
-        : undefined;
+    void (async () => {
+      if (item.type === 'movie') {
+        if (cancelled) {
+          return;
+        }
 
-    const streamSeason = isKitsuAnime && targetEpisode?.imdbSeason ? targetEpisode.imdbSeason : reopenSeason;
-    const streamEpisode =
-      isKitsuAnime && targetEpisode?.imdbEpisode ? targetEpisode.imdbEpisode : reopenEpisode;
-    const effectiveStreamId =
-      isKitsuAnime && targetEpisode?.imdbId ? targetEpisode.imdbId : preferredStreamId;
-    const aniskipEpisode =
-      isKitsuAnime && targetEpisode?.imdbEpisode ? targetEpisode.imdbEpisode : reopenEpisode;
+        setStreamParams({
+          id: item.id,
+          streamId: preferredStreamId,
+          title: item.title,
+          overview: item.description,
+          startTime,
+        });
+        setStreamSelectorOpen(true);
+        setReopenSelectorConsumed(true);
+        return;
+      }
 
-    return {
-      id: item.id,
-      streamId: effectiveStreamId,
-      season: streamSeason,
-      episode: streamEpisode,
-      absoluteSeason: targetEpisode?.season ?? reopenSeason,
-      absoluteEpisode: targetEpisode?.episode,
-      aniskipEpisode,
-      title:
-        reopenSeason !== undefined && reopenEpisode !== undefined
-          ? `${item.title} S${reopenSeason}E${reopenEpisode}`
-          : item.title,
-      overview: targetEpisode?.overview || item.description,
-      startTime,
+      if (reopenSeason === undefined || reopenEpisode === undefined) {
+        return;
+      }
+
+      const targetEpisode = item.episodes?.find(
+        (ep) => ep.season === reopenSeason && ep.episode === reopenEpisode,
+      );
+      const target = await resolveEpisodeStreamTarget(
+        streamSelectorType,
+        item.id,
+        preferredStreamId,
+        {
+          season: reopenSeason,
+          episode: reopenEpisode,
+          imdbId: targetEpisode?.imdbId,
+          imdbSeason: targetEpisode?.imdbSeason,
+          imdbEpisode: targetEpisode?.imdbEpisode,
+        },
+      );
+
+      if (cancelled) {
+        return;
+      }
+
+      setStreamParams({
+        id: item.id,
+        streamId: target.streamId,
+        season: target.season,
+        episode: target.episode,
+        absoluteSeason: target.absoluteSeason,
+        absoluteEpisode: target.absoluteEpisode,
+        aniskipEpisode: target.aniskipEpisode,
+        title: `${item.title} S${reopenSeason}E${reopenEpisode}`,
+        overview: targetEpisode?.overview || item.description,
+        startTime,
+      });
+      setStreamSelectorOpen(true);
+      setReopenSelectorConsumed(true);
+    })();
+
+    return () => {
+      cancelled = true;
     };
   }, [
-    reopenSelectorConsumed,
     item,
-    preferredStreamId,
-    streamParams,
     location.state,
-    isKitsuAnime,
+    preferredStreamId,
+    reopenSelectorConsumed,
+    streamParams,
+    streamSelectorOpen,
+    streamSelectorType,
   ]);
 
-  const effectiveStreamParams = streamParams || autoReopenStreamParams;
-  const effectiveStreamSelectorOpen = streamSelectorOpen || !!autoReopenStreamParams;
+  const effectiveStreamParams = streamParams;
+  const effectiveStreamSelectorOpen = streamSelectorOpen;
 
   const progress = useMemo(() => {
     if (!watchHistory || !item) return null;
@@ -852,9 +1048,17 @@ function DetailsContent() {
   }, [watchHistory, item]);
 
   const seriesProgress = useMemo(() => {
-    if (!watchHistory || !item || item.type !== 'series') return null;
-    return watchHistory.find((w) => w.id === item.id && w.type_ === 'series') ?? null;
-  }, [watchHistory, item]);
+    if (!item || item.type !== 'series') return null;
+
+    const continueWatchingEntry = continueWatching?.find(
+      (entry) => entry.id === item.id && entry.type_ === 'series',
+    );
+    if (continueWatchingEntry) {
+      return continueWatchingEntry;
+    }
+
+    return watchHistory?.find((entry) => entry.id === item.id && entry.type_ === 'series') ?? null;
+  }, [continueWatching, watchHistory, item]);
 
   const formatTime = (seconds?: number) => {
     if (!seconds || Number.isNaN(seconds)) return null;
@@ -994,13 +1198,13 @@ function DetailsContent() {
       <motion.div
         initial={{ opacity: 0, x: -12 }}
         animate={{ opacity: 1, x: 0 }}
-        transition={{ delay: 0.4, duration: 0.3 }}
+        transition={{ delay: 0.3, duration: 0.4 }}
         className='fixed top-5 left-4 md:left-[80px] z-50'
       >
         <Button
           variant='ghost'
           onClick={handleBack}
-          className='h-9 px-3 gap-1.5 rounded-md bg-white/5 hover:bg-white/10 text-white/70 hover:text-white backdrop-blur-sm border border-white/5 hover:border-white/15 text-sm font-medium transition-colors shadow-sm'
+          className='h-9 px-4 gap-1.5 rounded-md bg-black/40 hover:bg-black/60 text-white/80 hover:text-white backdrop-blur-md border border-white/10 hover:border-white/20 text-sm font-medium transition-colors shadow-sm duration-300'
         >
           <ArrowLeft className='h-4 w-4' />
           Back
@@ -1012,9 +1216,9 @@ function DetailsContent() {
         {/* Backdrop */}
         {backdropUrl && (
           <motion.div
-            initial={{ scale: 1.1, opacity: 0 }}
+            initial={{ scale: 1.05, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
-            transition={{ duration: 1.2, ease: 'easeOut' }}
+            transition={{ duration: 0.8, ease: 'easeOut' }}
             className='absolute inset-0'
           >
             <div className='absolute inset-0 bg-black/20 z-10' />
@@ -1038,7 +1242,7 @@ function DetailsContent() {
               initial={{ y: 40, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
               transition={{ delay: 0.2, duration: 0.6 }}
-              className='shrink-0 w-48 aspect-[2/3] rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 hidden md:block bg-zinc-900'
+              className='shrink-0 w-48 aspect-[2/3] rounded-md overflow-hidden shadow-2xl ring-1 ring-white/10 hidden md:block bg-zinc-900'
             >
               {item.poster ? (
                 <img
@@ -1120,14 +1324,14 @@ function DetailsContent() {
                 initial={{ y: 20, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
                 transition={{ delay: 0.5, duration: 0.6 }}
-                className='flex flex-wrap items-center gap-3 pt-1'
+                className='flex flex-wrap items-center gap-3 pt-3'
               >
                 <Button
                   size='lg'
-                  className='h-12 px-8 text-base font-semibold rounded-md bg-white text-black hover:bg-zinc-200 transition-colors'
+                  className='h-11 px-6 text-[14px] font-semibold rounded-md transition-colors duration-300'
                   onClick={handlePrimaryAction}
                 >
-                  <Play className='w-5 h-5 mr-2 fill-current' /> {playButtonText}
+                  <Play className='w-4 h-4 mr-2 fill-current' /> {playButtonText}
                 </Button>
 
                 {item.type === 'movie' &&
@@ -1156,14 +1360,14 @@ function DetailsContent() {
                     </div>
                   )}
 
-                <div className='flex gap-2'>
+                <div className='flex gap-3'>
                   <Button
                     size='icon'
                     variant='outline'
                     className={cn(
-                      'h-12 w-12 rounded-md bg-white/5 border-white/10 text-white hover:bg-white/10 hover:text-white transition-colors backdrop-blur-sm',
+                      'h-11 w-11 rounded-md bg-zinc-900/60 border-white/[0.1] text-white hover:bg-zinc-800/80 hover:border-white/20 transition-colors duration-300 backdrop-blur-md shadow-sm',
                       isInLibrary &&
-                        'bg-green-500/10 text-green-500 hover:bg-green-500/20 hover:text-green-400 border-green-500/20',
+                        'bg-green-500/10 text-green-400 hover:bg-green-500/20 hover:text-green-300 border-green-500/30',
                     )}
                     onClick={() => toggleLibrary.mutate()}
                   >
@@ -1180,7 +1384,7 @@ function DetailsContent() {
                     <Button
                       size='icon'
                       variant='outline'
-                      className='h-12 w-12 rounded-md bg-white/5 border-white/10 text-white hover:bg-red-500/10 hover:text-red-500 hover:border-red-500/30 transition-colors backdrop-blur-sm'
+                      className='h-11 w-11 rounded-md bg-zinc-900/60 border-white/[0.1] text-white hover:bg-red-500/10 hover:text-red-500 hover:border-red-500/30 transition-colors duration-300 backdrop-blur-md shadow-sm'
                       onClick={() => {
                         const trailer = item.trailers![0];
                         const videoIdMatch = trailer.url.match(/(?:v=|\/)([\w-]{11})(?:\?|&|\/|$)/);
@@ -1198,36 +1402,46 @@ function DetailsContent() {
                   )}
                 </div>
               </motion.div>
+
+              {/* Cast Section */}
+              {item.cast && item.cast.length > 0 && (
+                <motion.div
+                  initial={{ y: 20, opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  transition={{ delay: 0.6, duration: 0.6 }}
+                  className='pt-6 max-w-3xl'
+                >
+                  <div className='flex flex-wrap items-center gap-x-2 gap-y-2 text-[13px] md:text-[14px]'>
+                    <span className='font-semibold text-white/50 mr-1'>
+                      Starring:
+                    </span>
+                    {item.cast.slice(0, 5).map((actor, i) => (
+                      <span key={i} className='flex items-center'>
+                        <span className='text-zinc-300 hover:text-white transition-colors cursor-default'>
+                          {actor}
+                        </span>
+                        {i < Math.min(item.cast!.length, 5) - 1 && (
+                          <span className='text-white/20 mx-2'>,</span>
+                        )}
+                      </span>
+                    ))}
+                    {item.cast.length > 5 && (
+                      <span className='text-zinc-500 italic ml-1'>and more</span>
+                    )}
+                  </div>
+                </motion.div>
+              )}
             </div>
           </div>
         </div>
       </div>
 
-      {/* Cast Section (Inline) */}
-      {item.cast && item.cast.length > 0 && (
-        <div className='container py-6 border-b border-white/5'>
-          <div className='flex flex-wrap gap-x-6 gap-y-3 items-center text-sm md:text-base'>
-            <span className='font-bold text-white/50 uppercase tracking-widest text-xs'>
-              Starring
-            </span>
-            {item.cast.slice(0, 10).map((actor, i) => (
-              <span
-                key={i}
-                className='text-zinc-300 hover:text-white transition-colors cursor-default font-medium'
-              >
-                {actor}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
       {/* Tabs Section */}
-      {(hasEpisodesTab || hasRelationsTab) && (
+      {(hasEpisodesTab || hasRelationsTab || hasAnimeMetadataTab) && (
         <div id='episodes-section' className='container py-8'>
           <Tabs
             value={resolvedActiveTab}
-            onValueChange={(value) => setActiveTab(value as 'episodes' | 'relations')}
+            onValueChange={(value) => setActiveTab(value as DetailsTab)}
             className='w-full space-y-6'
           >
             <div className='flex items-center justify-between border-b border-white/5 pb-0'>
@@ -1248,114 +1462,56 @@ function DetailsContent() {
                     Relations
                   </TabsTrigger>
                 )}
+                {hasAnimeMetadataTab && (
+                  <TabsTrigger
+                    value='anime-metadata'
+                    className='rounded-none border-b-2 border-transparent data-[state=active]:border-white data-[state=active]:bg-transparent data-[state=active]:text-white text-zinc-500 text-xl px-2 pb-4 font-bold transition-all hover:text-zinc-300'
+                  >
+                    Cast & Info
+                  </TabsTrigger>
+                )}
               </TabsList>
 
               {/* Season Selector */}
               {hasEpisodesTab &&
-                (scopedInlineTarget ? baseSeasonsSnapshot.length : seasons.length) +
-                  relatedSeasonCandidates.length >
-                  1 && (
+                localSeasonEntries.length + relatedSeasonEntries.length > 1 && (
                   <div className='flex items-center gap-2 ml-auto'>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          variant='outline'
-                          size='sm'
-                          className='h-10 px-4 gap-2 rounded-xl bg-white/[0.03] border-white/[0.08] hover:bg-white/[0.08] hover:border-white/20 text-white font-medium transition-all backdrop-blur-md shadow-sm max-w-[200px]'
-                        >
-                          <span className='truncate'>
-                            {scopedInlineTarget && activeRelatedCandidateKey
-                              ? (activeCandidateLabel || `Season ${activeRelatedCandidateKey.split('-')[0]}`)
-                              : selectedSeason !== null
-                                ? formatSeasonLabel(selectedSeason)
-                                : 'Season'}
-                          </span>
-                          <ChevronDown className='h-4 w-4 opacity-50 shrink-0' />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent
-                        align='end'
-                        className='w-56 max-h-[350px] overflow-y-auto bg-zinc-950/98 border-white/10 backdrop-blur-xl rounded-xl shadow-2xl p-1.5 scrollbar-thin scrollbar-thumb-white/10'
-                      >
-                        {/* When inline, group base seasons under the original title as a "go back" section */}
-                        {scopedInlineTarget && baseSeasonsSnapshot.length > 0 && (
-                          <DropdownMenuLabel className='px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-zinc-500 select-none truncate'>
-                            {scopedInlineTarget.originTitle || 'Original'}
-                          </DropdownMenuLabel>
-                        )}
-                        {/* Local seasons (base-item seasons when inline, for navigating back) */}
-                        {(scopedInlineTarget ? baseSeasonsSnapshot : seasons).map((s) => {
-                          const isActive =
-                            !scopedInlineTarget &&
-                            activeRelatedCandidateKey === null &&
-                            selectedSeason === s;
-                          return (
-                            <DropdownMenuItem
-                              key={`season-${s}`}
-                              onClick={() => {
-                                if (scopedInlineTarget) {
-                                  setInlineTarget(null);
-                                  setActiveRelatedCandidateKey(null);
-                                  setActiveCandidateLabel('');
-                                  setUserSelectedSeason(s);
-                                  setEpisodePagination({});
-                                  setEpisodeSearch('');
-                                  setActiveTab('episodes');
-                                } else {
-                                  setActiveRelatedCandidateKey(null);
-                                  setActiveCandidateLabel('');
-                                  setUserSelectedSeason(s);
-                                  setEpisodeSearch('');
-                                }
-                              }}
-                              className={cn(
-                                'cursor-pointer rounded-lg px-3 py-2.5 text-sm transition-all duration-200 flex items-center justify-between gap-2',
-                                isActive
-                                  ? 'bg-white/10 text-white font-semibold'
-                                  : 'text-zinc-400 hover:text-white hover:bg-white/5 focus:bg-white/5 focus:text-white',
-                              )}
-                            >
-                              <span>{formatSeasonLabel(s)}</span>
-                              {isActive && <Check className='h-3.5 w-3.5 shrink-0 opacity-80' />}
-                            </DropdownMenuItem>
-                          );
-                        })}
-                        {/* Related season candidates (cross-entry seasons: S3P1, S3P2, etc.) */}
-                        {relatedSeasonCandidates.length > 0 && (
-                          <>
-                            <DropdownMenuSeparator className='my-1 bg-white/10' />
-                            {relatedSeasonCandidates.map((cand) => {
-                              const candLabel = `Season ${cand.seasonNumber}${cand.part ? ` Part ${cand.part}` : ''}${cand.year ? ` \u2022 ${cand.year}` : ''}`;
-                              const isActive =
-                                !!scopedInlineTarget && activeRelatedCandidateKey === cand.itemKey;
-                              return (
-                                <DropdownMenuItem
-                                  key={`related-${cand.itemKey}`}
-                                  onClick={() =>
-                                    handleInlineDetailsSwitch(
-                                      cand.routeType,
-                                      cand.id,
-                                      cand.seasonNumber,
-                                      cand.itemKey,
-                                      candLabel,
-                                    )
-                                  }
-                                  className={cn(
-                                    'cursor-pointer rounded-lg px-3 py-2.5 text-sm transition-all duration-200 flex items-center justify-between gap-2',
-                                    isActive
-                                      ? 'bg-white/10 text-white font-semibold'
-                                      : 'text-zinc-300 hover:text-white hover:bg-white/5 focus:bg-white/5 focus:text-white',
-                                  )}
-                                >
-                                  <span>{candLabel}</span>
-                                  {isActive && <Check className='h-3.5 w-3.5 shrink-0 opacity-80' />}
-                                </DropdownMenuItem>
-                              );
-                            })}
-                          </>
-                        )}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    <SeasonSwitcher
+                      localSeasons={localSeasonEntries}
+                      relatedSeasons={relatedSeasonEntries}
+                      activeSeason={scopedInlineTarget ? null : selectedSeason}
+                      activeCandidateKey={activeRelatedCandidateKey}
+                      activeInlineLabel={activeCandidateLabel}
+                      isInlineMode={!!scopedInlineTarget}
+                      inlineModeOriginTitle={scopedInlineTarget?.originTitle}
+                      onLocalSeason={(seasonNumber) => {
+                        if (scopedInlineTarget) {
+                          setInlineTarget(null);
+                          setActiveRelatedCandidateKey(null);
+                          setActiveCandidateLabel('');
+                          setUserSelectedSeason(seasonNumber);
+                          setEpisodePagination({});
+                          setEpisodeSearch('');
+                          setActiveTab('episodes');
+                          return;
+                        }
+
+                        setActiveRelatedCandidateKey(null);
+                        setActiveCandidateLabel('');
+                        setUserSelectedSeason(seasonNumber);
+                        setEpisodeSearch('');
+                      }}
+                      onRelatedSeason={(entry) => {
+                        handleInlineDetailsSwitch(
+                          entry.routeType,
+                          entry.id,
+                          entry.seasonNumber,
+                          entry.itemKey,
+                          entry.label,
+                        );
+                      }}
+                      onPrefetch={prefetchInlineDetailsTarget}
+                    />
                   </div>
                 )}
             </div>
@@ -1374,7 +1530,7 @@ function DetailsContent() {
                       placeholder='Search episodes…'
                       value={episodeSearch}
                       onChange={(e) => setEpisodeSearch(e.target.value)}
-                      className='h-9 pl-9 pr-9 bg-white/[0.03] border-white/[0.08] text-sm text-white placeholder:text-zinc-600 focus-visible:ring-white/20 focus-visible:border-white/20 rounded-xl'
+                      className='h-9 pl-9 pr-9 bg-white/[0.03] border-white/[0.08] text-sm text-white placeholder:text-zinc-600 focus-visible:ring-white/20 focus-visible:border-white/20 rounded-md'
                     />
                     {episodeSearch && (
                       <button
@@ -1388,7 +1544,7 @@ function DetailsContent() {
                   </div>
                 )}
                 {shouldUseLongSeasonPaging && !shouldShowEpisodeProgressSkeleton && !episodeSearch.trim() && (
-                  <div className='mb-3 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2'>
+                  <div className='mb-3 flex items-center justify-between rounded-md border border-white/[0.06] bg-white/[0.02] px-3 py-2'>
                     <span className='text-xs text-zinc-400'>
                       Episodes {visibleEpisodeStart}-{visibleEpisodeEnd} of {filteredEpisodes.length}
                     </span>
@@ -1438,7 +1594,7 @@ function DetailsContent() {
                     ? visibleEpisodes.map((ep) => (
                         <div
                           key={`episode-skeleton-${ep.id}`}
-                          className='flex w-full text-left gap-4 rounded-xl p-2.5 bg-transparent border border-transparent'
+                          className='flex w-full text-left gap-4 rounded-md p-2.5 bg-transparent border border-transparent'
                         >
                           <Skeleton className='shrink-0 w-40 aspect-video rounded-lg bg-zinc-900/60' />
                           <div className='flex-1 min-w-0 flex flex-col justify-center gap-2'>
@@ -1483,7 +1639,7 @@ function DetailsContent() {
                         key={ep.id}
                         ref={isResumeEp ? (el) => { resumeEpisodeRef.current = el; } : undefined}
                         className={cn(
-                          'group flex w-full text-left gap-4 rounded-xl p-2.5',
+                          'group flex w-full text-left gap-4 rounded-md p-2.5',
                           'border border-transparent bg-transparent',
                           'hover:bg-white/[0.03] hover:border-white/[0.02]',
                           'transition-colors duration-200 cursor-pointer',
@@ -1675,19 +1831,54 @@ function DetailsContent() {
                     transition={{ delay: i * 0.05 }}
                     key={rel.id}
                   >
-                    <MediaCard
-                      item={rel}
-                      onPlay={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
+                    <div
+                      className='space-y-2'
+                      onMouseEnter={() => {
                         const preferredSeason = extractSeasonNumberFromTitle(rel.title || '');
                         const relationType = rel.id.startsWith('kitsu:') ? 'anime' : rel.type;
-                        handleInlineDetailsSwitch(relationType, rel.id, preferredSeason);
+                        prefetchInlineDetailsTarget(relationType, rel.id, preferredSeason);
                       }}
-                    />
+                    >
+                      <MediaCard
+                        item={rel}
+                        onPlay={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          const preferredSeason = extractSeasonNumberFromTitle(rel.title || '');
+                          const relationType = rel.id.startsWith('kitsu:') ? 'anime' : rel.type;
+                          handleInlineDetailsSwitch(relationType, rel.id, preferredSeason);
+                        }}
+                      />
+                      {(formatRelationRoleLabel(rel.relationRole) || buildRelationContextLabel(rel)) && (
+                        <div className='flex flex-col items-center gap-0.5 pt-1'>
+                          {formatRelationRoleLabel(rel.relationRole) && (
+                            <span className='text-[11px] font-medium text-zinc-300'>
+                              {formatRelationRoleLabel(rel.relationRole)}
+                            </span>
+                          )}
+                          {buildRelationContextLabel(rel) && (
+                            <span className='text-[10px] text-zinc-500'>
+                              {buildRelationContextLabel(rel)}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </motion.div>
                 ))}
               </div>
+            </TabsContent>
+
+            <TabsContent
+              value='anime-metadata'
+              className='mt-0 focus-visible:outline-none animate-in fade-in slide-in-from-bottom-4 duration-500'
+            >
+              {item.id.startsWith('kitsu:') && (
+                <DetailsAnimeMetadataSection
+                  mediaId={item.id}
+                  enabled={activeTab === 'anime-metadata'}
+                />
+              )}
             </TabsContent>
           </Tabs>
         </div>
@@ -1743,7 +1934,7 @@ function DetailsSkeleton() {
     <div className='min-h-screen bg-background animate-pulse'>
       <div className='h-[60vh] bg-secondary w-full' />
       <div className='container -mt-48 relative flex flex-col md:flex-row gap-8'>
-        <div className='w-48 aspect-[2/3] bg-secondary rounded-xl shrink-0 hidden md:block ring-1 ring-white/5' />
+        <div className='w-48 aspect-[2/3] bg-secondary rounded-md shrink-0 hidden md:block ring-1 ring-white/5' />
         <div className='flex-1 space-y-6 pt-12'>
           <Skeleton className='h-12 w-3/4' />
           <div className='flex gap-3'>

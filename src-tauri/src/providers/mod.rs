@@ -15,6 +15,8 @@ pub struct MediaItem {
     pub year: Option<String>,
     #[serde(rename = "type")]
     pub type_: String,
+    #[serde(rename = "relationRole", skip_serializing_if = "Option::is_none")]
+    pub relation_role: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -36,6 +38,54 @@ pub struct MediaDetails {
     pub trailers: Option<Vec<Trailer>>,
     pub episodes: Option<Vec<Episode>>,
     pub relations: Option<Vec<MediaItem>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimeCharacterProfile {
+    pub name: String,
+    pub role: Option<String>,
+    pub image: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimeStaffProfile {
+    pub name: String,
+    pub roles: Vec<String>,
+    pub image: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimeStreamingPlatformProfile {
+    pub name: String,
+    pub url: String,
+    pub logo: Option<String>,
+    pub sub_languages: Vec<String>,
+    pub dub_languages: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimeProductionCompanyProfile {
+    pub name: String,
+    pub roles: Vec<String>,
+    pub logo: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimeSupplementalMetadata {
+    pub characters: Vec<AnimeCharacterProfile>,
+    pub staff: Vec<AnimeStaffProfile>,
+    pub productions: Vec<AnimeProductionCompanyProfile>,
+    pub platforms: Vec<AnimeStreamingPlatformProfile>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -70,7 +120,7 @@ pub mod kitsu;
 pub mod netflix;
 pub mod realdebrid;
 pub mod skip_times;
-pub mod torrentio;
+pub mod stremio_addon;
 
 pub(crate) fn build_provider_http_client(max_idle_per_host: Option<usize>) -> Client {
     let mut builder = Client::builder()

@@ -1,4 +1,4 @@
-use super::{build_provider_http_client, MediaItem};
+use super::{MediaItem, build_provider_http_client};
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -40,6 +40,7 @@ impl Netflix {
                 description: meta.description,
                 year: meta.year,
                 type_: meta.type_,
+                relation_role: None,
             })
             .collect()
     }

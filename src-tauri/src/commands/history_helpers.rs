@@ -3,8 +3,36 @@ use super::{normalize_non_empty, WatchProgress};
 const WATCH_PROGRESS_POSITION_SAVE_DELTA_SECS: f64 = 4.0;
 const WATCH_PROGRESS_DURATION_SAVE_DELTA_SECS: f64 = 1.0;
 const WATCH_PROGRESS_MIN_SAVE_INTERVAL_MS: u64 = 15_000;
+const WATCH_PROGRESS_NEAR_COMPLETION_RATIO: f64 = 0.97;
+const WATCH_PROGRESS_NEAR_COMPLETION_REMAINING_SECS: f64 = 30.0;
+const WATCH_PROGRESS_NEAR_COMPLETION_MIN_DURATION_SECS: f64 = 60.0;
+const WATCH_PROGRESS_MIN_RESUME_POSITION_SECS: f64 = 5.0;
+const WATCH_PROGRESS_LOW_CONFIDENCE_EARLY_POSITION_SECS: f64 = 90.0;
+const WATCH_PROGRESS_LOW_CONFIDENCE_PROGRESS_RATIO: f64 = 0.08;
+const WATCH_PROGRESS_BETTER_RESUME_POSITION_DELTA_SECS: f64 = 45.0;
+const WATCH_PROGRESS_BETTER_RESUME_PROGRESS_RATIO_DELTA: f64 = 0.12;
 
-fn normalize_watch_progress_type(type_: &str) -> Option<String> {
+type WatchProgressEpisodeIdentity = (Option<u32>, Option<u32>, Option<u32>, Option<u32>);
+
+pub(crate) fn build_history_key(
+    type_lower: &str,
+    id: &str,
+    season: Option<u32>,
+    episode: Option<u32>,
+) -> String {
+    if type_lower == "movie" {
+        format!("movie:{}", id)
+    } else {
+        format!(
+            "series:{}:{}:{}",
+            id,
+            season.unwrap_or(0),
+            episode.unwrap_or(0)
+        )
+    }
+}
+
+pub(crate) fn normalize_watch_progress_type(type_: &str) -> Option<String> {
     match type_.trim().to_ascii_lowercase().as_str() {
         "movie" => Some("movie".to_string()),
         "series" | "anime" => Some("series".to_string()),
@@ -47,6 +75,8 @@ pub(crate) fn sanitize_watch_progress(mut progress: WatchProgress) -> Option<Wat
     progress.last_stream_key = progress
         .last_stream_key
         .and_then(|s| normalize_non_empty(&s));
+    progress.source_name = progress.source_name.and_then(|s| normalize_non_empty(&s));
+    progress.stream_family = progress.stream_family.and_then(|s| normalize_non_empty(&s));
 
     Some(progress)
 }
@@ -67,6 +97,8 @@ pub(crate) fn should_skip_watch_progress_save(
         && existing.last_stream_format == incoming.last_stream_format
         && existing.last_stream_lookup_id == incoming.last_stream_lookup_id
         && existing.last_stream_key == incoming.last_stream_key
+        && existing.source_name == incoming.source_name
+        && existing.stream_family == incoming.stream_family
         && existing.absolute_season == incoming.absolute_season
         && existing.absolute_episode == incoming.absolute_episode
         && existing.stream_season == incoming.stream_season
@@ -80,6 +112,13 @@ pub(crate) fn should_skip_watch_progress_save(
         return false;
     }
 
+    let existing_near_completion = is_near_completion_watch_progress(existing);
+    let incoming_near_completion = is_near_completion_watch_progress(incoming);
+
+    if incoming_near_completion && !existing_near_completion {
+        return false;
+    }
+
     let watched_delta = incoming.last_watched.saturating_sub(existing.last_watched);
     let position_delta = (incoming.position - existing.position).abs();
     let duration_delta = (incoming.duration - existing.duration).abs();
@@ -87,6 +126,22 @@ pub(crate) fn should_skip_watch_progress_save(
     watched_delta < WATCH_PROGRESS_MIN_SAVE_INTERVAL_MS
         && position_delta < WATCH_PROGRESS_POSITION_SAVE_DELTA_SECS
         && duration_delta < WATCH_PROGRESS_DURATION_SAVE_DELTA_SECS
+}
+
+fn is_near_completion_watch_progress(item: &WatchProgress) -> bool {
+    if item.duration < WATCH_PROGRESS_NEAR_COMPLETION_MIN_DURATION_SECS || item.position <= 0.0 {
+        return false;
+    }
+
+    let remaining = (item.duration - item.position).max(0.0);
+    let progress_ratio = if item.duration > 0.0 {
+        item.position / item.duration
+    } else {
+        0.0
+    };
+
+    remaining <= WATCH_PROGRESS_NEAR_COMPLETION_REMAINING_SECS
+        || progress_ratio >= WATCH_PROGRESS_NEAR_COMPLETION_RATIO
 }
 
 fn is_series_like_watch_progress(item: &WatchProgress) -> bool {
@@ -99,6 +154,22 @@ fn watch_progress_absolute_season(item: &WatchProgress) -> Option<u32> {
 
 fn watch_progress_absolute_episode(item: &WatchProgress) -> Option<u32> {
     item.absolute_episode.or(item.episode)
+}
+
+fn matches_exact_watch_progress_episode(
+    item: &WatchProgress,
+    season: Option<u32>,
+    episode: Option<u32>,
+) -> bool {
+    match (season, episode) {
+        (Some(season), Some(episode)) => {
+            (watch_progress_absolute_season(item) == Some(season)
+                && watch_progress_absolute_episode(item) == Some(episode))
+                || (item.season == Some(season) && item.episode == Some(episode))
+        }
+        (None, None) => !is_series_like_watch_progress(item),
+        _ => false,
+    }
 }
 
 fn has_episode_context_watch_progress(item: &WatchProgress) -> bool {
@@ -155,6 +226,18 @@ fn has_stream_key_watch_progress(item: &WatchProgress) -> bool {
         .is_some_and(|s| !s.trim().is_empty())
 }
 
+fn has_source_name_watch_progress(item: &WatchProgress) -> bool {
+    item.source_name
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn has_stream_family_watch_progress(item: &WatchProgress) -> bool {
+    item.stream_family
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
 fn has_usable_resume_lookup_id(item: &WatchProgress) -> bool {
     item.last_stream_lookup_id.as_deref().is_some_and(|s| {
         let trimmed = s.trim();
@@ -170,7 +253,48 @@ fn has_usable_resume_lookup_id(item: &WatchProgress) -> bool {
 }
 
 fn has_meaningful_resume_position(item: &WatchProgress) -> bool {
-    item.position > WATCH_PROGRESS_POSITION_SAVE_DELTA_SECS
+    item.position >= WATCH_PROGRESS_MIN_RESUME_POSITION_SECS
+}
+
+fn watch_progress_ratio(item: &WatchProgress) -> f64 {
+    if item.duration > 0.0 {
+        (item.position / item.duration).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn is_low_confidence_resume_position(item: &WatchProgress) -> bool {
+    has_meaningful_resume_position(item)
+        && item.position <= WATCH_PROGRESS_LOW_CONFIDENCE_EARLY_POSITION_SECS
+        && (item.duration <= 0.0
+            || watch_progress_ratio(item) <= WATCH_PROGRESS_LOW_CONFIDENCE_PROGRESS_RATIO)
+}
+
+fn donor_can_supply_episode_resume(target: &WatchProgress, donor: &WatchProgress) -> bool {
+    if !has_meaningful_resume_position(donor) {
+        return false;
+    }
+
+    !has_episode_context_watch_progress(target)
+        || watch_progress_episode_affinity(target, donor) > 0
+}
+
+fn donor_has_materially_better_resume(target: &WatchProgress, donor: &WatchProgress) -> bool {
+    if !donor_can_supply_episode_resume(target, donor) {
+        return false;
+    }
+
+    if donor.position <= target.position || !is_low_confidence_resume_position(target) {
+        return false;
+    }
+
+    let position_delta = donor.position - target.position;
+    let progress_ratio_delta =
+        (watch_progress_ratio(donor) - watch_progress_ratio(target)).max(0.0);
+
+    position_delta >= WATCH_PROGRESS_BETTER_RESUME_POSITION_DELTA_SECS
+        || progress_ratio_delta >= WATCH_PROGRESS_BETTER_RESUME_PROGRESS_RATIO_DELTA
 }
 
 fn hydrate_watch_progress_lookup_id(item: &mut WatchProgress) {
@@ -194,6 +318,158 @@ fn hydrate_watch_progress_lookup_id(item: &mut WatchProgress) {
     }
 }
 
+fn watch_progress_episode_identity(
+    item: &WatchProgress,
+) -> WatchProgressEpisodeIdentity {
+    (
+        watch_progress_absolute_season(item),
+        watch_progress_absolute_episode(item),
+        item.season,
+        item.episode,
+    )
+}
+
+pub(crate) fn continue_watching_priority_score(item: &WatchProgress) -> u32 {
+    let mut score = 0;
+
+    if has_meaningful_resume_position(item) {
+        score += if is_low_confidence_resume_position(item) {
+            45
+        } else {
+            100
+        };
+    } else if item.position > 0.0 {
+        score += 30;
+    }
+
+    if item.duration > 0.0 {
+        score += 20;
+    }
+    if has_usable_resume_lookup_id(item) {
+        score += 12;
+    }
+    if has_stream_url_watch_progress(item) {
+        score += 10;
+    }
+    if has_stream_key_watch_progress(item) {
+        score += 6;
+    }
+    if has_source_name_watch_progress(item) {
+        score += 4;
+    }
+    if has_stream_family_watch_progress(item) {
+        score += 4;
+    }
+    if has_episode_context_watch_progress(item) {
+        score += 5;
+    }
+
+    score
+}
+
+fn has_complete_resume_snapshot(item: &WatchProgress) -> bool {
+    has_episode_context_watch_progress(item)
+        && has_stream_url_watch_progress(item)
+        && has_usable_resume_lookup_id(item)
+        && has_meaningful_resume_position(item)
+        && item.duration > 0.0
+}
+
+fn watch_progress_episode_affinity(reference: &WatchProgress, candidate: &WatchProgress) -> u32 {
+    let reference_absolute = (
+        watch_progress_absolute_season(reference),
+        watch_progress_absolute_episode(reference),
+    );
+    let candidate_absolute = (
+        watch_progress_absolute_season(candidate),
+        watch_progress_absolute_episode(candidate),
+    );
+
+    if reference_absolute.0.is_some()
+        && reference_absolute.1.is_some()
+        && reference_absolute == candidate_absolute
+    {
+        return 40;
+    }
+
+    if reference.season.is_some()
+        && reference.episode.is_some()
+        && reference.season == candidate.season
+        && reference.episode == candidate.episode
+    {
+        return 28;
+    }
+
+    0
+}
+
+fn watch_progress_quality_score(reference: &WatchProgress, candidate: &WatchProgress) -> u32 {
+    let mut score = watch_progress_episode_affinity(reference, candidate);
+
+    if has_episode_context_watch_progress(candidate) {
+        score += 20;
+    }
+    if has_usable_resume_lookup_id(candidate) {
+        score += 20;
+    }
+    if has_meaningful_resume_position(candidate) {
+        score += 16;
+    }
+    if candidate.duration > 0.0 {
+        score += 12;
+    }
+    if has_stream_url_watch_progress(candidate) {
+        score += 10;
+    }
+    if has_stream_key_watch_progress(candidate) {
+        score += 6;
+    }
+    if has_source_name_watch_progress(candidate) {
+        score += 4;
+    }
+    if has_stream_family_watch_progress(candidate) {
+        score += 4;
+    }
+
+    score
+}
+
+fn merge_watch_progress_from_donor(target: &mut WatchProgress, donor: &WatchProgress) {
+    let should_prefer_donor_resume = !has_meaningful_resume_position(target)
+        || donor_has_materially_better_resume(target, donor);
+
+    merge_watch_progress_coordinates(target, donor);
+
+    if !has_usable_resume_lookup_id(target) && has_usable_resume_lookup_id(donor) {
+        target.last_stream_lookup_id = donor.last_stream_lookup_id.clone();
+    }
+    if !has_stream_key_watch_progress(target) && has_stream_key_watch_progress(donor) {
+        target.last_stream_key = donor.last_stream_key.clone();
+    }
+    if !has_source_name_watch_progress(target) && has_source_name_watch_progress(donor) {
+        target.source_name = donor.source_name.clone();
+    }
+    if !has_stream_family_watch_progress(target) && has_stream_family_watch_progress(donor) {
+        target.stream_family = donor.stream_family.clone();
+    }
+    if !has_stream_url_watch_progress(target) && has_stream_url_watch_progress(donor) {
+        target.last_stream_url = donor.last_stream_url.clone();
+        target.last_stream_format = donor.last_stream_format.clone();
+    }
+    if should_prefer_donor_resume {
+        target.position = donor.position;
+    }
+    if (target.duration <= 0.0 || should_prefer_donor_resume) && donor.duration > 0.0 {
+        target.duration = donor.duration;
+    }
+    if target.poster.is_none() && donor.poster.is_some() {
+        target.poster = donor.poster.clone();
+    }
+    if target.backdrop.is_none() && donor.backdrop.is_some() {
+        target.backdrop = donor.backdrop.clone();
+    }
+}
+
 pub(crate) fn choose_watch_history_entry(mut items: Vec<WatchProgress>) -> Option<WatchProgress> {
     items.sort_by(|a, b| b.last_watched.cmp(&a.last_watched));
 
@@ -204,116 +480,95 @@ pub(crate) fn choose_watch_history_entry(mut items: Vec<WatchProgress>) -> Optio
         return Some(chosen);
     }
 
-    let missing_episode_context = !has_episode_context_watch_progress(&chosen);
-    let missing_stream_url = !has_stream_url_watch_progress(&chosen);
-    let missing_lookup_id = !has_usable_resume_lookup_id(&chosen);
-    let missing_resume_position = !has_meaningful_resume_position(&chosen);
-    let missing_duration = chosen.duration <= 0.0;
-
-    if !(missing_episode_context
-        || missing_stream_url
-        || missing_lookup_id
-        || missing_resume_position
-        || missing_duration)
-    {
+    if has_complete_resume_snapshot(&chosen) {
         return Some(chosen);
     }
 
-    if let Some(playable) = items.iter().find(|item| {
-        has_episode_context_watch_progress(item)
-            && has_usable_resume_lookup_id(item)
-            && has_meaningful_resume_position(item)
-    }) {
-        merge_watch_progress_coordinates(&mut chosen, playable);
-        chosen.last_stream_lookup_id = playable.last_stream_lookup_id.clone();
+    let mut donors = items;
+    donors.sort_by(|left, right| {
+        watch_progress_quality_score(&chosen, right)
+            .cmp(&watch_progress_quality_score(&chosen, left))
+            .then_with(|| right.last_watched.cmp(&left.last_watched))
+    });
 
-        if !has_stream_key_watch_progress(&chosen) {
-            chosen.last_stream_key = playable.last_stream_key.clone();
-        }
+    for mut donor in donors {
+        hydrate_watch_progress_lookup_id(&mut donor);
+        merge_watch_progress_from_donor(&mut chosen, &donor);
 
-        if missing_resume_position {
-            chosen.position = playable.position;
-        }
-        if chosen.duration <= 0.0 && playable.duration > 0.0 {
-            chosen.duration = playable.duration;
-        }
-        if !has_stream_url_watch_progress(&chosen) && has_stream_url_watch_progress(playable) {
-            chosen.last_stream_url = playable.last_stream_url.clone();
-            chosen.last_stream_format = playable.last_stream_format.clone();
-        }
-    }
-
-    if !has_episode_context_watch_progress(&chosen) || !has_usable_resume_lookup_id(&chosen) {
-        if let Some(with_episode_context) = items.iter().find(|item| {
-            has_episode_context_watch_progress(item) && has_usable_resume_lookup_id(item)
-        }) {
-            if !has_episode_context_watch_progress(&chosen) {
-                merge_watch_progress_coordinates(&mut chosen, with_episode_context);
-            }
-            if !has_usable_resume_lookup_id(&chosen) {
-                chosen.last_stream_lookup_id = with_episode_context.last_stream_lookup_id.clone();
-            }
-            if !has_stream_key_watch_progress(&chosen) {
-                chosen.last_stream_key = with_episode_context.last_stream_key.clone();
-            }
-            if chosen.duration <= 0.0 && with_episode_context.duration > 0.0 {
-                chosen.duration = with_episode_context.duration;
-            }
-        }
-    }
-
-    if !has_stream_url_watch_progress(&chosen) {
-        if let Some(with_stream_url) = items
-            .iter()
-            .find(|item| has_stream_url_watch_progress(item))
-        {
-            chosen.last_stream_url = with_stream_url.last_stream_url.clone();
-            chosen.last_stream_format = with_stream_url.last_stream_format.clone();
-            chosen.last_stream_key = with_stream_url.last_stream_key.clone();
-
-            if !has_usable_resume_lookup_id(&chosen) && has_usable_resume_lookup_id(with_stream_url)
-            {
-                chosen.last_stream_lookup_id = with_stream_url.last_stream_lookup_id.clone();
-            }
-            if !has_episode_context_watch_progress(&chosen)
-                && has_episode_context_watch_progress(with_stream_url)
-            {
-                merge_watch_progress_coordinates(&mut chosen, with_stream_url);
-            }
-        }
-    }
-
-    if !has_meaningful_resume_position(&chosen) {
-        if let Some(with_resume_time) = items
-            .iter()
-            .find(|item| has_meaningful_resume_position(item))
-        {
-            chosen.position = with_resume_time.position;
-            if chosen.duration <= 0.0 && with_resume_time.duration > 0.0 {
-                chosen.duration = with_resume_time.duration;
-            }
-            if !has_episode_context_watch_progress(&chosen)
-                && has_episode_context_watch_progress(with_resume_time)
-            {
-                merge_watch_progress_coordinates(&mut chosen, with_resume_time);
-            }
-            if !has_usable_resume_lookup_id(&chosen)
-                && has_usable_resume_lookup_id(with_resume_time)
-            {
-                chosen.last_stream_lookup_id = with_resume_time.last_stream_lookup_id.clone();
-            }
-            if !has_stream_key_watch_progress(&chosen) {
-                chosen.last_stream_key = with_resume_time.last_stream_key.clone();
-            }
-        }
-    }
-
-    if chosen.duration <= 0.0 {
-        if let Some(with_duration) = items.iter().find(|item| item.duration > 0.0) {
-            chosen.duration = with_duration.duration;
+        if has_complete_resume_snapshot(&chosen) {
+            break;
         }
     }
 
     hydrate_watch_progress_lookup_id(&mut chosen);
     Some(chosen)
+}
+
+pub(crate) fn choose_continue_watching_entry(items: Vec<WatchProgress>) -> Option<WatchProgress> {
+    if items.is_empty() {
+        return None;
+    }
+
+    if !items.iter().any(is_series_like_watch_progress) {
+        return choose_watch_history_entry(items).filter(is_continue_watching_candidate);
+    }
+
+    let mut grouped: std::collections::HashMap<WatchProgressEpisodeIdentity, Vec<WatchProgress>> =
+        std::collections::HashMap::new();
+
+    for item in items {
+        grouped
+            .entry(watch_progress_episode_identity(&item))
+            .or_default()
+            .push(item);
+    }
+
+    let mut candidates = grouped
+        .into_values()
+        .filter_map(choose_watch_history_entry)
+        .filter(is_continue_watching_candidate)
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|left, right| {
+        continue_watching_priority_score(right)
+            .cmp(&continue_watching_priority_score(left))
+            .then_with(|| right.last_watched.cmp(&left.last_watched))
+    });
+
+    candidates.into_iter().next()
+}
+
+pub(crate) fn choose_exact_watch_progress_entry(
+    items: Vec<WatchProgress>,
+    media_id: &str,
+    media_type: &str,
+    season: Option<u32>,
+    episode: Option<u32>,
+) -> Option<WatchProgress> {
+    let normalized_type = normalize_watch_progress_type(media_type)?;
+
+    let normalized_id = media_id.trim();
+    if normalized_id.is_empty() {
+        return None;
+    }
+
+    let matching_items = items
+        .into_iter()
+        .filter(|item| {
+            item.id == normalized_id
+                && normalize_watch_progress_type(&item.type_).as_deref()
+                    == Some(normalized_type.as_str())
+        })
+        .filter(|item| matches_exact_watch_progress_episode(item, season, episode))
+        .collect::<Vec<_>>();
+
+    choose_watch_history_entry(matching_items)
+}
+
+pub(crate) fn is_continue_watching_candidate(item: &WatchProgress) -> bool {
+    if item.duration <= 0.0 {
+        return true;
+    }
+
+    item.position / item.duration < 0.95
 }

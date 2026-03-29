@@ -1,4 +1,4 @@
-use super::{build_provider_http_client, Episode, MediaDetails, MediaItem, Provider};
+use super::{Episode, MediaDetails, MediaItem, Provider, build_provider_http_client};
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -143,6 +143,7 @@ impl Cinemeta {
                 description: m.description,
                 year: m.year,
                 type_: m.type_,
+                relation_role: None,
             })
             .collect()
     }

@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState, type ReactNode } from 'react';
+import { formatDistanceToNow } from 'date-fns';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   api,
@@ -57,7 +58,6 @@ import {
   History as HistoryIcon,
   Library,
   LayoutList,
-  Star,
   ArrowUp,
   ArrowDown,
   RefreshCw,
@@ -66,13 +66,8 @@ import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { useSpoilerProtection } from '@/hooks/use-spoiler-protection';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
-import {
-  checkForAppUpdate,
-  getCurrentAppVersion,
-  installAppUpdate,
-  isTauriDesktopRuntime,
-  type AppUpdateHandle,
-} from '@/lib/app-updater';
+import { normalizeLanguageToken } from '@/lib/player-track-utils';
+import { useAppUpdater } from '@/hooks/use-app-updater';
 
 const LANGUAGE_OPTIONS = [
   { value: 'en', label: 'English' },
@@ -88,120 +83,144 @@ const LANGUAGE_OPTIONS = [
 
 export function Settings({ embedded }: { embedded?: boolean }) {
   return (
-    <div className={cn('container mx-auto py-8 max-w-3xl', embedded && 'py-0 px-0 max-w-none')}>
-      {!embedded && <h1 className='text-2xl font-bold text-white mb-6 tracking-tight'>Settings</h1>}
+    <div className={cn('container mx-auto py-8 max-w-5xl', embedded && 'py-0 px-0 max-w-none')}>
+      {!embedded && (
+        <div className='mb-6'>
+          <h1 className='text-xl font-semibold text-white tracking-tight'>Settings</h1>
+          <p className='text-xs text-zinc-600 mt-1'>Manage your preferences and configuration.</p>
+        </div>
+      )}
 
-      <Tabs defaultValue='streaming' className='space-y-0'>
-        <TabsList className='bg-zinc-900/60 border border-white/[0.08] p-1.5 rounded-2xl h-auto inline-flex mb-8 gap-1 shadow-sm'>
+      <Tabs defaultValue='streaming' className='flex flex-row gap-0'>
+        <TabsList className='flex-col w-44 shrink-0 bg-transparent border-r border-white/[0.06] pr-2 mr-6 h-fit items-stretch gap-0.5 self-start'>
           <TabsTrigger
             value='streaming'
-            className='px-5 py-2.5 rounded-xl text-[13px] font-medium data-[state=active]:bg-white/[0.08] data-[state=active]:text-white text-zinc-500 transition-all data-[state=active]:shadow-none hover:text-zinc-300 flex items-center gap-2'
+            className='justify-start px-3 py-2.5 rounded text-[13px] font-medium data-[state=active]:bg-white/[0.08] data-[state=active]:text-white text-zinc-500 transition-colors duration-150 data-[state=active]:shadow-none hover:text-zinc-300 hover:bg-white/[0.04] flex items-center gap-2.5'
           >
-            <Zap className='w-4 h-4' />
+            <Zap className='w-[15px] h-[15px] shrink-0' />
             Streaming
           </TabsTrigger>
           <TabsTrigger
             value='playback'
-            className='px-5 py-2.5 rounded-xl text-[13px] font-medium data-[state=active]:bg-white/[0.08] data-[state=active]:text-white text-zinc-500 transition-all data-[state=active]:shadow-none hover:text-zinc-300 flex items-center gap-2'
+            className='justify-start px-3 py-2.5 rounded text-[13px] font-medium data-[state=active]:bg-white/[0.08] data-[state=active]:text-white text-zinc-500 transition-colors duration-150 data-[state=active]:shadow-none hover:text-zinc-300 hover:bg-white/[0.04] flex items-center gap-2.5'
           >
-            <Settings2 className='w-4 h-4' />
+            <Settings2 className='w-[15px] h-[15px] shrink-0' />
             Playback
           </TabsTrigger>
           <TabsTrigger
             value='shortcuts'
-            className='px-5 py-2.5 rounded-xl text-[13px] font-medium data-[state=active]:bg-white/[0.08] data-[state=active]:text-white text-zinc-500 transition-all data-[state=active]:shadow-none hover:text-zinc-300 flex items-center gap-2'
+            className='justify-start px-3 py-2.5 rounded text-[13px] font-medium data-[state=active]:bg-white/[0.08] data-[state=active]:text-white text-zinc-500 transition-colors duration-150 data-[state=active]:shadow-none hover:text-zinc-300 hover:bg-white/[0.04] flex items-center gap-2.5'
           >
-            <Keyboard className='w-4 h-4' />
+            <Keyboard className='w-[15px] h-[15px] shrink-0' />
             Shortcuts
           </TabsTrigger>
           <TabsTrigger
             value='data'
-            className='px-5 py-2.5 rounded-xl text-[13px] font-medium data-[state=active]:bg-white/[0.08] data-[state=active]:text-white text-zinc-500 transition-all data-[state=active]:shadow-none hover:text-zinc-300 flex items-center gap-2'
+            className='justify-start px-3 py-2.5 rounded text-[13px] font-medium data-[state=active]:bg-white/[0.08] data-[state=active]:text-white text-zinc-500 transition-colors duration-150 data-[state=active]:shadow-none hover:text-zinc-300 hover:bg-white/[0.04] flex items-center gap-2.5'
           >
-            <BarChart3 className='w-4 h-4' />
+            <BarChart3 className='w-[15px] h-[15px] shrink-0' />
             Data
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value='streaming' className='space-y-4 animate-in fade-in duration-200'>
-          <AddonManager />
-        </TabsContent>
+        <div className="flex-1 min-w-0">
+          <TabsContent value='streaming' className='mt-0 space-y-4 animate-in fade-in duration-200'>
+            <AddonManager />
+          </TabsContent>
 
-        <TabsContent value='playback' className='space-y-4 animate-in fade-in duration-200'>
-          <PlaybackLanguageConfig />
-          <SpoilerProtectionToggle />
-        </TabsContent>
+          <TabsContent value='playback' className='mt-0 space-y-4 animate-in fade-in duration-200'>
+            <PlaybackLanguageConfig />
+            <SpoilerProtectionToggle />
+          </TabsContent>
 
-        <TabsContent value='shortcuts' className='animate-in fade-in duration-200'>
-          <KeyboardShortcuts />
-        </TabsContent>
+          <TabsContent value='shortcuts' className='mt-0 animate-in fade-in duration-200'>
+            <KeyboardShortcuts />
+          </TabsContent>
 
-        <TabsContent value='data' className='space-y-4 animate-in fade-in duration-200'>
-          <ApplicationUpdatesCard />
-          <DataManager />
-        </TabsContent>
+          <TabsContent value='data' className='mt-0 space-y-4 animate-in fade-in duration-200'>
+            <ApplicationUpdatesCard />
+            <DataManager />
+          </TabsContent>
+        </div>
       </Tabs>
     </div>
   );
 }
 
 function ApplicationUpdatesCard() {
-  const [currentVersion, setCurrentVersion] = useState<string | null>(null);
-  const [pendingUpdate, setPendingUpdate] = useState<AppUpdateHandle | null>(null);
-  const isDesktopRuntime = isTauriDesktopRuntime();
-
-  useQuery({
-    queryKey: ['appVersion'],
-    queryFn: async () => {
-      const version = await getCurrentAppVersion();
-      setCurrentVersion(version);
-      return version;
-    },
-    enabled: isDesktopRuntime,
-    staleTime: Infinity,
-  });
-
-  const checkMutation = useMutation({
-    mutationFn: checkForAppUpdate,
-    onSuccess: (update) => {
-      setPendingUpdate(update);
-      if (!update) {
-        toast.success('Stremera is up to date');
-        return;
-      }
-
-      toast.info(`Update ${update.version} is available`, {
-        description: 'Install the latest signed desktop release from GitHub Releases.',
-      });
-    },
-    onError: (err: unknown) => {
-      toast.error(`Update check failed: ${getErrorMessage(err)}`);
-    },
-  });
-
-  const installMutation = useMutation({
-    mutationFn: async (update: AppUpdateHandle) => {
-      await installAppUpdate(update, (status) => {
-        toast.loading(status, { id: 'app-update-install' });
-      });
-    },
-    onMutate: () => {
-      toast.loading('Downloading update…', { id: 'app-update-install' });
-    },
-    onError: (err: unknown) => {
-      toast.error(`Update install failed: ${getErrorMessage(err)}`, {
-        id: 'app-update-install',
-      });
-    },
-  });
+  const {
+    checkForUpdates,
+    currentVersion,
+    installUpdate,
+    isChecking,
+    isInstalling,
+    isSupported,
+    isUpdateAvailable,
+    pendingUpdate,
+    updateState,
+  } = useAppUpdater();
 
   const currentLabel = currentVersion ?? 'Unknown';
-  const latestLabel = pendingUpdate?.version ?? 'No update detected';
+  const latestLabel = pendingUpdate?.version ?? (updateState.status === 'up-to-date' ? 'Up to date' : 'No update detected');
+  const lastCheckedLabel = updateState.lastCheckedAt
+    ? `${formatDistanceToNow(updateState.lastCheckedAt, { addSuffix: true })}`
+    : 'Not checked yet';
+  const statusNote = !isSupported
+    ? 'Updater controls are only active inside the packaged desktop app.'
+    : isInstalling
+      ? updateState.installStatus ?? 'Applying the update and preparing to relaunch.'
+      : isUpdateAvailable
+        ? 'A signed update is ready. Installing will replace the current app in place and keep your existing app data.'
+        : updateState.status === 'up-to-date'
+          ? 'The installed build matches the latest signed GitHub release.'
+          : 'Downloads use temporary installer artifacts and NSIS replaces the existing app in place.';
+
+  const handleCheck = () => {
+    void checkForUpdates()
+      .then((update) => {
+        if (!update) {
+          toast.success('Stremera is up to date');
+          return;
+        }
+
+        toast.info(`Update ${update.version} is available`, {
+          description: 'Install the latest signed desktop release from GitHub Releases.',
+        });
+      })
+      .catch((error) => {
+        toast.error(`Update check failed: ${getErrorMessage(error)}`);
+      });
+  };
+
+  const handleInstall = () => {
+    if (!pendingUpdate) return;
+
+    toast.loading('Downloading update…', { id: 'app-update-install' });
+    void installUpdate(pendingUpdate, (status) => {
+      toast.loading(status, { id: 'app-update-install' });
+    }).catch((error) => {
+      toast.error(`Update install failed: ${getErrorMessage(error)}`, {
+        id: 'app-update-install',
+      });
+    });
+  };
 
   return (
-    <div className='rounded-2xl border border-white/5 bg-zinc-900/40 overflow-hidden'>
+    <div
+      className={cn(
+        'rounded-md border overflow-hidden transition-colors',
+        isUpdateAvailable
+          ? 'border-emerald-400/20 bg-[linear-gradient(180deg,rgba(16,185,129,0.08),rgba(255,255,255,0.015))]'
+          : 'border-white/[0.06] bg-white/[0.015]',
+      )}
+    >
       <div className='px-5 py-4 border-b border-white/5 flex items-start gap-3'>
-        <RefreshCw className='w-4 h-4 text-zinc-500 flex-shrink-0 mt-0.5' />
+        <RefreshCw
+          className={cn(
+            'w-4 h-4 flex-shrink-0 mt-0.5',
+            isUpdateAvailable ? 'text-emerald-300' : 'text-zinc-500',
+          )}
+        />
         <div>
           <h2 className='text-sm font-semibold text-white'>Application Updates</h2>
           <p className='text-[11px] text-zinc-500 mt-0.5 leading-relaxed'>
@@ -213,22 +232,34 @@ function ApplicationUpdatesCard() {
 
       <div className='px-5 py-4 space-y-4'>
         <div className='grid grid-cols-1 sm:grid-cols-2 gap-3'>
-          <div className='rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3'>
+          <div className='rounded-md border border-white/[0.06] bg-white/[0.02] px-4 py-3'>
             <p className='text-[10px] font-semibold uppercase tracking-widest text-zinc-600'>
               Current Version
             </p>
             <p className='mt-1 text-sm font-semibold text-white'>{currentLabel}</p>
           </div>
-          <div className='rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3'>
+          <div className='rounded-md border border-white/[0.06] bg-white/[0.02] px-4 py-3'>
             <p className='text-[10px] font-semibold uppercase tracking-widest text-zinc-600'>
               Latest Status
             </p>
             <p className='mt-1 text-sm font-semibold text-white'>{latestLabel}</p>
+            <p className='mt-1 text-[11px] text-zinc-500'>Last checked {lastCheckedLabel}</p>
           </div>
         </div>
 
+        {updateState.errorMessage && !isUpdateAvailable && (
+          <div className='rounded-md border border-red-500/20 bg-red-500/5 px-4 py-3'>
+            <p className='text-[10px] font-semibold uppercase tracking-widest text-red-300/80'>
+              Updater Error
+            </p>
+            <p className='mt-1 text-[12px] leading-relaxed text-red-100/80'>
+              {updateState.errorMessage}
+            </p>
+          </div>
+        )}
+
         {pendingUpdate?.body && (
-          <div className='rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3'>
+          <div className='rounded-md border border-white/[0.06] bg-white/[0.02] px-4 py-3'>
             <p className='text-[10px] font-semibold uppercase tracking-widest text-zinc-600'>
               Release Notes
             </p>
@@ -242,11 +273,11 @@ function ApplicationUpdatesCard() {
           <Button
             size='sm'
             variant='outline'
-            onClick={() => checkMutation.mutate()}
-            disabled={!isDesktopRuntime || checkMutation.isPending || installMutation.isPending}
+            onClick={handleCheck}
+            disabled={!isSupported || isChecking || isInstalling}
             className='h-8 px-4 text-xs font-semibold gap-1.5 border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-white'
           >
-            {checkMutation.isPending ? (
+            {isChecking ? (
               <Loader2 className='w-3 h-3 animate-spin' />
             ) : (
               <RefreshCw className='w-3 h-3' />
@@ -256,22 +287,23 @@ function ApplicationUpdatesCard() {
 
           <Button
             size='sm'
-            onClick={() => pendingUpdate && installMutation.mutate(pendingUpdate)}
-            disabled={!pendingUpdate || installMutation.isPending || checkMutation.isPending}
-            className='h-8 px-4 text-xs font-semibold gap-1.5 bg-white text-black hover:bg-zinc-200'
+            onClick={handleInstall}
+            disabled={!pendingUpdate || isInstalling || isChecking}
+            className={cn(
+              'h-8 px-4 text-xs font-semibold gap-1.5 text-black hover:bg-zinc-200',
+              isUpdateAvailable ? 'bg-emerald-300 hover:bg-emerald-200' : 'bg-white',
+            )}
           >
-            {installMutation.isPending ? (
+            {isInstalling ? (
               <Loader2 className='w-3 h-3 animate-spin' />
             ) : (
               <Download className='w-3 h-3' />
             )}
-            Install Update
+            Install and Restart
           </Button>
 
           <p className='text-[10px] text-zinc-700 flex-1 min-w-[220px]'>
-            {!isDesktopRuntime
-              ? 'Updater controls are only active inside the packaged desktop app.'
-              : 'Downloads use temporary installer artifacts and NSIS replaces the existing app in place.'}
+            {statusNote}
           </p>
         </div>
       </div>
@@ -280,7 +312,7 @@ function ApplicationUpdatesCard() {
 }
 
 function normalizePreference(value: string): string {
-  return value.trim().toLowerCase();
+  return normalizeLanguageToken(value);
 }
 
 function formatLanguageLabel(value: string, kind: 'audio' | 'subtitle'): string {
@@ -308,12 +340,16 @@ function PlaybackLanguageConfig() {
         prefs.preferredAudioLanguage,
         prefs.preferredSubtitleLanguage,
       ),
-    onSuccess: () => {
+    onSuccess: (_result, prefs) => {
       setAudioLang(undefined);
       setSubtitleLang(undefined);
+      queryClient.setQueryData(['playbackLanguagePreferences'], {
+        preferredAudioLanguage: prefs.preferredAudioLanguage,
+        preferredSubtitleLanguage: prefs.preferredSubtitleLanguage,
+      });
       queryClient.invalidateQueries({ queryKey: ['playbackLanguagePreferences'] });
-      // appConfig bundles language prefs — keep it fresh after every save
-      queryClient.invalidateQueries({ queryKey: ['appConfig'] });
+      queryClient.invalidateQueries({ queryKey: ['effectivePlaybackLanguagePreferences'] });
+      queryClient.invalidateQueries({ queryKey: ['streams'] });
       toast.success('Playback language preferences saved');
     },
     onError: (err: unknown) => toast.error(getErrorMessage(err)),
@@ -336,7 +372,7 @@ function PlaybackLanguageConfig() {
   };
 
   return (
-    <div className='rounded-2xl border border-white/[0.08] bg-zinc-900/40 overflow-hidden shadow-sm'>
+    <div className='rounded-md border border-white/[0.06] bg-zinc-900/40 overflow-hidden'>
       <div className='px-6 py-5 border-b border-white/[0.08] flex items-start gap-3 bg-white/[0.02]'>
         <Captions className='w-5 h-5 text-zinc-400 flex-shrink-0 mt-0.5' />
         <div>
@@ -360,7 +396,7 @@ function PlaybackLanguageConfig() {
               <DropdownMenuTrigger asChild>
                 <Button
                   variant='outline'
-                  className='w-full justify-between bg-zinc-800/60 border-white/[0.08] hover:bg-zinc-800 hover:border-white/20 text-[13px] font-normal h-11 rounded-xl transition-all'
+                  className='w-full justify-between bg-zinc-800/60 border-white/[0.08] hover:bg-zinc-800 hover:border-white/20 text-[13px] font-normal h-11 rounded-md transition-all'
                 >
                   <span className='truncate'>{formatLanguageLabel(audioValue, 'audio')}</span>
                   <ChevronDown className='h-4 w-4 opacity-50 shrink-0 ml-2' />
@@ -368,11 +404,11 @@ function PlaybackLanguageConfig() {
               </DropdownMenuTrigger>
               <DropdownMenuContent
                 align='start'
-                className='w-[var(--radix-dropdown-menu-trigger-width)] bg-zinc-950/95 border-white/10 backdrop-blur-md rounded-xl p-1.5'
+                className='w-[var(--radix-dropdown-menu-trigger-width)] bg-zinc-950/95 border-white/10 backdrop-blur-md rounded-md p-1.5'
               >
                 <DropdownMenuItem
                   onClick={() => setAudioLang('')}
-                  className='gap-2.5 py-2 text-[13px] rounded-lg cursor-pointer'
+                  className='gap-2.5 py-2 text-[13px] rounded-md cursor-pointer'
                 >
                   {!normalizePreference(audioValue) ? (
                     <Check className='h-4 w-4 opacity-70' />
@@ -387,7 +423,7 @@ function PlaybackLanguageConfig() {
                     <DropdownMenuItem
                       key={option.value}
                       onClick={() => setAudioLang(option.value)}
-                      className='gap-2.5 py-2 text-[13px] rounded-lg cursor-pointer'
+                      className='gap-2.5 py-2 text-[13px] rounded-md cursor-pointer'
                     >
                       {selected ? (
                         <Check className='h-4 w-4 opacity-70' />
@@ -412,7 +448,7 @@ function PlaybackLanguageConfig() {
               <DropdownMenuTrigger asChild>
                 <Button
                   variant='outline'
-                  className='w-full justify-between bg-zinc-800/60 border-white/[0.08] hover:bg-zinc-800 hover:border-white/20 text-[13px] font-normal h-11 rounded-xl transition-all'
+                  className='w-full justify-between bg-zinc-800/60 border-white/[0.08] hover:bg-zinc-800 hover:border-white/20 text-[13px] font-normal h-11 rounded-md transition-all'
                 >
                   <span className='truncate'>{formatLanguageLabel(subtitleValue, 'subtitle')}</span>
                   <ChevronDown className='h-4 w-4 opacity-50 shrink-0 ml-2' />
@@ -420,11 +456,11 @@ function PlaybackLanguageConfig() {
               </DropdownMenuTrigger>
               <DropdownMenuContent
                 align='start'
-                className='w-[var(--radix-dropdown-menu-trigger-width)] bg-zinc-950/95 border-white/10 backdrop-blur-md rounded-xl p-1.5'
+                className='w-[var(--radix-dropdown-menu-trigger-width)] bg-zinc-950/95 border-white/10 backdrop-blur-md rounded-md p-1.5'
               >
                 <DropdownMenuItem
                   onClick={() => setSubtitleLang('')}
-                  className='gap-2.5 py-2 text-[13px] rounded-lg cursor-pointer'
+                  className='gap-2.5 py-2 text-[13px] rounded-md cursor-pointer'
                 >
                   {!normalizePreference(subtitleValue) ? (
                     <Check className='h-4 w-4 opacity-70' />
@@ -435,7 +471,7 @@ function PlaybackLanguageConfig() {
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={() => setSubtitleLang('off')}
-                  className='gap-2.5 py-2 text-[13px] rounded-lg cursor-pointer'
+                  className='gap-2.5 py-2 text-[13px] rounded-md cursor-pointer'
                 >
                   {normalizePreference(subtitleValue) === 'off' ? (
                     <Check className='h-4 w-4 opacity-70' />
@@ -450,7 +486,7 @@ function PlaybackLanguageConfig() {
                     <DropdownMenuItem
                       key={option.value}
                       onClick={() => setSubtitleLang(option.value)}
-                      className='gap-2.5 py-2 text-[13px] rounded-lg cursor-pointer'
+                      className='gap-2.5 py-2 text-[13px] rounded-md cursor-pointer'
                     >
                       {selected ? (
                         <Check className='h-4 w-4 opacity-70' />
@@ -485,7 +521,7 @@ function PlaybackLanguageConfig() {
                 setSubtitleLang('');
               }}
               disabled={isLoading || saveMutation.isPending}
-              className='h-10 px-5 text-[13px] font-semibold rounded-xl bg-white/[0.03] border-white/[0.08] hover:bg-white/[0.08]'
+              className='h-10 px-5 text-[13px] font-semibold rounded-md bg-white/[0.03] border-white/[0.08] hover:bg-white/[0.08]'
             >
               Reset
             </Button>
@@ -493,7 +529,7 @@ function PlaybackLanguageConfig() {
               size='sm'
               onClick={handleSave}
               disabled={isLoading || !isDirty || saveMutation.isPending}
-              className='h-10 px-6 bg-white text-black hover:bg-zinc-200 transition-colors rounded-xl text-[13px] font-semibold gap-2 shadow-sm whitespace-nowrap'
+              className='h-10 px-6 bg-white text-black hover:bg-zinc-200 transition-colors rounded-md text-[13px] font-semibold gap-2 shadow-sm whitespace-nowrap'
             >
               {saveMutation.isPending && <Loader2 className='h-3.5 w-3.5 animate-spin' />}
               Save
@@ -511,10 +547,10 @@ function SpoilerProtectionToggle() {
   const { spoilerProtection, setSpoilerProtection } = useSpoilerProtection();
 
   return (
-    <div className='rounded-2xl border border-white/5 bg-zinc-900/40 overflow-hidden'>
+    <div className='rounded-md border border-white/[0.06] bg-white/[0.015] overflow-hidden'>
       <div className='px-5 py-4 flex items-center justify-between gap-4'>
         <div className='flex items-start gap-3 min-w-0'>
-          <div className='w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center text-zinc-500 flex-shrink-0 mt-0.5'>
+          <div className='w-8 h-8 rounded-md bg-white/5 flex items-center justify-center text-zinc-500 flex-shrink-0 mt-0.5'>
             {spoilerProtection ? <EyeOff className='w-4 h-4' /> : <Eye className='w-4 h-4' />}
           </div>
           <div className='min-w-0'>
@@ -681,7 +717,7 @@ function SortableAddonRow({
           title='Move source up'
           onClick={() => onMove(addon.id, -1)}
           disabled={isWorking || idx === 0}
-          className='w-8 h-8 rounded-lg flex items-center justify-center text-zinc-600 hover:bg-white/5 hover:text-zinc-300 transition-colors disabled:opacity-30 disabled:cursor-not-allowed'
+          className='w-8 h-8 rounded-md flex items-center justify-center text-zinc-600 hover:bg-white/5 hover:text-zinc-300 transition-colors disabled:opacity-30 disabled:cursor-not-allowed'
         >
           <ArrowUp className='w-3.5 h-3.5' />
         </button>
@@ -690,7 +726,7 @@ function SortableAddonRow({
           title='Move source down'
           onClick={() => onMove(addon.id, 1)}
           disabled={isWorking || idx === total - 1}
-          className='w-8 h-8 rounded-lg flex items-center justify-center text-zinc-600 hover:bg-white/5 hover:text-zinc-300 transition-colors disabled:opacity-30 disabled:cursor-not-allowed'
+          className='w-8 h-8 rounded-md flex items-center justify-center text-zinc-600 hover:bg-white/5 hover:text-zinc-300 transition-colors disabled:opacity-30 disabled:cursor-not-allowed'
         >
           <ArrowDown className='w-3.5 h-3.5' />
         </button>
@@ -700,7 +736,7 @@ function SortableAddonRow({
           onClick={() => onToggle(addon.id)}
           disabled={isWorking}
           className={cn(
-            'w-8 h-8 rounded-lg flex items-center justify-center transition-colors disabled:opacity-40',
+            'w-8 h-8 rounded-md flex items-center justify-center transition-colors disabled:opacity-40',
             addon.enabled
               ? 'text-emerald-400 hover:bg-emerald-500/10'
               : 'text-zinc-600 hover:bg-white/5 hover:text-zinc-400',
@@ -713,7 +749,7 @@ function SortableAddonRow({
           title='Remove addon'
           onClick={() => onRemove(addon.id)}
           disabled={isWorking}
-          className='w-8 h-8 rounded-lg flex items-center justify-center text-zinc-600 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-40'
+          className='w-8 h-8 rounded-md flex items-center justify-center text-zinc-600 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-40'
         >
           <Trash2 className='w-3.5 h-3.5' />
         </button>
@@ -738,8 +774,8 @@ function AddonManager() {
     mutationFn: api.saveAddonConfigs,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['addonConfigs'] });
-      queryClient.invalidateQueries({ queryKey: ['appConfig'] });
       queryClient.invalidateQueries({ queryKey: ['streamsByAddon'] });
+      queryClient.invalidateQueries({ queryKey: ['streams'] });
     },
     onError: (err: unknown) => toast.error(getErrorMessage(err)),
   });
@@ -862,7 +898,7 @@ function AddonManager() {
   const activeCount = addons.filter((addon) => addon.enabled).length;
 
   return (
-    <div className='rounded-2xl border border-white/[0.08] bg-zinc-900/40 overflow-hidden shadow-sm'>
+    <div className='rounded-md border border-white/[0.06] bg-zinc-900/40 overflow-hidden'>
       {/* Header */}
       <div className='px-6 py-5 border-b border-white/[0.08] flex items-start gap-3 bg-white/[0.02]'>
         <Zap className='w-5 h-5 text-zinc-400 flex-shrink-0 mt-0.5' />
@@ -927,18 +963,18 @@ function AddonManager() {
           <div className='flex gap-2'>
             <Input
               ref={newUrlInputRef}
-              placeholder='https://torrentio.strem.fun/.../manifest.json'
+              placeholder='https://your-addon-host/.../manifest.json'
               value={newUrl}
               onChange={(e) => setNewUrl(e.target.value)}
               onKeyDown={handleKeyDown}
               disabled={isWorking}
-              className='flex-1 h-10 bg-zinc-800/60 border-white/[0.08] text-sm font-mono focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0 rounded-xl'
+              className='flex-1 h-10 bg-zinc-800/60 border-white/[0.08] text-sm font-mono focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0 rounded-md'
             />
             <Button
               size='sm'
               onClick={handleAddUrl}
               disabled={!canSubmitNewAddon}
-              className='h-10 px-5 bg-white text-black hover:bg-zinc-200 rounded-xl text-[13px] font-semibold gap-1.5 shrink-0'
+              className='h-10 px-5 bg-white text-black hover:bg-zinc-200 rounded-md text-[13px] font-semibold gap-1.5 shrink-0'
             >
               {fetchingManifest ? (
                 <Loader2 className='w-3.5 h-3.5 animate-spin' />
@@ -974,7 +1010,7 @@ function AddonManager() {
           </p>
 
           {/* Compatible addons hint */}
-          <div className='rounded-xl bg-zinc-950/50 border border-white/[0.05] px-4 py-3 space-y-1.5'>
+          <div className='rounded-md bg-zinc-950/50 border border-white/[0.05] px-4 py-3 space-y-1.5'>
             <p className='text-[10px] font-semibold text-zinc-600 uppercase tracking-widest flex items-center gap-1.5'>
               <Globe className='w-3 h-3' />
               Compatible Sources
@@ -993,7 +1029,7 @@ function AddonManager() {
                   href={s.url}
                   target='_blank'
                   rel='noreferrer'
-                  className='inline-flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800/60 border border-white/5 hover:border-white/10 px-2 py-1 rounded-lg transition-colors'
+                  className='inline-flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800/60 border border-white/5 hover:border-white/10 px-2 py-1 rounded-md transition-colors'
                 >
                   {s.name}
                   <ExternalLink className='w-2.5 h-2.5 opacity-60' />
@@ -1014,9 +1050,7 @@ interface ShortcutRow {
   keys: string[];
 }
 
-const APP_SHORTCUTS: ShortcutRow[] = [
-  { label: 'Toggle Private Mode', keys: ['Ctrl', 'Shift', 'N'] },
-];
+const APP_SHORTCUTS: ShortcutRow[] = [];
 
 const PLAYER_SHORTCUTS: ShortcutRow[] = [
   { label: 'Play / Pause', keys: ['Space'] },
@@ -1031,7 +1065,6 @@ const PLAYER_SHORTCUTS: ShortcutRow[] = [
   { label: 'Mute / Unmute', keys: ['M'] },
   { label: 'Next episode', keys: ['N'] },
   { label: 'Download stream', keys: ['D'] },
-  { label: 'Picture-in-Picture', keys: ['P'] },
 ];
 
 function ShortcutGroup({ rows }: { rows: ShortcutRow[] }) {
@@ -1058,7 +1091,7 @@ function ShortcutGroup({ rows }: { rows: ShortcutRow[] }) {
 
 function KeyboardShortcuts() {
   return (
-    <div className='rounded-2xl border border-white/5 bg-zinc-900/40 overflow-hidden'>
+    <div className='rounded-md border border-white/[0.06] bg-white/[0.015] overflow-hidden'>
       <div className='px-5 py-4 border-b border-white/5 flex items-center gap-3'>
         <Keyboard className='w-4 h-4 text-zinc-500' />
         <div>
@@ -1069,12 +1102,14 @@ function KeyboardShortcuts() {
         </div>
       </div>
       <div className='px-5 py-4 space-y-6'>
-        <div>
-          <p className='text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-2 px-1'>
-            App
-          </p>
-          <ShortcutGroup rows={APP_SHORTCUTS} />
-        </div>
+        {APP_SHORTCUTS.length > 0 && (
+          <div>
+            <p className='text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-2 px-1'>
+              App
+            </p>
+            <ShortcutGroup rows={APP_SHORTCUTS} />
+          </div>
+        )}
         <div>
           <p className='text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-2 px-1'>
             Video Player
@@ -1144,7 +1179,7 @@ function DataManager() {
       count: stats?.history_count ?? 0,
       unit: 'entries',
       clearFn: api.clearWatchHistory,
-      clearQueryKeys: ['watch-history', 'watch-history-full', 'watch-history-for-id'],
+      clearQueryKeys: ['continue-watching', 'watch-history'],
     },
     {
       key: 'library',
@@ -1170,7 +1205,7 @@ function DataManager() {
       key: 'statuses',
       label: 'Watch Statuses',
       description: 'Watching / Watched / Plan to Watch / Dropped labels.',
-      icon: <Star className='w-4 h-4' />,
+      icon: <Check className='w-4 h-4' />,
       count: stats?.watch_statuses_count ?? 0,
       unit: 'labels',
       clearFn: api.clearAllWatchStatuses,
@@ -1215,9 +1250,8 @@ function DataManager() {
 
       const result = await api.importAppDataFromFile(path);
       for (const key of [
+        'continue-watching',
         'watch-history',
-        'watch-history-full',
-        'watch-history-for-id',
         'library',
         'lists',
         'watch-statuses',
@@ -1243,7 +1277,7 @@ function DataManager() {
   return (
     <div className='space-y-4'>
       {/* Backup & Restore */}
-      <div className='rounded-2xl border border-white/5 bg-zinc-900/40 overflow-hidden'>
+      <div className='rounded-md border border-white/[0.06] bg-white/[0.015] overflow-hidden'>
         <div className='px-5 py-4 border-b border-white/5 flex items-start gap-3'>
           <Database className='w-4 h-4 text-zinc-500 flex-shrink-0 mt-0.5' />
           <div>
@@ -1289,7 +1323,7 @@ function DataManager() {
       </div>
 
       {/* Data Manager */}
-      <div className='rounded-2xl border border-white/5 bg-zinc-900/40 overflow-hidden'>
+      <div className='rounded-md border border-white/[0.06] bg-white/[0.015] overflow-hidden'>
         <div className='px-5 py-4 border-b border-white/5 flex items-start gap-3'>
           <Database className='w-4 h-4 text-zinc-500 flex-shrink-0 mt-0.5' />
           <div>
@@ -1310,10 +1344,10 @@ function DataManager() {
             return (
               <div
                 key={cat.key}
-                className='flex items-center justify-between gap-4 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3'
+                className='flex items-center justify-between gap-4 rounded-md border border-white/[0.06] bg-white/[0.02] px-4 py-3'
               >
                 <div className='flex items-center gap-3 min-w-0'>
-                  <div className='w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center text-zinc-500 flex-shrink-0'>
+                  <div className='w-8 h-8 rounded-md bg-white/5 flex items-center justify-center text-zinc-500 flex-shrink-0'>
                     {cat.icon}
                   </div>
                   <div className='min-w-0'>

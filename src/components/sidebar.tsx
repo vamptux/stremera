@@ -7,17 +7,13 @@ import {
   Calendar,
   User,
   MonitorPlay,
-  VenetianMask,
   Download,
   Settings,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { usePrivacy } from '@/contexts/privacy-context';
-import { toast } from 'sonner';
-import { useQueryClient } from '@tanstack/react-query';
 import { useDownloads } from '@/hooks/use-downloads';
-import { clearIncognitoClientState } from '@/lib/privacy-utils';
+import { useAppUpdater } from '@/hooks/use-app-updater';
 
 interface SidebarProps {
   className?: string;
@@ -26,24 +22,12 @@ interface SidebarProps {
 
 export function Sidebar({ className, playerMode }: SidebarProps) {
   const location = useLocation();
-  const { isIncognito, toggleIncognito } = usePrivacy();
-  const queryClient = useQueryClient();
   const { downloads } = useDownloads();
+  const { isUpdateAvailable } = useAppUpdater();
 
   const activeDownloadsCount = downloads.filter(
     (d) => d.status === 'downloading' || d.status === 'pending' || d.status === 'paused',
   ).length;
-
-  const handleIncognitoToggle = () => {
-    const nextEnabled = !isIncognito;
-    toggleIncognito();
-
-    if (nextEnabled) {
-      clearIncognitoClientState(queryClient);
-    }
-
-    toast.success(nextEnabled ? 'Private mode enabled' : 'Private mode disabled');
-  };
 
   // Primary navigation items
   const navItems = [
@@ -53,13 +37,14 @@ export function Sidebar({ className, playerMode }: SidebarProps) {
     { icon: Download, label: 'Downloads', href: '/downloads' },
   ];
 
-  // Bottom action link items — rendered top-to-bottom: Privacy → Settings → Profile
+  // Bottom action link items
   const bottomNavItems = [
     {
       icon: Settings,
       label: 'Settings',
       href: '/settings',
       isActive: location.pathname === '/settings',
+      hasUpdateAccent: isUpdateAvailable,
     },
     {
       icon: User,
@@ -67,6 +52,7 @@ export function Sidebar({ className, playerMode }: SidebarProps) {
       href: '/profile',
       isActive:
         location.pathname === '/profile' || location.pathname === '/library',
+      hasUpdateAccent: false,
     },
   ];
 
@@ -81,8 +67,8 @@ export function Sidebar({ className, playerMode }: SidebarProps) {
       >
         {/* Logo */}
         <Link to='/' className='mb-8 pointer-events-auto group'>
-          <div className='w-10 h-10 rounded-xl bg-white/5 text-white flex items-center justify-center transition-all duration-300 group-hover:bg-white/15 group-hover:shadow-[0_0_15px_rgba(255,255,255,0.1)] group-hover:scale-105'>
-            <MonitorPlay className='w-5 h-5 transition-transform duration-300 group-hover:scale-110' />
+          <div className='w-10 h-10 rounded-xl bg-white/5 text-white flex items-center justify-center transition-all duration-200 group-hover:bg-white/10'>
+            <MonitorPlay className='w-5 h-5' />
           </div>
         </Link>
 
@@ -102,18 +88,18 @@ export function Sidebar({ className, playerMode }: SidebarProps) {
                       variant='ghost'
                       size='icon'
                       className={cn(
-                        'w-full h-11 rounded-xl transition-all duration-300 group',
+                        'w-full h-11 rounded-xl transition-all duration-200 group',
                         isActive
-                          ? 'text-white bg-white/15 shadow-[0_0_10px_rgba(255,255,255,0.05)]'
+                          ? 'text-white bg-white/12 shadow-[0_0_8px_rgba(255,255,255,0.04)]'
                           : playerMode
-                            ? 'text-white/60 hover:text-white hover:bg-white/10'
-                            : 'text-white/40 hover:text-white hover:bg-white/10',
+                            ? 'text-white/60 hover:text-white hover:bg-white/8'
+                            : 'text-white/40 hover:text-white hover:bg-white/8',
                       )}
                     >
                       <Link to={item.href}>
                         <item.icon className={cn(
-                          'w-5 h-5 transition-all duration-300',
-                          isActive ? 'scale-110 drop-shadow-md' : 'group-hover:scale-110 group-hover:drop-shadow-sm'
+                          'w-5 h-5 transition-all duration-200',
+                          isActive ? 'scale-105 drop-shadow-sm' : ''
                         )} />
                       </Link>
                     </Button>
@@ -131,35 +117,6 @@ export function Sidebar({ className, playerMode }: SidebarProps) {
 
         {/* Bottom Actions */}
         <div className='flex flex-col gap-3 mt-auto w-full px-2 pb-4 pointer-events-auto'>
-          {/* Privacy Toggle */}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant='ghost'
-                size='icon'
-                onClick={handleIncognitoToggle}
-                className={cn(
-                  'w-full h-11 rounded-xl transition-all duration-300 group',
-                  isIncognito
-                    ? 'text-white bg-white/15 shadow-[0_0_10px_rgba(255,255,255,0.05)]'
-                    : playerMode
-                      ? 'text-white/60 hover:text-white hover:bg-white/10'
-                      : 'text-white/40 hover:text-white hover:bg-white/10',
-                )}
-                aria-pressed={isIncognito}
-                aria-label={isIncognito ? 'Disable private mode' : 'Enable private mode'}
-              >
-                <VenetianMask className={cn(
-                  'w-5 h-5 transition-all duration-300',
-                  isIncognito ? 'scale-110 drop-shadow-md' : 'group-hover:scale-110 group-hover:drop-shadow-sm'
-                )} />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side='right'>
-              {isIncognito ? 'Disable Incognito' : 'Enable Incognito'}
-            </TooltipContent>
-          </Tooltip>
-
           {/* Settings & Profile links */}
           {bottomNavItems.map((item) => (
             <Tooltip key={item.label}>
@@ -169,19 +126,26 @@ export function Sidebar({ className, playerMode }: SidebarProps) {
                   variant='ghost'
                   size='icon'
                   className={cn(
-                    'w-full h-11 rounded-xl transition-all duration-300 group',
+                    'relative w-full h-11 rounded-xl transition-all duration-200 group overflow-hidden',
                     item.isActive
-                      ? 'text-white bg-white/15 shadow-[0_0_10px_rgba(255,255,255,0.05)]'
+                      ? item.hasUpdateAccent
+                        ? 'text-white bg-[linear-gradient(180deg,rgba(16,185,129,0.22),rgba(255,255,255,0.1))] shadow-[0_0_14px_rgba(16,185,129,0.12)]'
+                        : 'text-white bg-white/12 shadow-[0_0_8px_rgba(255,255,255,0.04)]'
+                      : item.hasUpdateAccent
+                        ? 'text-emerald-100 bg-[linear-gradient(180deg,rgba(16,185,129,0.16),rgba(255,255,255,0.04))] shadow-[0_0_12px_rgba(16,185,129,0.12)] hover:bg-[linear-gradient(180deg,rgba(16,185,129,0.22),rgba(255,255,255,0.08))]'
                       : playerMode
-                        ? 'text-white/60 hover:text-white hover:bg-white/10'
-                        : 'text-white/40 hover:text-white hover:bg-white/10',
+                        ? 'text-white/60 hover:text-white hover:bg-white/8'
+                        : 'text-white/40 hover:text-white hover:bg-white/8',
                   )}
                 >
                   <Link to={item.href}>
                     <item.icon className={cn(
-                      'w-5 h-5 transition-all duration-300',
-                      item.isActive ? 'scale-110 drop-shadow-md' : 'group-hover:scale-110 group-hover:drop-shadow-sm'
+                      'w-5 h-5 transition-all duration-200',
+                      item.isActive ? 'scale-105 drop-shadow-sm' : ''
                     )} />
+                    {item.hasUpdateAccent && (
+                      <span className='absolute right-2.5 top-2.5 h-2 w-2 rounded-full bg-emerald-300 shadow-[0_0_8px_rgba(52,211,153,0.9)]' />
+                    )}
                   </Link>
                 </Button>
               </TooltipTrigger>

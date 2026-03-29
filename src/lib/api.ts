@@ -1,6 +1,20 @@
 import { invoke } from '@tauri-apps/api/core';
+import type {
+  PlaybackStreamOutcomeReport,
+  PlaybackStreamReusePolicy,
+} from '@/lib/playback-stream-health';
+import { handlePreviewInvoke } from '@/lib/api-preview-mocks';
+import {
+  buildStreamRankingCacheKey,
+  buildStreamRankingInvokePayload,
+  type StreamRankingOptions,
+} from '@/lib/stream-ranking';
 
 const isDev = import.meta.env.DEV;
+
+function isTauriDesktopRuntime(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
 
 // Shared error-message extractor (exported for use across the app)
 export function getErrorMessage(error: unknown): string {
@@ -20,70 +34,14 @@ export function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
-const SAVED_STREAM_HTTP_MAX_AGE_MS = 1000 * 60 * 60 * 20;
-
-function normalizeLastWatchedMs(lastWatched: number): number {
-  if (!Number.isFinite(lastWatched) || lastWatched <= 0) return 0;
-  // Backward-compat: tolerate second-based timestamps from legacy rows.
-  return lastWatched < 1_000_000_000_000 ? lastWatched * 1000 : lastWatched;
-}
-
-function isLocalhostStreamUrl(streamUrl: string): boolean {
-  const normalized = streamUrl.trim().toLowerCase();
-  return (
-    normalized.startsWith('http://127.0.0.1:') ||
-    normalized.startsWith('https://127.0.0.1:') ||
-    normalized.startsWith('http://localhost:') ||
-    normalized.startsWith('https://localhost:') ||
-    normalized.startsWith('http://[::1]:') ||
-    normalized.startsWith('https://[::1]:')
-  );
-}
-
-/**
- * Heuristic for bypassing persisted HTTP stream URLs that are likely expired
- * (e.g. signed debrid links) so resume can jump straight to fresh resolution.
- */
-export function shouldBypassSavedStream(streamUrl?: string, lastWatched?: number): boolean {
-  if (!streamUrl || !streamUrl.startsWith('http')) return false;
-  if (isLocalhostStreamUrl(streamUrl)) return false;
-  if (!lastWatched || !Number.isFinite(lastWatched) || lastWatched <= 0) return false;
-  const lastWatchedMs = normalizeLastWatchedMs(lastWatched);
-  if (lastWatchedMs <= 0) return false;
-  return Date.now() - lastWatchedMs > SAVED_STREAM_HTTP_MAX_AGE_MS;
-}
-
 async function safeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
-    // @ts-expect-error - Check if running in Tauri
-    if (typeof window !== 'undefined' && window.__TAURI_INTERNALS__) {
+    if (isTauriDesktopRuntime()) {
       return await invoke<T>(command, args);
-    } else {
-      if (isDev) console.warn(`[Mock] invoking ${command}`);
-      // ... (mocks)
-      if (
-        command === 'get_trending_movies' ||
-        command === 'get_trending_series' ||
-        command === 'get_trending_anime' ||
-        command === 'get_streams' ||
-        command === 'get_streams_for_addon' ||
-        command === 'get_skip_times' ||
-        command === 'search_media'
-      ) {
-        return [] as unknown as T;
-      }
-      if (command === 'get_media_details') {
-        const mediaArgs = args as { id?: string; type_?: string } | undefined;
-        return {
-          id: mediaArgs?.id ?? 'mock-id',
-          title: 'Mock Title',
-          type: mediaArgs?.type_ ?? 'movie',
-          description: 'This is a mock description for browser preview.',
-          year: '2024',
-        } as unknown as T;
-      }
-      return null as unknown as T;
     }
+
+    if (isDev) console.warn(`[Preview] invoking ${command}`);
+    return await handlePreviewInvoke<T>(command, args);
   } catch (e) {
     if (isDev) console.error(`Raw invoke error for ${command}:`, e);
     const message = getErrorMessage(e);
@@ -101,6 +59,7 @@ export interface MediaItem {
   description?: string;
   year?: string;
   type: 'movie' | 'series';
+  relationRole?: string;
 }
 
 export interface Episode {
@@ -192,6 +151,84 @@ export interface TorrentioStream {
   size_bytes?: number;
   /** Addon/source that returned this stream (set by the backend). */
   source_name?: string;
+  /** Stable backend-derived release family used for adjacent-episode ranking. */
+  stream_family?: string;
+  /** Backend coordinator explanation for why this stream ranks where it does. */
+  recommendation_reasons?: string[];
+}
+
+export interface PreparedPlaybackStream {
+  url: string;
+  format: string;
+  sourceName?: string;
+  streamFamily?: string;
+}
+
+export interface NextPlaybackCanonicalEpisode {
+  title?: string;
+  season: number;
+  episode: number;
+}
+
+export interface NextPlaybackSourceCoordinates {
+  lookupId: string;
+  season: number;
+  episode: number;
+  aniskipEpisode: number;
+}
+
+export interface NextPlaybackPlan {
+  canonical: NextPlaybackCanonicalEpisode;
+  source: NextPlaybackSourceCoordinates;
+  lookupKey: string;
+  primaryStream?: PreparedPlaybackStream;
+  backupStream?: PreparedPlaybackStream;
+}
+
+export interface EpisodeStreamMapping {
+  lookupId: string;
+  canonicalSeason: number;
+  canonicalEpisode: number;
+  sourceSeason: number;
+  sourceEpisode: number;
+  aniskipEpisode: number;
+}
+
+export interface AnimeCharacterProfile {
+  name: string;
+  role?: string;
+  image?: string;
+  description?: string;
+}
+
+export interface AnimeStaffProfile {
+  name: string;
+  roles: string[];
+  image?: string;
+  description?: string;
+}
+
+export interface AnimeProductionCompanyProfile {
+  name: string;
+  roles: string[];
+  logo?: string;
+  description?: string;
+}
+
+export interface AnimeStreamingPlatformProfile {
+  name: string;
+  url: string;
+  logo?: string;
+  subLanguages: string[];
+  dubLanguages: string[];
+}
+
+export interface AnimeSupplementalMetadata {
+  characters: AnimeCharacterProfile[];
+  staff: AnimeStaffProfile[];
+  productions: AnimeProductionCompanyProfile[];
+  platforms: AnimeStreamingPlatformProfile[];
+  warnings: string[];
 }
 
 export interface ResolvedStream {
@@ -202,10 +239,33 @@ export interface ResolvedStream {
 
 export interface BestResolvedStream extends ResolvedStream {
   used_fallback: boolean;
+  source_name?: string;
+  stream_family?: string;
 }
 
-export interface ResolveBestStreamOptions {
+export interface ResolveBestStreamOptions extends StreamRankingOptions {
   bypassCache?: boolean;
+}
+
+export interface PlaybackSessionTouchRequest {
+  id: string;
+  type_: string;
+  season?: number;
+  episode?: number;
+  absolute_season?: number;
+  absolute_episode?: number;
+  stream_season?: number;
+  stream_episode?: number;
+  aniskip_episode?: number;
+  title: string;
+  stream_url?: string;
+  stream_format?: string;
+  stream_lookup_id?: string;
+  stream_key?: string;
+  source_name?: string;
+  stream_family?: string;
+  position?: number;
+  duration?: number;
 }
 
 /** A user-configured Stremio-compatible addon source. */
@@ -229,19 +289,41 @@ const MEDIA_DETAILS_CACHE_TTL_MS = 1000 * 60 * 30;
 const SEARCH_CACHE_TTL_MS = 1000 * 60 * 2;
 const API_CACHE_MAX_ENTRIES = 200;
 const RESOLVE_STREAM_CACHE_TTL_MS = 1000 * 60 * 5;
-const bestStreamCache = new Map<string, { value: BestResolvedStream; expiresAt: number }>();
-const bestStreamInFlight = new Map<string, Promise<BestResolvedStream>>();
-const resolveStreamCache = new Map<string, { value: ResolvedStream; expiresAt: number }>();
-const resolveStreamInFlight = new Map<string, Promise<ResolvedStream>>();
-const streamsCache = new Map<string, { value: TorrentioStream[]; expiresAt: number }>();
-const streamsInFlight = new Map<string, Promise<TorrentioStream[]>>();
-const mediaDetailsCache = new Map<string, { value: MediaDetails; expiresAt: number }>();
-const mediaDetailsInFlight = new Map<string, Promise<MediaDetails>>();
-const searchCache = new Map<string, { value: MediaItem[]; expiresAt: number }>();
-const searchInFlight = new Map<string, Promise<MediaItem[]>>();
+const MULTI_GENRE_CACHE_TTL_MS = 1000 * 60 * 5;
+
+type TimedCacheEntry<T> = { value: T; expiresAt: number };
+
+interface RequestCache<T> {
+  ttlMs: number;
+  values: Map<string, TimedCacheEntry<T>>;
+  inFlight: Map<string, Promise<T>>;
+  clear: () => void;
+}
+
+function createRequestCache<T>(ttlMs: number): RequestCache<T> {
+  const values = new Map<string, TimedCacheEntry<T>>();
+  const inFlight = new Map<string, Promise<T>>();
+
+  return {
+    ttlMs,
+    values,
+    inFlight,
+    clear: () => {
+      values.clear();
+      inFlight.clear();
+    },
+  };
+}
+
+const bestStreamRequestCache = createRequestCache<BestResolvedStream>(BEST_STREAM_CACHE_TTL_MS);
+const resolveStreamRequestCache = createRequestCache<ResolvedStream>(RESOLVE_STREAM_CACHE_TTL_MS);
+const streamsRequestCache = createRequestCache<TorrentioStream[]>(STREAMS_CACHE_TTL_MS);
+const mediaDetailsRequestCache = createRequestCache<MediaDetails>(MEDIA_DETAILS_CACHE_TTL_MS);
+const searchRequestCache = createRequestCache<MediaItem[]>(SEARCH_CACHE_TTL_MS);
+const multiGenreRequestCache = createRequestCache<MultiGenreCatalogPage>(MULTI_GENRE_CACHE_TTL_MS);
 
 function pruneTimedCache<T>(
-  cache: Map<string, { value: T; expiresAt: number }>,
+  cache: Map<string, TimedCacheEntry<T>>,
   maxEntries = API_CACHE_MAX_ENTRIES,
 ) {
   const now = Date.now();
@@ -258,7 +340,7 @@ function pruneTimedCache<T>(
 }
 
 function setTimedCache<T>(
-  cache: Map<string, { value: T; expiresAt: number }>,
+  cache: Map<string, TimedCacheEntry<T>>,
   key: string,
   value: T,
   ttlMs: number,
@@ -269,7 +351,7 @@ function setTimedCache<T>(
 }
 
 function getTimedCache<T>(
-  cache: Map<string, { value: T; expiresAt: number }>,
+  cache: Map<string, TimedCacheEntry<T>>,
   key: string,
 ): T | null {
   const now = Date.now();
@@ -282,13 +364,50 @@ function getTimedCache<T>(
   return cached.value;
 }
 
+function runCachedRequest<T>(
+  cache: RequestCache<T>,
+  cacheKey: string,
+  load: () => Promise<T>,
+  options?: { bypassCache?: boolean; inFlightKey?: string },
+): Promise<T> {
+  const bypassCache = options?.bypassCache ?? false;
+  const inFlightKey = options?.inFlightKey ?? cacheKey;
+
+  if (!bypassCache) {
+    const cached = getTimedCache(cache.values, cacheKey);
+    if (cached) {
+      return Promise.resolve(cached);
+    }
+  } else {
+    cache.values.delete(cacheKey);
+  }
+
+  const inFlight = cache.inFlight.get(inFlightKey);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const request = load()
+    .then((result) => {
+      setTimedCache(cache.values, cacheKey, result, cache.ttlMs);
+      return result;
+    })
+    .finally(() => {
+      cache.inFlight.delete(inFlightKey);
+    });
+
+  cache.inFlight.set(inFlightKey, request);
+  return request;
+}
+
+function clearRequestCaches(...caches: Array<RequestCache<unknown>>) {
+  for (const cache of caches) {
+    cache.clear();
+  }
+}
+
 function clearStreamingCaches() {
-  streamsCache.clear();
-  streamsInFlight.clear();
-  bestStreamCache.clear();
-  bestStreamInFlight.clear();
-  resolveStreamCache.clear();
-  resolveStreamInFlight.clear();
+  clearRequestCaches(streamsRequestCache, bestStreamRequestCache, resolveStreamRequestCache);
 }
 
 function buildResolveStreamKey(
@@ -336,9 +455,24 @@ function normalizeSearchQuery(query: string): string {
   return query.trim().replace(/\s+/g, ' ');
 }
 
+function normalizeGenreFilters(genres: string[]): string[] {
+  return Array.from(
+    new Set(
+      genres
+        .map((genre) => genre.trim())
+        .filter((genre) => genre.length > 0),
+    ),
+  ).sort((left, right) => left.localeCompare(right));
+}
+
 export interface PlaybackLanguagePreferences {
   preferredAudioLanguage?: string;
   preferredSubtitleLanguage?: string;
+}
+
+export interface MultiGenreCatalogPage {
+  items: MediaItem[];
+  hasMore: boolean;
 }
 
 export const api = {
@@ -350,28 +484,37 @@ export const api = {
   /** Browse-optimised: merges both top + imdbRating catalogs for ~2x content */
   getCinemetaDiscover: (mediaType: string, catalogId: string, genre?: string) =>
     safeInvoke<MediaItem[]>('get_cinemeta_discover', { mediaType, catalogId, genre }),
+  getMultiGenreCatalog: (
+    mediaType: string,
+    catalogId: string,
+    genres: string[],
+    skip?: number,
+  ) => {
+    const normalizedGenres = normalizeGenreFilters(genres);
+    const cacheKey = [
+      mediaType.trim().toLowerCase(),
+      catalogId.trim(),
+      normalizedGenres.join('|'),
+      skip ?? 0,
+    ].join('|');
+
+    return runCachedRequest(multiGenreRequestCache, cacheKey, () =>
+      safeInvoke<MultiGenreCatalogPage>('get_multi_genre_catalog', {
+        mediaType,
+        catalogId,
+        genres: normalizedGenres,
+        skip,
+      }),
+    );
+  },
   searchMedia: (query: string) => {
     const normalizedQuery = normalizeSearchQuery(query);
     if (!normalizedQuery) return Promise.resolve([]);
 
     const cacheKey = normalizedQuery.toLowerCase();
-    const cached = getTimedCache(searchCache, cacheKey);
-    if (cached) return Promise.resolve(cached);
-
-    const inFlight = searchInFlight.get(cacheKey);
-    if (inFlight) return inFlight;
-
-    const request = safeInvoke<MediaItem[]>('search_media', { query: normalizedQuery })
-      .then((result) => {
-        setTimedCache(searchCache, cacheKey, result, SEARCH_CACHE_TTL_MS);
-        return result;
-      })
-      .finally(() => {
-        searchInFlight.delete(cacheKey);
-      });
-
-    searchInFlight.set(cacheKey, request);
-    return request;
+    return runCachedRequest(searchRequestCache, cacheKey, () =>
+      safeInvoke<MediaItem[]>('search_media', { query: normalizedQuery }),
+    );
   },
   getMediaDetails: (type: string, id: string, options?: { includeEpisodes?: boolean }) => {
     const normalizedType = type.trim();
@@ -379,27 +522,13 @@ export const api = {
     const includeEpisodes = options?.includeEpisodes ?? true;
     const cacheKey = `${buildMediaDetailsCacheKey(normalizedType, normalizedId)}|${includeEpisodes ? 'full' : 'lite'}`;
 
-    const cached = getTimedCache(mediaDetailsCache, cacheKey);
-    if (cached) return Promise.resolve(cached);
-
-    const inFlight = mediaDetailsInFlight.get(cacheKey);
-    if (inFlight) return inFlight;
-
-    const request = safeInvoke<MediaDetails>('get_media_details', {
-      mediaType: normalizedType,
-      id: normalizedId,
-      include_episodes: includeEpisodes,
-    })
-      .then((result) => {
-        setTimedCache(mediaDetailsCache, cacheKey, result, MEDIA_DETAILS_CACHE_TTL_MS);
-        return result;
-      })
-      .finally(() => {
-        mediaDetailsInFlight.delete(cacheKey);
-      });
-
-    mediaDetailsInFlight.set(cacheKey, request);
-    return request;
+    return runCachedRequest(mediaDetailsRequestCache, cacheKey, () =>
+      safeInvoke<MediaDetails>('get_media_details', {
+        mediaType: normalizedType,
+        id: normalizedId,
+        include_episodes: includeEpisodes,
+      }),
+    );
   },
   getMediaEpisodes: (type: string, id: string, season?: number, page?: number, pageSize?: number) =>
     safeInvoke<MediaEpisodesPage>('get_media_episodes', {
@@ -409,6 +538,36 @@ export const api = {
       page,
       page_size: pageSize,
     }),
+  getEpisodeStreamMapping: (
+    type: string,
+    id: string,
+    canonicalSeason: number,
+    canonicalEpisode: number,
+  ) =>
+    safeInvoke<EpisodeStreamMapping | null>('get_episode_stream_mapping', {
+      mediaType: type,
+      id,
+      canonical_season: canonicalSeason,
+      canonical_episode: canonicalEpisode,
+    }),
+  getKitsuAnimeMetadata: (id: string) =>
+    safeInvoke<AnimeSupplementalMetadata>('get_kitsu_anime_metadata', {
+      id,
+    }),
+  prepareNextPlaybackPlan: (
+    type: string,
+    id: string,
+    currentSeason: number,
+    currentEpisode: number,
+    currentStreamLookupId?: string,
+  ) =>
+    safeInvoke<NextPlaybackPlan | null>('prepare_next_playback_plan', {
+      mediaType: type,
+      id,
+      current_season: currentSeason,
+      current_episode: currentEpisode,
+      current_stream_lookup_id: currentStreamLookupId,
+    }),
 
   // Streaming
   getStreams: (
@@ -417,32 +576,20 @@ export const api = {
     season?: number,
     episode?: number,
     absoluteEpisode?: number,
+    options?: StreamRankingOptions,
   ) => {
     const normalizedType = normalizeStreamMediaType(type, id);
-    const cacheKey = buildStreamCacheKey(normalizedType, id, season, episode, absoluteEpisode);
-    const cached = getTimedCache(streamsCache, cacheKey);
-    if (cached) return Promise.resolve(cached);
-
-    const inFlight = streamsInFlight.get(cacheKey);
-    if (inFlight) return inFlight;
-
-    const request = safeInvoke<TorrentioStream[]>('get_streams', {
-      mediaType: normalizedType,
-      id,
-      season,
-      episode,
-      absolute_episode: absoluteEpisode,
-    })
-      .then((result) => {
-        setTimedCache(streamsCache, cacheKey, result, STREAMS_CACHE_TTL_MS);
-        return result;
-      })
-      .finally(() => {
-        streamsInFlight.delete(cacheKey);
-      });
-
-    streamsInFlight.set(cacheKey, request);
-    return request;
+    const cacheKey = `${buildStreamCacheKey(normalizedType, id, season, episode, absoluteEpisode)}|${buildStreamRankingCacheKey(options)}`;
+    return runCachedRequest(streamsRequestCache, cacheKey, () =>
+      safeInvoke<TorrentioStream[]>('get_streams', {
+        mediaType: normalizedType,
+        id,
+        season,
+        episode,
+        absolute_episode: absoluteEpisode,
+        ...buildStreamRankingInvokePayload(options),
+      }),
+    );
   },
   getStreamsForAddon: (
     type: string,
@@ -473,31 +620,16 @@ export const api = {
     url?: string,
   ) => {
     const cacheKey = buildResolveStreamKey(magnet, infoHash, fileIdx, season, episode, url);
-
-    const cached = getTimedCache(resolveStreamCache, cacheKey);
-    if (cached) return Promise.resolve(cached);
-
-    const inFlight = resolveStreamInFlight.get(cacheKey);
-    if (inFlight) return inFlight;
-
-    const request = safeInvoke<ResolvedStream>('resolve_stream', {
-      magnet,
-      info_hash: infoHash,
-      file_idx: fileIdx,
-      season,
-      episode,
-      url,
-    })
-      .then((result) => {
-        setTimedCache(resolveStreamCache, cacheKey, result, RESOLVE_STREAM_CACHE_TTL_MS);
-        return result;
-      })
-      .finally(() => {
-        resolveStreamInFlight.delete(cacheKey);
-      });
-
-    resolveStreamInFlight.set(cacheKey, request);
-    return request;
+    return runCachedRequest(resolveStreamRequestCache, cacheKey, () =>
+      safeInvoke<ResolvedStream>('resolve_stream', {
+        magnet,
+        info_hash: infoHash,
+        file_idx: fileIdx,
+        season,
+        episode,
+        url,
+      }),
+    );
   },
   resolveBestStream: (
     type: string,
@@ -508,53 +640,33 @@ export const api = {
     options?: ResolveBestStreamOptions,
   ) => {
     const normalizedType = normalizeStreamMediaType(type, id);
-    const cacheKey = buildStreamCacheKey(normalizedType, id, season, episode, absoluteEpisode);
+    const cacheKey = `${buildStreamCacheKey(normalizedType, id, season, episode, absoluteEpisode)}|${buildStreamRankingCacheKey(options)}`;
     const bypassCache = !!options?.bypassCache;
     const inFlightKey = bypassCache ? `${cacheKey}|bypass` : cacheKey;
 
-    if (!bypassCache) {
-      const cached = getTimedCache(bestStreamCache, cacheKey);
-      if (cached) return Promise.resolve(cached);
-    } else {
-      bestStreamCache.delete(cacheKey);
-    }
-
-    const inFlight = bestStreamInFlight.get(inFlightKey);
-    if (inFlight) return inFlight;
-
-    const request = safeInvoke<BestResolvedStream>('resolve_best_stream', {
-      mediaType: normalizedType,
-      id,
-      season,
-      episode,
-      absolute_episode: absoluteEpisode,
-    })
-      .then((result) => {
-        setTimedCache(bestStreamCache, cacheKey, result, BEST_STREAM_CACHE_TTL_MS);
-        return result;
-      })
-      .finally(() => {
-        bestStreamInFlight.delete(inFlightKey);
-      });
-
-    bestStreamInFlight.set(inFlightKey, request);
-    return request;
+    return runCachedRequest(
+      bestStreamRequestCache,
+      cacheKey,
+      () =>
+        safeInvoke<BestResolvedStream>('resolve_best_stream', {
+          mediaType: normalizedType,
+          id,
+          season,
+          episode,
+          absolute_episode: absoluteEpisode,
+          ...buildStreamRankingInvokePayload(options),
+        }),
+      { bypassCache, inFlightKey },
+    );
   },
 
   // Settings
-  saveTorrentioConfig: async (config: string) => {
-    await safeInvoke<void>('save_torrentio_config', { config });
-    clearStreamingCaches();
-  },
-  getTorrentioConfig: () => safeInvoke<string>('get_torrentio_config'),
-  // Multi-addon management
   getAddonConfigs: () => safeInvoke<AddonConfig[]>('get_addon_configs'),
   saveAddonConfigs: async (configs: AddonConfig[]) => {
     await safeInvoke<void>('save_addon_configs', { configs });
     clearStreamingCaches();
   },
   fetchAddonManifest: (url: string) => safeInvoke<AddonManifest>('fetch_addon_manifest', { url }),
-  getDebridConfig: () => safeInvoke<DebridConfig>('get_debrid_config'),
   savePlaybackLanguagePreferences: (
     preferredAudioLanguage?: string,
     preferredSubtitleLanguage?: string,
@@ -562,13 +674,46 @@ export const api = {
     safeInvoke<void>('save_playback_language_preferences', {
       preferredAudioLanguage,
       preferredSubtitleLanguage,
+    }).then(() => {
+      clearStreamingCaches();
     }),
   getPlaybackLanguagePreferences: () =>
     safeInvoke<PlaybackLanguagePreferences>('get_playback_language_preferences'),
+  getEffectivePlaybackLanguagePreferences: (mediaId?: string, mediaType?: string) =>
+    safeInvoke<PlaybackLanguagePreferences>('get_effective_playback_language_preferences', {
+      media_id: mediaId,
+      media_type: mediaType,
+    }),
+  savePlaybackLanguagePreferenceOutcome: (
+    mediaId: string,
+    mediaType: string,
+    preferredAudioLanguage?: string,
+    preferredSubtitleLanguage?: string,
+  ) =>
+    safeInvoke<void>('save_playback_language_preference_outcome', {
+      media_id: mediaId,
+      media_type: mediaType,
+      preferred_audio_language: preferredAudioLanguage,
+      preferred_subtitle_language: preferredSubtitleLanguage,
+    }),
+  getPlaybackStreamReusePolicy: (id: string, type: string, season?: number, episode?: number) =>
+    safeInvoke<PlaybackStreamReusePolicy>('get_playback_stream_reuse_policy', {
+      id,
+      type: type,
+      season,
+      episode,
+    }),
+  touchPlaybackSession: (session: PlaybackSessionTouchRequest) =>
+    safeInvoke<void>('touch_playback_session', {
+      session,
+    }),
+  reportPlaybackStreamOutcome: (report: PlaybackStreamOutcomeReport) =>
+    safeInvoke<void>('report_playback_stream_outcome', report as unknown as Record<string, unknown>),
 
   // Watch History
   saveWatchProgress: (progress: WatchProgress) => safeInvoke('save_watch_progress', { progress }),
   getWatchHistory: () => safeInvoke<WatchProgress[]>('get_watch_history'),
+  getContinueWatching: () => safeInvoke<WatchProgress[]>('get_continue_watching'),
   getWatchHistoryFull: () => safeInvoke<WatchProgress[]>('get_watch_history_full'),
   getWatchHistoryForId: (id: string) =>
     safeInvoke<WatchProgress[]>('get_watch_history_for_id', { id }),
@@ -612,7 +757,15 @@ export const api = {
     safeInvoke<MediaItem[]>('get_netflix_catalog', { catalogId, mediaType: type, skip }),
   getKitsuCatalog: (catalogId: string, genre?: string, skip?: number) =>
     safeInvoke<MediaItem[]>('get_kitsu_catalog', { catalogId, genre, skip }),
-  searchKitsu: (query: string) => safeInvoke<MediaItem[]>('search_kitsu', { query }),
+  searchKitsu: (query: string) => {
+    const normalizedQuery = normalizeSearchQuery(query);
+    if (!normalizedQuery) return Promise.resolve([]);
+
+    const cacheKey = `kitsu|${normalizedQuery.toLowerCase()}`;
+    return runCachedRequest(searchRequestCache, cacheKey, () =>
+      safeInvoke<MediaItem[]>('search_kitsu', { query: normalizedQuery }),
+    );
+  },
 
   /**
    * Fetch skippable segment timestamps for a TV episode.
@@ -654,6 +807,7 @@ export const api = {
   startDownload: (params: StartDownloadParams) =>
     safeInvoke<string>('start_download', params as unknown as Record<string, unknown>),
   pauseDownload: (id: string) => safeInvoke<void>('pause_download', { id }),
+  pauseActiveDownloads: () => safeInvoke<number>('pause_active_downloads'),
   resumeDownload: (id: string) => safeInvoke<void>('resume_download', { id }),
   cancelDownload: (id: string) => safeInvoke<void>('cancel_download', { id }),
   /** Verifies the on-disk file for a completed download still exists.
@@ -662,6 +816,8 @@ export const api = {
     safeInvoke<boolean>('check_download_file_exists', { id }),
   removeDownload: (id: string, deleteFile: boolean) =>
     safeInvoke<void>('remove_download', { id, deleteFile }),
+  clearCompletedDownloads: (deleteFile = false) =>
+    safeInvoke<number>('clear_completed_downloads', { deleteFile }),
   getDownloads: () => safeInvoke<DownloadItem[]>('get_downloads'),
   setDownloadBandwidth: (limit?: number) => safeInvoke<void>('set_download_bandwidth', { limit }),
   getDefaultDownloadPath: () => safeInvoke<string>('get_default_download_path'),
@@ -733,11 +889,6 @@ export interface ImportResult {
   statuses_imported: number;
 }
 
-export interface DebridConfig {
-  provider: string;
-  apiKey: string;
-}
-
 export interface DownloadProgressEvent {
   id: string;
   downloadedSize: number;
@@ -767,6 +918,8 @@ export interface WatchProgress {
   last_stream_format?: string;
   last_stream_lookup_id?: string;
   last_stream_key?: string;
+  source_name?: string;
+  stream_family?: string;
 }
 
 /**

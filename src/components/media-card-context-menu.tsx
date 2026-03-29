@@ -29,6 +29,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { CreateListDialog } from '@/components/list/create-list-dialog';
 import { ListIcon } from '@/components/list/list-icons';
 import { buildHistoryPlaybackPlan } from '@/lib/history-playback';
+import { buildPlayerNavigationTarget } from '@/lib/player-navigation';
 
 interface MediaCardContextMenuProps {
   item: MediaItem;
@@ -139,6 +140,7 @@ export function MediaCardContextMenu({ item, children, onPlay }: MediaCardContex
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['library'] });
+      queryClient.invalidateQueries({ queryKey: ['continue-watching'] });
       queryClient.invalidateQueries({ queryKey: ['watch-history'] });
       const extra = historyEntry ? ' & Continue Watching' : '';
       toast.success(`Removed from Library${extra}`, { description: item.title });
@@ -154,8 +156,8 @@ export function MediaCardContextMenu({ item, children, onPlay }: MediaCardContex
       await api.removeAllFromWatchHistory(item.id, historyEntry.type_);
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['continue-watching'] });
       queryClient.invalidateQueries({ queryKey: ['watch-history'] });
-      queryClient.invalidateQueries({ queryKey: ['watch-history-full'] });
       toast.success('Removed from Continue Watching', { description: item.title });
     },
     onError: () => toast.error('Failed to remove from Continue Watching'),
@@ -260,16 +262,18 @@ export function MediaCardContextMenu({ item, children, onPlay }: MediaCardContex
         return;
       }
 
-      navigate(`/player/${playbackType}/${item.id}`, {
-        state: {
-          streamUrl: resolved.url,
-          title: item.title,
-          poster: item.poster,
-          backdrop: item.backdrop,
-          format: resolved.format,
-          from,
-        },
+      const playerNavigation = buildPlayerNavigationTarget(playbackType, item.id, {
+        streamUrl: resolved.url,
+        title: item.title,
+        poster: item.poster,
+        backdrop: item.backdrop,
+        streamSourceName: resolved.source_name,
+        streamFamily: resolved.stream_family,
+        format: resolved.format,
+        from,
       });
+
+      navigate(playerNavigation.target, { state: playerNavigation.state });
     } catch {
       toast.dismiss(toastId);
       toast.error('Could not resolve stream', { description: 'Opening details page instead…' });

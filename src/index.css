@@ -109,7 +109,7 @@
 @keyframes mediaCardPopupIn {
   from {
     opacity: 0;
-    transform: translateY(4px) scale(0.98);
+    transform: translateY(6px) scale(0.97);
   }
   to {
     opacity: 1;

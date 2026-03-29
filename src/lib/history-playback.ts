@@ -1,24 +1,27 @@
 import {
   api,
-  shouldBypassSavedStream,
   type BestResolvedStream,
+  type EpisodeStreamMapping,
   type WatchProgress,
 } from '@/lib/api';
+import {
+  buildPlayerNavigationTarget,
+  type PlayerRouteState,
+} from '@/lib/player-navigation';
+import { resolveRankedBestStream } from '@/lib/stream-resolution';
 
 const QUICK_RESUME_RESOLVE_BUDGET_MS = 325;
-
-const historyLookupIdCache = new Map<string, string>();
+const CONTINUE_WATCHING_WARMUP_LIMIT = 3;
+const CONTINUE_WATCHING_WARMUP_CONCURRENCY = 2;
 
 export interface HistoryPlaybackPlan {
   kind: 'details' | 'player';
   reason?: 'missing-episode-context';
   target: string;
-  state: Record<string, unknown>;
+  state: { from: string } | PlayerRouteState;
 }
 
-function buildHistoryLookupCacheKey(item: WatchProgress): string {
-  return `${normalizeHistoryMediaType(item.type_, item.id)}|${item.id.trim()}`;
-}
+type HistoryPlaybackMediaType = 'movie' | 'series' | 'anime';
 
 function normalizeHistoryType(type: string): string {
   return type.trim().toLowerCase();
@@ -28,7 +31,7 @@ function isKitsuId(id: string): boolean {
   return id.trim().toLowerCase().startsWith('kitsu:');
 }
 
-function normalizeHistoryMediaType(type: string, id: string): 'movie' | 'series' | 'anime' {
+function normalizeHistoryMediaType(type: string, id: string): HistoryPlaybackMediaType {
   const normalized = normalizeHistoryType(type);
   if (normalized === 'movie') return 'movie';
   if (normalized === 'anime') return 'anime';
@@ -41,11 +44,6 @@ function isSeriesLikeType(type: string): boolean {
   return normalized === 'series' || normalized === 'anime';
 }
 
-function isRemoteStreamUrl(url?: string): boolean {
-  const trimmed = url?.trim().toLowerCase();
-  return !!trimmed && (trimmed.startsWith('http://') || trimmed.startsWith('https://'));
-}
-
 function isUsableResumeLookupId(type: string, lookupId?: string | null): boolean {
   const trimmed = lookupId?.trim();
   if (!trimmed) return false;
@@ -56,11 +54,6 @@ function getImmediateHistoryStreamLookupId(item: WatchProgress): string {
   const savedLookupId = item.last_stream_lookup_id?.trim();
   if (isUsableResumeLookupId(item.type_, savedLookupId)) {
     return savedLookupId!;
-  }
-
-  const cachedLookupId = historyLookupIdCache.get(buildHistoryLookupCacheKey(item));
-  if (isUsableResumeLookupId(item.type_, cachedLookupId)) {
-    return cachedLookupId!;
   }
 
   const fallbackId = item.id.trim();
@@ -77,6 +70,10 @@ interface HistoryEpisodeContext {
   streamSeason?: number;
   streamEpisode?: number;
   aniskipEpisode?: number;
+}
+
+interface ResolvedHistoryEpisodeContext extends HistoryEpisodeContext {
+  streamLookupId: string;
 }
 
 function hasExplicitStreamEpisodeContext(item: WatchProgress): boolean {
@@ -132,42 +129,61 @@ function hasEpisodeContext(item: WatchProgress): boolean {
   return absoluteSeason !== undefined && absoluteEpisode !== undefined;
 }
 
-function getMediaDetailsType(item: WatchProgress): string {
+function getMediaDetailsType(item: WatchProgress): HistoryPlaybackMediaType {
   return normalizeHistoryMediaType(item.type_, item.id);
 }
 
-async function resolveHistoryStreamLookupId(
+function applyEpisodeStreamMapping(mapping: EpisodeStreamMapping): HistoryEpisodeContext {
+  return {
+    absoluteSeason: mapping.canonicalSeason,
+    absoluteEpisode: mapping.canonicalEpisode,
+    streamSeason: mapping.sourceSeason,
+    streamEpisode: mapping.sourceEpisode,
+    aniskipEpisode: mapping.aniskipEpisode,
+  };
+}
+
+async function resolveHistoryEpisodeContext(
   item: WatchProgress,
-  options?: { allowMediaDetailsLookup?: boolean },
-): Promise<string> {
-  const immediateLookupId = getImmediateHistoryStreamLookupId(item);
-  if (isUsableResumeLookupId(item.type_, immediateLookupId)) {
-    return immediateLookupId;
-  }
+): Promise<ResolvedHistoryEpisodeContext> {
+  const baseContext = getEpisodeContext(item);
+  let streamLookupId = getImmediateHistoryStreamLookupId(item);
+  const hasCanonicalEpisodeContext =
+    baseContext.absoluteSeason !== undefined && baseContext.absoluteEpisode !== undefined;
+  const needsMappedCoordinates =
+    hasCanonicalEpisodeContext &&
+    (baseContext.streamSeason === undefined ||
+      baseContext.streamEpisode === undefined ||
+      !isUsableResumeLookupId(item.type_, streamLookupId));
 
-  const allowMediaDetailsLookup = options?.allowMediaDetailsLookup ?? true;
-  const fallbackId = item.id.trim();
-
-  if (!allowMediaDetailsLookup) {
-    return immediateLookupId;
-  }
-
-  if (isSeriesLikeType(item.type_)) {
+  if (needsMappedCoordinates) {
     try {
-      const details = await api.getMediaDetails(getMediaDetailsType(item), item.id, {
-        includeEpisodes: false,
-      });
-      const imdbId = details.imdbId?.trim();
-      if (isUsableResumeLookupId(item.type_, imdbId)) {
-        historyLookupIdCache.set(buildHistoryLookupCacheKey(item), imdbId!);
-        return imdbId!;
+      const mapping = await api.getEpisodeStreamMapping(
+        getMediaDetailsType(item),
+        item.id,
+        baseContext.absoluteSeason!,
+        baseContext.absoluteEpisode!,
+      );
+
+      if (mapping) {
+        return {
+          ...applyEpisodeStreamMapping(mapping),
+          streamLookupId: mapping.lookupId,
+        };
       }
     } catch {
-      // Fall back to the best local identifier we already have.
+      // Fall back to the stored or media-details-derived identifiers below.
     }
   }
 
-  return immediateLookupId || fallbackId;
+  if (!isUsableResumeLookupId(item.type_, streamLookupId)) {
+    streamLookupId = item.last_stream_lookup_id?.trim() || item.id.trim();
+  }
+
+  return {
+    ...baseContext,
+    streamLookupId,
+  };
 }
 
 async function recoverPreciseResumeStartTime(
@@ -175,12 +191,8 @@ async function recoverPreciseResumeStartTime(
   season?: number,
   episode?: number,
 ): Promise<number> {
-  if (Number.isFinite(item.position) && item.position > 0) {
-    return item.position;
-  }
-
   if (!isSeriesLikeType(item.type_) || season === undefined || episode === undefined) {
-    return 0;
+    return Number.isFinite(item.position) && item.position > 0 ? item.position : 0;
   }
 
   try {
@@ -190,6 +202,10 @@ async function recoverPreciseResumeStartTime(
     }
   } catch {
     // Best-effort recovery only.
+  }
+
+  if (Number.isFinite(item.position) && item.position > 0) {
+    return item.position;
   }
 
   try {
@@ -221,15 +237,22 @@ async function tryQuickBestStreamResolve(
   absoluteEpisode?: number,
   bypassCache = false,
 ): Promise<BestResolvedStream | null> {
-  const resolvePromise = api
-    .resolveBestStream(
-      getMediaDetailsType(item),
-      streamLookupId,
-      streamSeason,
-      streamEpisode,
-      absoluteEpisode,
-      bypassCache ? { bypassCache: true } : undefined,
-    )
+  const mediaType = getMediaDetailsType(item);
+  const resolvePromise = resolveRankedBestStream({
+    mediaType,
+    mediaId: item.id,
+    streamLookupId,
+    streamSeason,
+    streamEpisode,
+    absoluteEpisode,
+    bypassCache,
+    rankingTarget: {
+      mediaId: item.id,
+      mediaType,
+      season: item.season,
+      episode: item.episode,
+    },
+  })
     .catch(() => null);
 
   return Promise.race<BestResolvedStream | null>([
@@ -244,22 +267,26 @@ export async function warmHistoryPlaybackCandidate(item: WatchProgress): Promise
   if (!hasEpisodeContext(item)) return;
 
   const {
+    streamLookupId,
     streamSeason,
     streamEpisode,
     absoluteEpisode,
-  } = getEpisodeContext(item);
+    absoluteSeason,
+  } = await resolveHistoryEpisodeContext(item);
+  const savedStreamPolicy = await api.getPlaybackStreamReusePolicy(
+    item.id,
+    item.type_,
+    absoluteSeason,
+    absoluteEpisode,
+  );
   const lastUrl = item.last_stream_url?.trim() || '';
-  const shouldBypassSaved = shouldBypassSavedStream(lastUrl, item.last_watched);
-  const hasUsableSavedUrl = !!lastUrl && !shouldBypassSaved;
-  const hasRemoteSavedUrl = hasUsableSavedUrl && isRemoteStreamUrl(lastUrl);
-  const isLocalFile = hasUsableSavedUrl && !hasRemoteSavedUrl;
+  const shouldBypassSaved = savedStreamPolicy.shouldBypass;
+  const hasUsableSavedUrl = !!lastUrl && savedStreamPolicy.canReuseDirectly;
+  const hasRemoteSavedUrl = hasUsableSavedUrl && savedStreamPolicy.isRemote;
+  const isLocalFile = savedStreamPolicy.kind === 'local-file';
 
   if (isLocalFile) return;
   if (streamSeason === undefined || streamEpisode === undefined) return;
-
-  const streamLookupId = await resolveHistoryStreamLookupId(item, {
-    allowMediaDetailsLookup: true,
-  });
 
   await tryQuickBestStreamResolve(
     item,
@@ -268,6 +295,59 @@ export async function warmHistoryPlaybackCandidate(item: WatchProgress): Promise
     streamEpisode,
     absoluteEpisode,
     shouldBypassSaved || hasRemoteSavedUrl,
+  );
+}
+
+function buildHistoryWarmupKey(item: WatchProgress): string {
+  return [
+    item.type_,
+    item.id,
+    item.season ?? 'na',
+    item.episode ?? 'na',
+    item.last_stream_lookup_id ?? 'na',
+    item.last_stream_url ?? 'na',
+    item.last_stream_key ?? 'na',
+  ].join('|');
+}
+
+export async function warmContinueWatchingCandidates(
+  items: WatchProgress[],
+  options?: {
+    warmedKeys?: Set<string>;
+    maxCandidates?: number;
+    concurrency?: number;
+  },
+): Promise<void> {
+  const warmedKeys = options?.warmedKeys;
+  const maxCandidates = Math.max(1, options?.maxCandidates ?? CONTINUE_WATCHING_WARMUP_LIMIT);
+  const concurrency = Math.max(1, options?.concurrency ?? CONTINUE_WATCHING_WARMUP_CONCURRENCY);
+  const candidates: WatchProgress[] = [];
+
+  for (const item of items) {
+    const warmKey = buildHistoryWarmupKey(item);
+    if (warmedKeys?.has(warmKey)) continue;
+    warmedKeys?.add(warmKey);
+    candidates.push(item);
+    if (candidates.length >= maxCandidates) break;
+  }
+
+  if (candidates.length === 0) {
+    return;
+  }
+
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, candidates.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < candidates.length) {
+        const current = candidates[nextIndex];
+        nextIndex += 1;
+        await warmHistoryPlaybackCandidate(current).catch(() => {
+          // Continue-watching warmup stays best-effort and should never block Home rendering.
+        });
+      }
+    }),
   );
 }
 
@@ -292,21 +372,24 @@ export async function buildHistoryPlaybackPlan(
     streamSeason,
     streamEpisode,
     aniskipEpisode,
-  } = getEpisodeContext(item);
+    streamLookupId: mappedStreamLookupId,
+  } = await resolveHistoryEpisodeContext(item);
   const lastUrl = item.last_stream_url?.trim() || '';
-  const shouldBypassSaved = shouldBypassSavedStream(lastUrl, item.last_watched);
-  const usableSavedUrl = shouldBypassSaved ? undefined : lastUrl || undefined;
-  const isLocalFile = !!usableSavedUrl && !usableSavedUrl.startsWith('http');
-  const immediateStreamLookupId = getImmediateHistoryStreamLookupId(item);
+  const savedStreamPolicy = await api.getPlaybackStreamReusePolicy(
+    item.id,
+    item.type_,
+    absoluteSeason,
+    absoluteEpisode,
+  );
+  const shouldBypassSaved = savedStreamPolicy.shouldBypass;
+  const usableSavedUrl = savedStreamPolicy.canReuseDirectly ? lastUrl || undefined : undefined;
+  const isLocalFile = savedStreamPolicy.kind === 'local-file';
   const shouldResolveBeforeNavigate =
     !usableSavedUrl && !isLocalFile && streamSeason !== undefined && streamEpisode !== undefined;
 
-  const streamLookupIdPromise = shouldResolveBeforeNavigate
-    ? resolveHistoryStreamLookupId(item)
-    : Promise.resolve(immediateStreamLookupId);
   const resumeStartTimePromise = recoverPreciseResumeStartTime(item, absoluteSeason, absoluteEpisode);
   const quickResolvedStreamPromise = shouldResolveBeforeNavigate
-    ? streamLookupIdPromise.then((streamLookupId) =>
+    ? Promise.resolve(mappedStreamLookupId).then((streamLookupId) =>
         tryQuickBestStreamResolve(
           item,
           streamLookupId,
@@ -318,38 +401,39 @@ export async function buildHistoryPlaybackPlan(
       )
     : Promise.resolve<BestResolvedStream | null>(null);
 
-  const [streamLookupId, resumeStartTime, resolvedStream] = await Promise.all([
-    streamLookupIdPromise,
+  const [resumeStartTime, resolvedStream] = await Promise.all([
     resumeStartTimePromise,
     quickResolvedStreamPromise,
   ]);
 
-  const target =
-    playbackType === 'movie'
-      ? `/player/${playbackType}/${item.id}`
-      : `/player/${playbackType}/${item.id}/${absoluteSeason}/${absoluteEpisode}`;
+  const savedSourceName = item.source_name?.trim() || undefined;
+  const savedStreamFamily = item.stream_family?.trim() || undefined;
+
+  const playerNavigation = buildPlayerNavigationTarget(playbackType, item.id, {
+    streamUrl: resolvedStream?.url || usableSavedUrl,
+    streamSourceName: resolvedStream?.source_name || savedSourceName,
+    streamFamily: resolvedStream?.stream_family || savedStreamFamily,
+    title: item.title,
+    poster: item.poster,
+    backdrop: item.backdrop,
+    format: resolvedStream?.format || item.last_stream_format,
+    selectedStreamKey: item.last_stream_key,
+    streamLookupId: mappedStreamLookupId,
+    streamSeason,
+    streamEpisode,
+    absoluteSeason,
+    absoluteEpisode,
+    aniskipEpisode,
+    startTime: resumeStartTime > 0 ? resumeStartTime : 0,
+    resumeFromHistory: true,
+    isOffline: isLocalFile,
+    bypassResolveCache: !resolvedStream && shouldBypassSaved,
+    from,
+  });
 
   return {
     kind: 'player',
-    target,
-    state: {
-      streamUrl: resolvedStream?.url || usableSavedUrl,
-      title: item.title,
-      poster: item.poster,
-      backdrop: item.backdrop,
-      format: resolvedStream?.format || item.last_stream_format,
-      selectedStreamKey: item.last_stream_key,
-      streamLookupId,
-      streamSeason,
-      streamEpisode,
-      absoluteSeason,
-      absoluteEpisode,
-      aniskipEpisode,
-      startTime: resumeStartTime > 0 ? resumeStartTime : 0,
-      resumeFromHistory: true,
-      isOffline: isLocalFile,
-      bypassResolveCache: !resolvedStream && shouldBypassSaved,
-      from,
-    },
+    target: playerNavigation.target,
+    state: playerNavigation.state,
   };
 }

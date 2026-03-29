@@ -6,53 +6,34 @@ import { MediaCardSkeleton, MediaCard } from './media-card';
 import { ChevronLeft, ChevronRight, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
-import { usePrivacy } from '@/contexts/privacy-context';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import {
   buildHistoryPlaybackPlan,
-  warmHistoryPlaybackCandidate,
+  warmContinueWatchingCandidates,
 } from '@/lib/history-playback';
 
 export function ResumeSection() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const warmedResolveKeysRef = useRef<Set<string>>(new Set());
-  const { isIncognito } = usePrivacy();
   const isOnline = useOnlineStatus();
   const { data, isLoading } = useQuery({
-    queryKey: ['watch-history'],
-    queryFn: api.getWatchHistory,
+    queryKey: ['continue-watching'],
+    queryFn: api.getContinueWatching,
     // staleTime: 0 means the cache is immediately stale so it will refetch
     // whenever the query is re-used (e.g. after returning from the player).
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
 
-  // Filter out finished items (e.g. > 95% watched)
-  const items = useMemo(() => (
-    data?.filter((item) => {
-      if (item.duration === 0) return true;
-      return item.position / item.duration < 0.95;
-    }) || []
-  ), [data]);
+  const items = useMemo(() => data || [], [data]);
 
   useEffect(() => {
     if (!isOnline) return;
 
-    const candidates = items.slice(0, 4);
-
-    for (const item of candidates) {
-      const warmKey = `${item.type_}|${item.id}|${item.season ?? 'na'}|${item.episode ?? 'na'}|${item.last_stream_lookup_id ?? 'na'}|${item.last_watched}`;
-      if (warmedResolveKeysRef.current.has(warmKey)) continue;
-      warmedResolveKeysRef.current.add(warmKey);
-
-      void warmHistoryPlaybackCandidate(item)
-        .catch(() => {
-          // best effort warmup only
-        });
-    }
+    void warmContinueWatchingCandidates(items, {
+      warmedKeys: warmedResolveKeysRef.current,
+    });
   }, [items, isOnline]);
-
-  if (isIncognito) return null;
 
   const scroll = (direction: 'left' | 'right') => {
     if (scrollContainerRef.current) {
@@ -136,8 +117,8 @@ function ResumeCard({ item }: { item: WatchProgress }) {
       await api.removeAllFromWatchHistory(item.id, item.type_);
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['continue-watching'] });
       queryClient.invalidateQueries({ queryKey: ['watch-history'] });
-      queryClient.invalidateQueries({ queryKey: ['watch-history-full'] });
       toast.success('Removed from Continue Watching');
     },
     onError: (err) => {
@@ -181,6 +162,7 @@ function ResumeCard({ item }: { item: WatchProgress }) {
         progress={progressValue}
         onPlay={handlePlay}
         onRemoveFromContinue={(e) => removeItem.mutate(e)}
+        showLibraryContext
         subtitle={
           typeof item.season === 'number' && typeof item.episode === 'number'
             ? `S${item.season}:E${item.episode}`

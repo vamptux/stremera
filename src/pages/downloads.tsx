@@ -29,6 +29,10 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { useDownloads } from '@/hooks/use-downloads';
 import { api, DownloadItem } from '@/lib/api';
+import {
+  buildPlayerNavigationTarget,
+  type PlayerRouteMediaType,
+} from '@/lib/player-navigation';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 
@@ -55,9 +59,15 @@ function calculateEta(total: number, downloaded: number, speed: number) {
 }
 
 export function Downloads() {
-  const { downloads, pauseDownload, removeDownload, refetchDownloads } = useDownloads();
+  const {
+    downloads,
+    refetchDownloads,
+    pauseActiveDownloads,
+    clearCompletedDownloads,
+  } = useDownloads();
   const [activeTab, setActiveTab] = useState('all');
   const [expandedSeries, setExpandedSeries] = useState<string | null>(null);
+  const [bulkAction, setBulkAction] = useState<'pause-active' | 'clear-completed' | null>(null);
 
   // Sync with backend every time the Downloads page is opened so stale
   // in-memory state from a previous session is replaced with the persisted data.
@@ -141,35 +151,45 @@ export function Downloads() {
             variant='outline'
             size='sm'
             className='h-8 text-xs border-white/10 bg-zinc-900/50 hover:bg-zinc-800 hover:text-white'
-            onClick={() =>
-              downloads
-                .filter((d) => d.status === 'downloading')
-                .forEach((d) => pauseDownload(d.id))
-            }
+            disabled={activeCount === 0 || bulkAction !== null}
+            onClick={async () => {
+              setBulkAction('pause-active');
+              try {
+                await pauseActiveDownloads();
+              } finally {
+                setBulkAction(null);
+              }
+            }}
           >
-            <Pause className='mr-2 h-3.5 w-3.5' /> Pause All
+            <Pause className='mr-2 h-3.5 w-3.5' />
+            {bulkAction === 'pause-active' ? 'Pausing…' : 'Pause All'}
           </Button>
           <Button
             variant='outline'
             size='sm'
             className='h-8 text-xs border-red-500/20 bg-red-500/5 text-red-500 hover:bg-red-500/10 hover:text-red-400'
-            onClick={() =>
-              downloads
-                .filter((d) => d.status === 'completed')
-                .forEach((d) => removeDownload(d.id, false))
-            }
+            disabled={completedCount === 0 || bulkAction !== null}
+            onClick={async () => {
+              setBulkAction('clear-completed');
+              try {
+                await clearCompletedDownloads(false);
+              } finally {
+                setBulkAction(null);
+              }
+            }}
           >
-            <X className='mr-2 h-3.5 w-3.5' /> Clear Completed
+            <X className='mr-2 h-3.5 w-3.5' />
+            {bulkAction === 'clear-completed' ? 'Clearing…' : 'Clear Completed'}
           </Button>
         </div>
       </div>
 
       {/* Stats Cards */}
       <div className='grid gap-6 md:grid-cols-3'>
-        <Card className='relative overflow-hidden border-white/5 bg-zinc-900/40 p-6 backdrop-blur-sm transition-colors hover:bg-zinc-900/60'>
+        <Card className='relative overflow-hidden rounded-md border-white/5 bg-zinc-900/40 p-6 backdrop-blur-sm transition-colors hover:bg-zinc-900/60'>
           <div className='absolute right-0 top-0 -mt-4 -mr-4 h-24 w-24 rounded-full bg-primary/10 blur-2xl' />
           <div className='flex items-center gap-4 relative'>
-            <div className='flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10 text-primary shadow-inner shadow-white/5'>
+            <div className='flex h-12 w-12 items-center justify-center rounded-md bg-primary/10 text-primary shadow-inner shadow-white/5'>
               <HardDriveDownload className='h-6 w-6' />
             </div>
             <div>
@@ -180,10 +200,10 @@ export function Downloads() {
             </div>
           </div>
         </Card>
-        <Card className='relative overflow-hidden border-white/5 bg-zinc-900/40 p-6 backdrop-blur-sm transition-colors hover:bg-zinc-900/60'>
+        <Card className='relative overflow-hidden rounded-md border-white/5 bg-zinc-900/40 p-6 backdrop-blur-sm transition-colors hover:bg-zinc-900/60'>
           <div className='absolute right-0 top-0 -mt-4 -mr-4 h-24 w-24 rounded-full bg-blue-500/10 blur-2xl' />
           <div className='flex items-center gap-4 relative'>
-            <div className='flex h-12 w-12 items-center justify-center rounded-xl bg-blue-500/10 text-blue-500 shadow-inner shadow-white/5'>
+            <div className='flex h-12 w-12 items-center justify-center rounded-md bg-blue-500/10 text-blue-500 shadow-inner shadow-white/5'>
               <Download className='h-6 w-6' />
             </div>
             <div>
@@ -192,10 +212,10 @@ export function Downloads() {
             </div>
           </div>
         </Card>
-        <Card className='relative overflow-hidden border-white/5 bg-zinc-900/40 p-6 backdrop-blur-sm transition-colors hover:bg-zinc-900/60'>
+        <Card className='relative overflow-hidden rounded-md border-white/5 bg-zinc-900/40 p-6 backdrop-blur-sm transition-colors hover:bg-zinc-900/60'>
           <div className='absolute right-0 top-0 -mt-4 -mr-4 h-24 w-24 rounded-full bg-emerald-500/10 blur-2xl' />
           <div className='flex items-center gap-4 relative'>
-            <div className='flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-500 shadow-inner shadow-white/5'>
+            <div className='flex h-12 w-12 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-500 shadow-inner shadow-white/5'>
               <CheckCircle2 className='h-6 w-6' />
             </div>
             <div>
@@ -329,7 +349,8 @@ function DownloadCard({ item }: { item: DownloadItem }) {
     }
 
     const streamUrl = buildFullPath(item.filePath, item.fileName);
-    const type = item.mediaType || 'movie';
+    const type: PlayerRouteMediaType =
+      item.mediaType === 'series' || item.mediaType === 'anime' ? item.mediaType : 'movie';
     const id = item.mediaId || 'local';
 
     // Fast resume: look up the last saved position so the player starts exactly
@@ -342,20 +363,17 @@ function DownloadCard({ item }: { item: DownloadItem }) {
       } catch { /* ignore — player will self-recover */ }
     }
 
-    navigate(
-      item.season
-        ? `/player/${type}/${id}/${item.season}/${item.episode}`
-        : `/player/${type}/${id}`,
-      {
-        state: {
-          streamUrl,
-          title: item.title,
-          poster: item.poster,
-          startTime,
-          isOffline: true,
-        },
-      },
-    );
+    const playerNavigation = buildPlayerNavigationTarget(type, id, {
+      streamUrl,
+      title: item.title,
+      poster: item.poster,
+      startTime,
+      absoluteSeason: item.season,
+      absoluteEpisode: item.episode,
+      isOffline: true,
+    });
+
+    navigate(playerNavigation.target, { state: playerNavigation.state });
   };
 
   const handleOpenFolder = () => {
@@ -364,12 +382,10 @@ function DownloadCard({ item }: { item: DownloadItem }) {
 
   return (
     <Card className={cn(
-      'group overflow-hidden transition-all duration-300 hover:shadow-2xl hover:shadow-black/20',
+      'group overflow-hidden rounded-md transition-all duration-200 border hover:border-zinc-700/80',
       item.status === 'error'
-        // DR1: Visually distinct error state with red ring so failed downloads are
-        // immediately apparent without requiring the user to find the Failed tab.
         ? 'border-red-500/20 bg-red-950/10 hover:bg-red-950/20 hover:border-red-500/30'
-        : 'border-white/5 bg-zinc-900/40 hover:bg-zinc-900/60 hover:border-white/10',
+        : 'border-white/[0.04] bg-zinc-900/30 hover:bg-zinc-900/50',
     )}>
       <div className='flex gap-4 p-3'>
         {/* Poster */}

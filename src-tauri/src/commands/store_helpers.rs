@@ -1,6 +1,5 @@
 use super::{
-    load_torrentio_config, normalize_non_empty, normalize_torrentio_config, AddonConfig, MediaItem,
-    ADDON_CONFIGS_KEY, LIBRARY_INDEX_KEY, LIBRARY_ITEM_PREFIX, LIBRARY_MAP_KEY,
+    normalize_non_empty, MediaItem, LIBRARY_INDEX_KEY, LIBRARY_ITEM_PREFIX, LIBRARY_MAP_KEY,
     WATCH_STATUS_INDEX_KEY, WATCH_STATUS_ITEM_PREFIX, WATCH_STATUS_MAP_KEY,
 };
 use serde_json::json;
@@ -24,6 +23,7 @@ pub(super) fn normalize_library_item(mut item: MediaItem) -> Option<MediaItem> {
     item.logo = item.logo.and_then(|s| normalize_non_empty(&s));
     item.description = item.description.and_then(|s| normalize_non_empty(&s));
     item.year = item.year.and_then(|s| normalize_non_empty(&s));
+    item.relation_role = item.relation_role.and_then(|s| normalize_non_empty(&s));
 
     Some(item)
 }
@@ -42,6 +42,7 @@ pub(super) fn merge_library_item(existing: MediaItem, incoming: MediaItem) -> Me
         description: choose_library_field(incoming.description, existing.description),
         year: choose_library_field(incoming.year, existing.year),
         type_: incoming.type_,
+        relation_role: choose_library_field(incoming.relation_role, existing.relation_role),
     }
 }
 
@@ -238,84 +239,3 @@ pub(super) fn load_watch_statuses_map<R: tauri::Runtime>(
     Ok(statuses)
 }
 
-fn normalize_loaded_addon_config(mut config: AddonConfig) -> Option<AddonConfig> {
-    let url = normalize_torrentio_config(&config.url).ok().flatten()?;
-    let fallback_name = reqwest::Url::parse(&url)
-        .ok()
-        .and_then(|u| u.host_str().map(|host| host.to_string()));
-
-    config.id = normalize_non_empty(&config.id).unwrap_or_else(|| url.clone());
-    config.name = normalize_non_empty(&config.name)
-        .or(fallback_name)
-        .unwrap_or_else(|| "Addon".to_string());
-    config.url = url;
-
-    Some(config)
-}
-
-fn normalize_loaded_addon_configs(configs: Vec<AddonConfig>) -> Vec<AddonConfig> {
-    let mut normalized_configs: Vec<AddonConfig> = Vec::with_capacity(configs.len());
-    let mut seen_urls: HashSet<String> = HashSet::with_capacity(configs.len());
-    let mut seen_ids: HashSet<String> = HashSet::with_capacity(configs.len());
-
-    for mut config in configs
-        .into_iter()
-        .filter_map(normalize_loaded_addon_config)
-    {
-        if !seen_urls.insert(config.url.clone()) {
-            continue;
-        }
-
-        if !seen_ids.insert(config.id.clone()) {
-            config.id = config.url.clone();
-            if !seen_ids.insert(config.id.clone()) {
-                continue;
-            }
-        }
-
-        normalized_configs.push(config);
-    }
-
-    normalized_configs
-}
-
-fn legacy_torrentio_addon_config(config_url: String) -> AddonConfig {
-    AddonConfig {
-        id: "legacy-torrentio".to_string(),
-        url: config_url,
-        name: "Torrentio".to_string(),
-        enabled: true,
-    }
-}
-
-pub(super) fn resolve_addon_configs(
-    stored_configs: Option<Vec<AddonConfig>>,
-    legacy_torrentio_config: Option<String>,
-) -> Vec<AddonConfig> {
-    if let Some(configs) = stored_configs {
-        return normalize_loaded_addon_configs(configs);
-    }
-
-    legacy_torrentio_config
-        .map(legacy_torrentio_addon_config)
-        .into_iter()
-        .collect()
-}
-
-pub(super) fn load_addon_configs<R: tauri::Runtime>(
-    store: &tauri_plugin_store::Store<R>,
-) -> Vec<AddonConfig> {
-    if let Some(value) = store.get(ADDON_CONFIGS_KEY) {
-        let stored_configs = serde_json::from_value::<Vec<AddonConfig>>(value).unwrap_or_default();
-        return resolve_addon_configs(Some(stored_configs), None);
-    }
-
-    resolve_addon_configs(None, load_torrentio_config(store))
-}
-
-pub(super) fn save_addon_configs_to_store<R: tauri::Runtime>(
-    store: &tauri_plugin_store::Store<R>,
-    configs: &[AddonConfig],
-) {
-    store.set(ADDON_CONFIGS_KEY, serde_json::json!(configs));
-}

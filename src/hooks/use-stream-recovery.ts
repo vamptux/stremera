@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useRef, type MutableRefObject } from 'react';
-import { api } from '@/lib/api';
+import { type PlaybackStreamOutcome } from '@/lib/playback-stream-health';
+import { resolveRankedBestStream } from '@/lib/stream-resolution';
 
 interface StreamFallback {
   url: string;
   format: string;
+  sourceName?: string;
+  streamFamily?: string;
 }
 
 interface UseStreamRecoveryOptions {
   activeStreamUrl?: string;
   initialStreamUrl?: string;
+  preparedBackupStream?: StreamFallback;
   isHistoryResume: boolean;
   isOffline: boolean;
   mediaType?: string;
@@ -22,6 +26,8 @@ interface UseStreamRecoveryOptions {
   mountedRef: MutableRefObject<boolean>;
   lastStreamUrlRef: MutableRefObject<string | undefined>;
   activeStreamFormatRef: MutableRefObject<string | undefined>;
+  activeStreamSourceNameRef: MutableRefObject<string | undefined>;
+  activeStreamFamilyRef: MutableRefObject<string | undefined>;
   errorRef: MutableRefObject<string | null>;
   beginLoading: () => void;
   stopLoading: (makeTransparent?: boolean) => void;
@@ -29,6 +35,10 @@ interface UseStreamRecoveryOptions {
   setIsResolving: (value: boolean) => void;
   setResolveStatus: (value: string) => void;
   setActiveStreamUrl: (value: string | undefined) => void;
+  reportStreamFailure: (
+    outcome: Exclude<PlaybackStreamOutcome, 'verified'>,
+    streamUrl?: string,
+  ) => void;
 }
 
 interface UseStreamRecoveryResult {
@@ -56,6 +66,7 @@ function normalizeStreamResolveMediaType(
 export function useStreamRecovery({
   activeStreamUrl,
   initialStreamUrl,
+  preparedBackupStream,
   isHistoryResume,
   isOffline,
   mediaType,
@@ -69,6 +80,8 @@ export function useStreamRecovery({
   mountedRef,
   lastStreamUrlRef,
   activeStreamFormatRef,
+  activeStreamSourceNameRef,
+  activeStreamFamilyRef,
   errorRef,
   beginLoading,
   stopLoading,
@@ -76,6 +89,7 @@ export function useStreamRecovery({
   setIsResolving,
   setResolveStatus,
   setActiveStreamUrl,
+  reportStreamFailure,
 }: UseStreamRecoveryOptions): UseStreamRecoveryResult {
   const playbackStartedRef = useRef(false);
   const staleLinkRecoveryTriedRef = useRef(false);
@@ -85,6 +99,7 @@ export function useStreamRecovery({
   const startupWatchdogTimerRef = useRef<NodeJS.Timeout | null>(null);
   const startupWatchdogCancelledRef = useRef(false);
   const startupRecoveryAttemptedForRef = useRef<Set<string>>(new Set());
+  const preparedBackupConsumedRef = useRef(false);
 
   const clearRecoveryTimers = useCallback(() => {
     if (staleFallbackTimerRef.current) {
@@ -112,7 +127,8 @@ export function useStreamRecovery({
 
   useEffect(() => {
     startupRecoveryAttemptedForRef.current.clear();
-  }, [mediaId, resolveSeason, resolveEpisode]);
+    preparedBackupConsumedRef.current = false;
+  }, [mediaId, resolveSeason, resolveEpisode, initialStreamUrl]);
 
   const recoverFromStaleSavedStream = useCallback(() => {
     if (!isHistoryResume) return false;
@@ -123,15 +139,20 @@ export function useStreamRecovery({
     clearRecoveryTimers();
     setError(null);
     beginLoading();
+    reportStreamFailure('expired-saved-stream', activeStreamUrl);
 
     const fallback = staleFallbackUrlRef.current;
     if (fallback?.url && fallback.url !== activeStreamUrl) {
       setResolveStatus('Saved stream expired, switching to best available stream...');
       activeStreamFormatRef.current = fallback.format;
+      activeStreamSourceNameRef.current = fallback.sourceName;
+      activeStreamFamilyRef.current = fallback.streamFamily;
       setActiveStreamUrl(fallback.url);
     } else {
       setResolveStatus('Saved stream expired, resolving fresh stream...');
       activeStreamFormatRef.current = undefined;
+      activeStreamSourceNameRef.current = undefined;
+      activeStreamFamilyRef.current = undefined;
       setActiveStreamUrl(undefined);
     }
 
@@ -139,10 +160,13 @@ export function useStreamRecovery({
   }, [
     activeStreamUrl,
     activeStreamFormatRef,
+    activeStreamFamilyRef,
+    activeStreamSourceNameRef,
     beginLoading,
     clearRecoveryTimers,
     initialStreamUrl,
     isHistoryResume,
+    reportStreamFailure,
     setActiveStreamUrl,
     setError,
     setResolveStatus,
@@ -163,15 +187,41 @@ export function useStreamRecovery({
 
       try {
         if (startupWatchdogCancelledRef.current || playbackStartedRef.current) return false;
+        reportStreamFailure('startup-timeout', sourceUrl);
 
-        const resolved = await api.resolveBestStream(
-          effectiveMediaType,
-          streamLookupId || mediaId,
-          resolveSeason,
-          resolveEpisode,
-          absoluteEpisode ?? resolveEpisode,
-          { bypassCache: true },
-        );
+        const backupStream = preparedBackupStream;
+        const backupStreamUrl = backupStream?.url?.trim();
+        if (
+          backupStream &&
+          !preparedBackupConsumedRef.current &&
+          backupStreamUrl &&
+          backupStreamUrl !== sourceUrl &&
+          lastStreamUrlRef.current === sourceUrl
+        ) {
+          preparedBackupConsumedRef.current = true;
+          activeStreamFormatRef.current = backupStream.format;
+          activeStreamSourceNameRef.current = backupStream.sourceName;
+          activeStreamFamilyRef.current = backupStream.streamFamily;
+          setResolveStatus('Prepared stream stalled, switching to backup candidate...');
+          setActiveStreamUrl(backupStreamUrl);
+          return true;
+        }
+
+        const resolved = await resolveRankedBestStream({
+          mediaType: effectiveMediaType,
+          mediaId,
+          streamLookupId: streamLookupId || mediaId,
+          streamSeason: resolveSeason,
+          streamEpisode: resolveEpisode,
+          absoluteEpisode: absoluteEpisode ?? resolveEpisode,
+          bypassCache: true,
+          rankingTarget: {
+            mediaId,
+            mediaType: effectiveMediaType,
+            season: resolveSeason,
+            episode: resolveEpisode,
+          },
+        });
 
         if (startupWatchdogCancelledRef.current || playbackStartedRef.current) return false;
         if (!mountedRef.current) return false;
@@ -179,6 +229,8 @@ export function useStreamRecovery({
 
         if (resolved?.url && resolved.url !== sourceUrl) {
           activeStreamFormatRef.current = resolved.format;
+          activeStreamSourceNameRef.current = resolved.source_name?.trim() || undefined;
+          activeStreamFamilyRef.current = resolved.stream_family?.trim() || undefined;
           setActiveStreamUrl(resolved.url);
           return true;
         }
@@ -195,11 +247,14 @@ export function useStreamRecovery({
     },
     [
       activeStreamFormatRef,
+      activeStreamFamilyRef,
+      activeStreamSourceNameRef,
       isOffline,
       lastStreamUrlRef,
       mediaId,
       mediaType,
       mountedRef,
+      preparedBackupStream,
       absoluteEpisode,
       resolveEpisode,
       resolveSeason,
@@ -208,6 +263,7 @@ export function useStreamRecovery({
       setIsResolving,
       setResolveStatus,
       streamLookupId,
+      reportStreamFailure,
     ],
   );
 
@@ -225,21 +281,29 @@ export function useStreamRecovery({
     staleFallbackInFlightRef.current = true;
     let cancelled = false;
 
-    api
-      .resolveBestStream(
-        effectiveMediaType,
-        streamLookupId || mediaId,
-        resolveSeason,
-        resolveEpisode,
-        absoluteEpisode ?? resolveEpisode,
-        { bypassCache: true },
-      )
+    resolveRankedBestStream({
+      mediaType: effectiveMediaType,
+      mediaId,
+      streamLookupId: streamLookupId || mediaId,
+      streamSeason: resolveSeason,
+      streamEpisode: resolveEpisode,
+      absoluteEpisode: absoluteEpisode ?? resolveEpisode,
+      bypassCache: true,
+      rankingTarget: {
+        mediaId,
+        mediaType: effectiveMediaType,
+        season: resolveSeason,
+        episode: resolveEpisode,
+      },
+    })
       .then((result) => {
         if (cancelled || playbackStartedRef.current || !result?.url) return;
         if (result.url === initialStreamUrl) return;
         staleFallbackUrlRef.current = {
           url: result.url,
           format: result.format,
+          sourceName: result.source_name?.trim() || undefined,
+          streamFamily: result.stream_family?.trim() || undefined,
         };
       })
       .catch(() => {

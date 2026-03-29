@@ -1,6 +1,6 @@
 use crate::providers::realdebrid::RealDebrid;
 use regex::Regex;
-use reqwest::{header, Client};
+use reqwest::{Client, header};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -163,10 +163,11 @@ fn rd_token_cache_segment(rd_token: Option<&str>) -> String {
 
 /// Builds a short deterministic cache segment from the addon config URL so that
 /// different addons never share a cache entry for the same content.
-fn config_cache_segment(config_url: Option<&str>) -> String {
-    let Some(url) = config_url.map(str::trim).filter(|u| !u.is_empty()) else {
+fn config_cache_segment(config_url: &str) -> String {
+    let url = config_url.trim();
+    if url.is_empty() {
         return "cfg:default".to_string();
-    };
+    }
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     url.hash(&mut hasher);
     format!("cfg:{:016x}", hasher.finish())
@@ -192,9 +193,15 @@ pub struct TorrentioStream {
     pub seeders: Option<u32>,
     #[serde(skip_deserializing, default)]
     pub size_bytes: Option<u64>,
-    /// Which addon/source produced this stream (set by commands.rs, not from Torrentio JSON).
+    /// Which addon/source produced this stream (set by commands.rs, not from the addon payload).
     #[serde(skip_deserializing, default)]
     pub source_name: Option<String>,
+    /// Stable backend-derived identity for release families that can be reused across nearby episodes.
+    #[serde(skip_deserializing, default)]
+    pub stream_family: Option<String>,
+    /// Short user-facing explanation from the backend coordinator for why this stream ranks here.
+    #[serde(skip_deserializing, default)]
+    pub recommendation_reasons: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -205,19 +212,17 @@ pub struct BehaviorHints {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct TorrentioResponse {
+pub struct AddonStreamResponse {
     pub streams: Vec<TorrentioStream>,
 }
 
-/// TTL for cached Torrentio stream responses. Shared across `get_streams` and
+/// TTL for cached addon stream responses. Shared across `get_streams` and
 /// `resolve_best_stream` to avoid duplicate HTTP requests for the same content.
 const STREAM_CACHE_TTL: Duration = Duration::from_secs(180);
 
 /// Maximum number of entries before a full eviction pass.
 const STREAM_CACHE_MAX_ENTRIES: usize = 64;
 
-/// Truncation budget for default/public stream lists.
-const DEFAULT_STREAMS_MAX: usize = 15;
 /// Max number of debrid-friendly streams retained for custom config mode.
 const DEBRID_STREAMS_MAX: usize = 15;
 /// Max number of torrent-capable streams retained for custom config mode.
@@ -232,19 +237,19 @@ struct CachedStreams {
     expires_at: Instant,
 }
 
-pub struct Torrentio {
+pub struct StremioAddonTransport {
     client: Client,
     /// In-memory, TTL-based cache for `get_streams` results keyed by
-    /// `{type}|{id}|{rd_token_hash_or_none}`.
-    /// Prevents duplicate Torrentio HTTP requests when multiple code-paths
+    /// `{type}|{id}|{rd_token_hash_or_none}|{addon_url_hash}`.
+    /// Prevents duplicate addon HTTP requests when multiple code-paths
     /// (e.g. `get_streams` command + `resolve_best_stream` command) query the
     /// same content within a short window.
     cache: Mutex<HashMap<String, CachedStreams>>,
 }
 
 /// Composite quality score for a stream based on resolution, source, HDR,
-/// audio, and encoding metadata. Higher = better.  Used by both the
-/// Torrentio sort in `get_streams` and the best-stream ranker in commands.
+/// audio, and encoding metadata. Higher = better. Used by both addon ranking
+/// and the best-stream ranker in commands.
 pub fn stream_quality_score(stream: &TorrentioStream) -> i32 {
     let title = stream.title.as_deref().unwrap_or("").to_lowercase();
     let name = stream.name.as_deref().unwrap_or("").to_lowercase();
@@ -302,7 +307,7 @@ pub fn stream_quality_score(stream: &TorrentioStream) -> i32 {
     score
 }
 
-impl Torrentio {
+impl StremioAddonTransport {
     fn matches_stream_identity(left: &TorrentioStream, right: &TorrentioStream) -> bool {
         left.info_hash == right.info_hash
             && left.file_idx == right.file_idx
@@ -335,20 +340,42 @@ impl Torrentio {
         Ok(parsed.to_string())
     }
 
-    fn is_torrentio_like_host(host: &str) -> bool {
-        host.to_ascii_lowercase().contains("torrentio")
+    fn should_probe_root_fallback(base_url: &str) -> bool {
+        let Ok(parsed) = reqwest::Url::parse(base_url) else {
+            return false;
+        };
+
+        if parsed.query().is_some() {
+            return true;
+        }
+
+        parsed
+            .path_segments()
+            .into_iter()
+            .flatten()
+            .filter(|segment| !segment.is_empty() && *segment != "manifest.json")
+            .any(|segment| segment.contains('=') || segment.contains('|'))
     }
 
-    fn should_probe_fallback_hosts(base_url: &str) -> bool {
-        reqwest::Url::parse(base_url)
-            .ok()
-            .and_then(|parsed| parsed.host_str().map(Self::is_torrentio_like_host))
-            .unwrap_or(false)
+    fn build_request_origin(base_url: &str) -> Result<String, String> {
+        let parsed = reqwest::Url::parse(base_url)
+            .map_err(|e| format!("Invalid addon URL: {}", e))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| "Invalid addon URL: missing host".to_string())?;
+
+        let mut origin = format!("{}://{}", parsed.scheme(), host);
+        if let Some(port) = parsed.port() {
+            origin.push_str(&format!(":{}", port));
+        }
+
+        Ok(origin)
     }
 
     pub fn new() -> Self {
         // Build a header map that mirrors what a browser / Stremio sends so that
-        // Cloudflare intermediaries in front of Torrentio do not challenge us.
+        // Some addon hosts sit behind CDN or anti-bot layers that are friendlier
+        // to browser-like request headers.
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::ACCEPT,
@@ -370,7 +397,7 @@ impl Torrentio {
             header::CACHE_CONTROL,
             header::HeaderValue::from_static("no-cache"),
         );
-        // Stremio-specific header that Torrentio can use to allow legitimate requests.
+        // Stremio-specific header understood by multiple addon implementations.
         headers.insert(
             header::HeaderName::from_static("stremio-addon-transport"),
             header::HeaderValue::from_static("network/http"),
@@ -418,7 +445,7 @@ impl Torrentio {
         id: &str,
         rd_provider: Option<&RealDebrid>,
         rd_token: Option<&str>,
-        config_url: Option<&str>,
+        addon_url: &str,
     ) -> Result<Vec<TorrentioStream>, String> {
         // id for movies: tt1234567
         // id for series: tt1234567:1:2
@@ -430,7 +457,7 @@ impl Torrentio {
             type_,
             id,
             rd_token_cache_segment(rd_token),
-            config_cache_segment(config_url),
+            config_cache_segment(addon_url),
         );
         {
             let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -441,46 +468,30 @@ impl Torrentio {
             }
         }
 
-        // Require user-provided config (no fallback to public endpoint)
-        let base_url = if let Some(cfg) = config_url {
-            let cfg = cfg.trim();
-            if cfg.is_empty() {
-                return Ok(vec![]);
-            }
-            let mut url = cfg.to_string();
-            // Clean up if user pasted the full manifest URL
-            if url.ends_with("/manifest.json") {
-                url = url.trim_end_matches("/manifest.json").to_string();
-            }
-            if url.ends_with('/') {
-                url.pop();
-            }
-            url
-        } else {
+        let cfg = addon_url.trim();
+        if cfg.is_empty() {
             return Ok(vec![]);
-        };
-        let has_custom_config = config_url.is_some();
-        let should_probe_fallbacks =
-            has_custom_config && Self::should_probe_fallback_hosts(&base_url);
+        }
+
+        let mut base_url = cfg.to_string();
+        if base_url.ends_with("/manifest.json") {
+            base_url = base_url.trim_end_matches("/manifest.json").to_string();
+        }
+        if base_url.ends_with('/') {
+            base_url.pop();
+        }
+
+        let should_probe_fallbacks = Self::should_probe_root_fallback(&base_url);
 
         let url = Self::build_stream_endpoint(&base_url, type_, id)?;
 
         #[cfg(debug_assertions)]
-        eprintln!("Torrentio stream URL: {}", sanitize_torrentio_log(&url));
+        eprintln!("Addon stream URL: {}", sanitize_addon_log(&url));
 
         // Derive origin from the base URL so the request looks like it's coming
         // from the same-origin (Stremio-like context).  This satisfies Cloudflare
         // CORS-aware checks without leaking the user's API key in the Referer.
-        let origin = reqwest::Url::parse(&base_url)
-            .ok()
-            .map(|u| {
-                let mut origin = format!("{}://{}", u.scheme(), u.host_str().unwrap_or_default());
-                if let Some(port) = u.port() {
-                    origin.push_str(&format!(":{}", port));
-                }
-                origin
-            })
-            .unwrap_or_else(|| "https://torrentio.strem.fun".to_string());
+        let origin = Self::build_request_origin(&base_url)?;
 
         // Max 2 attempts: one fresh request + one retry after a short back-off.
         let mut last_error = String::new();
@@ -501,7 +512,7 @@ impl Torrentio {
                 Err(e) => {
                     last_error = e.to_string();
                     #[cfg(debug_assertions)]
-                    eprintln!("Torrentio request failed (attempt {}): {}", attempt + 1, e);
+                    eprintln!("Addon stream request failed (attempt {}): {}", attempt + 1, e);
                     continue;
                 }
             };
@@ -510,13 +521,13 @@ impl Torrentio {
                 let status = res.status();
                 #[cfg(debug_assertions)]
                 eprintln!(
-                    "Torrentio Error {} (attempt {}) for {}",
+                    "Addon stream error {} (attempt {}) for {}",
                     status,
                     attempt + 1,
-                    sanitize_torrentio_log(&url)
+                    sanitize_addon_log(&url)
                 );
 
-                // For custom config URLs, a 403 can still be recoverable via
+                // For path-configured addon URLs, a 403 can still be recoverable via
                 // root/public fallback endpoints. Try those before returning.
                 if status == reqwest::StatusCode::FORBIDDEN && should_probe_fallbacks {
                     let mut fallback_streams =
@@ -524,32 +535,31 @@ impl Torrentio {
                     if !fallback_streams.is_empty() {
                         Self::hydrate_streams(&mut fallback_streams);
                         Self::dedupe_streams(&mut fallback_streams);
-                        let fallback_streams =
-                            Self::truncate_streams_for_mode(fallback_streams, true);
+                        let fallback_streams = Self::truncate_streams(fallback_streams);
                         self.cache_put(&cache_key, &fallback_streams);
                         return Ok(fallback_streams);
                     }
-                } else if status == reqwest::StatusCode::FORBIDDEN && has_custom_config {
+                } else if status == reqwest::StatusCode::FORBIDDEN {
                     #[cfg(debug_assertions)]
                     eprintln!(
-                        "Skipping fallback probes for non-Torrentio host: {}",
+                        "Skipping root fallback probes for addon URL without embedded config segments: {}",
                         base_url
                     );
                 }
 
                 return Err(format!(
-                    "Torrentio returned HTTP {}. Check your Torrentio config URL in Settings → Streaming.",
+                    "Configured addon returned HTTP {}. Check the addon URL in Settings → Streaming.",
                     status.as_u16()
                 ));
             }
 
-            let body: TorrentioResponse = match res.json::<TorrentioResponse>().await {
+                let body: AddonStreamResponse = match res.json::<AddonStreamResponse>().await {
                 Ok(b) => b,
                 Err(e) => {
                     last_error = e.to_string();
                     #[cfg(debug_assertions)]
                     eprintln!(
-                        "Torrentio JSON parse error (attempt {}): {}",
+                        "Addon stream JSON parse error (attempt {}): {}",
                         attempt + 1,
                         e
                     );
@@ -561,8 +571,7 @@ impl Torrentio {
             Self::hydrate_streams(&mut streams);
 
             // Parse Metadata (Seeders, Size)
-            // If the user uses a custom config URL with embedded Debrid credentials,
-            // Torrentio often returns direct HTTP links without infoHash metadata.
+            // Some path-configured addons return direct HTTP links without infoHash metadata.
             // For Torrent/P2P mode we still need infoHash-capable entries, so we do a
             // best-effort fallback query against the addon origin root and merge only
             // torrent-capable results.
@@ -571,24 +580,24 @@ impl Torrentio {
                     Self::fetch_fallback_streams(&self.client, &base_url, type_, id).await;
                 Self::hydrate_streams(&mut fallback_streams);
                 Self::merge_torrent_capable_unique(&mut streams, fallback_streams);
-            } else if has_custom_config && !streams.iter().any(|s| s.info_hash.is_some()) {
+            } else if !streams.iter().any(|s| s.info_hash.is_some()) {
                 #[cfg(debug_assertions)]
                 eprintln!(
-                    "Skipping torrent-capable fallback merge for non-Torrentio host: {}",
+                    "Skipping torrent-capable root fallback merge for addon URL without embedded config segments: {}",
                     base_url
                 );
             }
 
-            // With custom config, only run RD availability when magnet links are present.
-            let needs_rd_check = if has_custom_config {
-                streams
-                    .iter()
-                    .any(|s| s.url.as_deref().is_none_or(|url| url.starts_with("magnet")))
-            } else {
-                true
-            };
+            // Only run RD availability when at least one torrent-capable candidate exists.
+            let needs_rd_check = streams.iter().any(|stream| {
+                stream.info_hash.is_some()
+                    || stream
+                        .url
+                        .as_deref()
+                        .is_some_and(|url| url.starts_with("magnet"))
+            });
 
-            if needs_rd_check && !has_custom_config {
+            if needs_rd_check {
                 if let (Some(rd), Some(token)) = (rd_provider, rd_token) {
                     let hashes: Vec<String> = streams
                         .iter()
@@ -700,7 +709,7 @@ impl Torrentio {
             {
                 let batch_count = streams.iter().filter(|s| stream_contains_batch(s)).count();
                 eprintln!(
-                    "Torrentio: {} streams total, {} batch/pack, req s={:?} e={:?}",
+                    "Addon streams: {} total, {} batch/pack, req s={:?} e={:?}",
                     streams.len(),
                     batch_count,
                     req_season,
@@ -709,7 +718,7 @@ impl Torrentio {
             }
 
             Self::dedupe_streams(&mut streams);
-            let streams = Self::truncate_streams_for_mode(streams, has_custom_config);
+            let streams = Self::truncate_streams(streams);
 
             // ── Cache store ──────────────────────────────────────────────
             if !streams.is_empty() {
@@ -720,22 +729,13 @@ impl Torrentio {
         } // end retry loop
 
         Err(if last_error.is_empty() {
-            "Torrentio request failed after retries".to_string()
+            "Addon stream request failed after retries".to_string()
         } else {
             last_error
         })
     }
 
-    fn truncate_streams_for_mode(
-        streams: Vec<TorrentioStream>,
-        has_custom_config: bool,
-    ) -> Vec<TorrentioStream> {
-        if !has_custom_config {
-            let mut compact = streams;
-            compact.truncate(DEFAULT_STREAMS_MAX);
-            return compact;
-        }
-
+    fn truncate_streams(streams: Vec<TorrentioStream>) -> Vec<TorrentioStream> {
         let mut debrid_like: Vec<TorrentioStream> = Vec::new();
         let mut torrent_like: Vec<TorrentioStream> = Vec::new();
 
@@ -888,7 +888,7 @@ impl Torrentio {
 
         match request.send().await {
             Ok(resp) if resp.status().is_success() => {
-                match resp.json::<TorrentioResponse>().await {
+                match resp.json::<AddonStreamResponse>().await {
                     Ok(body) => body.streams,
                     Err(_) => vec![],
                 }
@@ -915,7 +915,7 @@ impl Torrentio {
 
         if let Some((origin_root, fallback_url)) = origin_fallback {
             #[cfg(debug_assertions)]
-            eprintln!("Torrentio fallback stream URL: {}", fallback_url);
+            eprintln!("Addon root fallback stream URL: {}", fallback_url);
             return Self::fetch_streams_from_endpoint(
                 client,
                 fallback_url.as_str(),
@@ -929,14 +929,14 @@ impl Torrentio {
 }
 
 #[cfg(debug_assertions)]
-fn sanitize_torrentio_log(value: &str) -> String {
+fn sanitize_addon_log(value: &str) -> String {
     static TOKEN_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(realdebrid=)[^/\s]+").expect("valid regex"));
 
     TOKEN_RE.replace_all(value, "$1[redacted]").into_owned()
 }
 
-impl Default for Torrentio {
+impl Default for StremioAddonTransport {
     fn default() -> Self {
         Self::new()
     }
@@ -1031,6 +1031,8 @@ mod tests {
             seeders: None,
             size_bytes: None,
             source_name: None,
+            stream_family: None,
+            recommendation_reasons: Vec::new(),
         };
         assert!(stream_contains_batch(&stream));
     }
@@ -1048,11 +1050,13 @@ mod tests {
             seeders: None,
             size_bytes: None,
             source_name: None,
+            stream_family: None,
+            recommendation_reasons: Vec::new(),
         };
         assert!(stream_matches_episode(&stream, 3, 7));
     }
 
-    // ── truncate_streams_for_mode ───────────────────────────────────────
+    // ── truncate_streams ───────────────────────────────────────────────
 
     fn mk_stream(info_hash: Option<&str>, url: Option<&str>, cached: bool) -> TorrentioStream {
         TorrentioStream {
@@ -1066,6 +1070,8 @@ mod tests {
             seeders: None,
             size_bytes: None,
             source_name: None,
+            stream_family: None,
+            recommendation_reasons: Vec::new(),
         }
     }
 
@@ -1087,7 +1093,7 @@ mod tests {
             ));
         }
 
-        let out = Torrentio::truncate_streams_for_mode(input, true);
+        let out = StremioAddonTransport::truncate_streams(input);
         let torrent_count = out
             .iter()
             .filter(|s| {
@@ -1102,32 +1108,21 @@ mod tests {
     }
 
     #[test]
-    fn truncate_non_custom_stays_compact_top_15() {
-        let mut input = Vec::new();
-        for _ in 0..40 {
-            input.push(mk_stream(None, Some("https://example.com/file.mp4"), true));
-        }
-
-        let out = Torrentio::truncate_streams_for_mode(input, false);
-        assert_eq!(out.len(), DEFAULT_STREAMS_MAX);
-    }
-
-    #[test]
-    fn fallback_probe_hosts_accept_torrentio_domains() {
-        assert!(Torrentio::should_probe_fallback_hosts(
+    fn root_fallback_probe_detects_embedded_config_segments() {
+        assert!(StremioAddonTransport::should_probe_root_fallback(
             "https://torrentio.strem.fun/debridoptions=foo/manifest.json"
         ));
-        assert!(Torrentio::should_probe_fallback_hosts(
-            "https://torrentio-proxy.example.com/addon"
+        assert!(StremioAddonTransport::should_probe_root_fallback(
+            "https://mediafusion.example.com/manifest.json?token=abc"
         ));
     }
 
     #[test]
-    fn fallback_probe_hosts_reject_non_torrentio_domains() {
-        assert!(!Torrentio::should_probe_fallback_hosts(
+    fn root_fallback_probe_rejects_plain_addon_urls() {
+        assert!(!StremioAddonTransport::should_probe_root_fallback(
             "https://debridmediamanager.com/api/stremio/token/manifest.json"
         ));
-        assert!(!Torrentio::should_probe_fallback_hosts(
+        assert!(!StremioAddonTransport::should_probe_root_fallback(
             "https://mediafusion.elfhosted.com/catalog/series"
         ));
     }

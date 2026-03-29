@@ -1,7 +1,81 @@
-use super::AddonConfig;
+use super::config_store::AddonConfig;
 use crate::providers::realdebrid::TorrentFile;
-use crate::providers::torrentio::{stream_quality_score, TorrentioStream};
+use crate::providers::stremio_addon::{stream_quality_score, TorrentioStream};
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
+
+static STREAM_FAMILY_EPISODE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        concat!(
+            r"(?i)",
+            r"\bs\d{1,2}e\d{1,4}\b",
+            r"|\b\d{1,2}x\d{1,4}\b",
+            r"|\b(?:episode|ep)\.?\s*\d{1,4}\b",
+            r"|\b#\d{1,4}\b",
+            r"|\b(?:season\s*\d+\s*)?-\s*\d{2,4}\b"
+        ),
+    )
+    .expect("valid stream family episode regex")
+});
+static STREAM_FAMILY_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b\d+(?:\.\d+)?\s*(?:k|m|g|t)i?b\b")
+        .expect("valid stream family size regex")
+});
+static STREAM_FAMILY_NON_WORD_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[^a-z0-9]+") .expect("valid stream family non-word regex"));
+
+fn normalize_stream_family_component(value: &str) -> Option<String> {
+    let normalized = STREAM_FAMILY_EPISODE_REGEX.replace_all(value, " ");
+    let normalized = STREAM_FAMILY_SIZE_REGEX.replace_all(&normalized, " ");
+    let normalized_lower = normalized.to_ascii_lowercase();
+    let normalized = STREAM_FAMILY_NON_WORD_REGEX.replace_all(&normalized_lower, " ");
+    let normalized = normalized
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .take(12)
+        .collect::<Vec<_>>()
+        .join("-");
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+pub(crate) fn derive_stream_family(stream: &TorrentioStream, source_name: &str) -> Option<String> {
+    let normalized_source = normalize_stream_family_component(source_name)?;
+
+    if let Some(binge_group) = stream
+        .behavior_hints
+        .as_ref()
+        .and_then(|hints| hints.binge_group.as_deref())
+        .and_then(normalize_stream_family_component)
+    {
+        return Some(format!("{}|binge:{}", normalized_source, binge_group));
+    }
+
+    let hint = stream
+        .behavior_hints
+        .as_ref()
+        .and_then(|hints| hints.filename.as_deref())
+        .or(stream.name.as_deref())
+        .or(stream.title.as_deref())
+        .and_then(normalize_stream_family_component);
+
+    hint.map(|value| format!("{}|release:{}", normalized_source, value))
+        .or_else(|| {
+            let delivery = if stream.cached {
+                "cached"
+            } else if stream.url.as_deref().is_some_and(is_http_url) {
+                "http"
+            } else {
+                "torrent"
+            };
+            Some(format!("{}|delivery:{}", normalized_source, delivery))
+        })
+}
 
 pub(crate) fn normalize_http_url(input: &str) -> Option<String> {
     let trimmed = input.trim();
@@ -100,6 +174,7 @@ pub(crate) fn prepare_addon_streams(
         }
 
         stream.source_name = Some(source_name.clone());
+        stream.stream_family = derive_stream_family(&stream, &source_name);
         prepared.push(stream);
     }
 

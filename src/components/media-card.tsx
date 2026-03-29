@@ -59,7 +59,7 @@ const SEARCH_HOVER_OPEN_DELAY_MS = 80;
 const SEARCH_HOVER_CHAIN_DELAY_MS = 30;
 const HOVER_LEAVE_DELAY_MS = 120;
 const HOVER_SCROLL_COOLDOWN_MS = 200;
-const DETAILS_FETCH_DELAY_MS = 420;
+const DETAILS_FETCH_DELAY_MS = 200;
 const POPUP_SCROLL_DISMISS_PX = 140;
 const MIN_PROGRESS_BAR_PERCENT = 2;
 
@@ -69,6 +69,7 @@ interface MediaCardProps {
   progress?: number;
   onPlay?: (e: React.MouseEvent) => void;
   onRemoveFromContinue?: (e: React.MouseEvent) => void;
+  showLibraryContext?: boolean;
   subtitle?: string;
 }
 
@@ -78,6 +79,7 @@ export function MediaCard({
   progress,
   onPlay,
   onRemoveFromContinue,
+  showLibraryContext = false,
   subtitle,
 }: MediaCardProps) {
   const queryClient = useQueryClient();
@@ -509,7 +511,7 @@ export function MediaCard({
       await queryClient.cancelQueries({ queryKey: ['watch-statuses'] });
       const previous = queryClient.getQueryData<Record<string, WatchStatus>>(['watch-statuses']);
       queryClient.setQueryData<Record<string, WatchStatus>>(['watch-statuses'], (old) => {
-        const next = { ...(old ?? {}) };
+        const next = { ...old };
         if (status === null) delete next[item.id];
         else next[item.id] = status;
         return next;
@@ -523,16 +525,6 @@ export function MediaCard({
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['watch-statuses'] }),
   });
-
-  // ── Watch history ──────────────────────────────────────────────────────
-  const { data: watchHistory } = useQuery({
-    queryKey: ['watch-history'],
-    queryFn: api.getWatchHistory,
-    staleTime: 1000 * 60 * 5,
-  });
-  const historyItem = watchHistory?.find((h) => h.id === item.id);
-  const isWatched =
-    historyItem && historyItem.duration > 0 && historyItem.position / historyItem.duration > 0.9;
 
   const safeProgress =
     typeof progress === 'number' && Number.isFinite(progress)
@@ -562,7 +554,6 @@ export function MediaCard({
             // No pre-popup scale — the popup IS the hover effect. A faint ring is
             // enough micro-feedback without creating a "double" visual event.
             'transition-[box-shadow] duration-150',
-            isWatched && 'ring-2 ring-yellow-500/70 shadow-[0_0_15px_rgba(234,179,8,0.3)]',
           )}
         >
           <div className='relative aspect-[2/3] rounded-xl overflow-hidden bg-zinc-900'>
@@ -591,9 +582,18 @@ export function MediaCard({
                 {WATCH_STATUS_LABELS[currentStatus]}
               </div>
             )}
-            {subtitle && (
-              <div className='absolute bottom-1.5 left-1.5 z-10 px-1.5 py-[3px] rounded text-[9px] font-semibold bg-black/70 text-white/80 backdrop-blur-sm'>
-                {subtitle}
+            {(subtitle || (showLibraryContext && isInLibrary)) && (
+              <div className='absolute bottom-1.5 left-1.5 z-10 flex max-w-[calc(100%-12px)] flex-col items-start gap-1'>
+                {showLibraryContext && isInLibrary && (
+                  <div className='rounded border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-[3px] text-[9px] font-semibold text-emerald-300 backdrop-blur-sm'>
+                    In Library
+                  </div>
+                )}
+                {subtitle && (
+                  <div className='rounded bg-black/70 px-1.5 py-[3px] text-[9px] font-semibold text-white/80 backdrop-blur-sm'>
+                    {subtitle}
+                  </div>
+                )}
               </div>
             )}
             {showProgress && (
@@ -622,11 +622,11 @@ export function MediaCard({
             {/* Inner content remains interactive so status/list buttons are clickable. */}
             <div
               ref={popupContainerRef}
-              className='rounded-md overflow-hidden bg-[#111114]/95 border border-white/[0.09] shadow-[0_32px_80px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.05)] backdrop-blur-sm'
+              className='rounded-md overflow-hidden bg-[#111114] border border-white/[0.07] shadow-[0_20px_48px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.04)]'
               style={{
                 willChange: 'transform, opacity',
                 transform: 'translateZ(0)',
-                animation: 'mediaCardPopupIn 200ms cubic-bezier(0.16, 1, 0.3, 1) both',
+                animation: 'mediaCardPopupIn 160ms cubic-bezier(0.16, 1, 0.3, 1) both',
                 pointerEvents: 'auto',
               }}
               onMouseEnter={() => {
@@ -639,7 +639,7 @@ export function MediaCard({
               onWheel={forwardWheelToScrollContainer}
             >
               {/* Backdrop / trailer area */}
-              <div className='relative overflow-hidden bg-zinc-900' style={{ height: 126 }}>
+              <div className='relative overflow-hidden bg-zinc-900 aspect-video max-h-[160px]'>
                 {playingTrailer && trailerVideoId ? (
                   <>
                     <iframe
@@ -673,7 +673,7 @@ export function MediaCard({
                         className='object-cover w-full h-full'
                       />
                     )}
-                    <div className='absolute inset-0 bg-gradient-to-t from-[#111113]/90 to-transparent' />
+                    <div className='absolute inset-0 bg-gradient-to-t from-[#111114] via-[#111114]/40 to-transparent' />
                     {trailerVideoId && (
                       <button
                         type='button'
@@ -762,7 +762,7 @@ export function MediaCard({
                 <div className='relative z-10 p-3 space-y-2'>
                   {/* Title + year on same row */}
                   <div className='flex items-start justify-between gap-2'>
-                    <h3 className='font-semibold text-[13.5px] text-white leading-snug line-clamp-2 flex-1'>
+                    <h3 className='font-semibold text-[13px] text-white leading-snug line-clamp-2 flex-1 tracking-[-0.01em]'>
                       {item.title}
                     </h3>
                     {ratingStyle && ratingScore !== null && (
@@ -809,7 +809,7 @@ export function MediaCard({
                   <div className='flex items-center gap-2 pt-0.5'>
                     <button
                       type='button'
-                      className='flex-1 h-8 flex items-center justify-center gap-1.5 rounded-md bg-white text-black text-[11.5px] font-semibold hover:bg-zinc-100  transition-all duration-100'
+                      className='flex-1 h-8 flex items-center justify-center gap-1.5 rounded-lg bg-white text-black text-[11.5px] font-semibold hover:bg-white/90 active:scale-[0.98] transition-all duration-100'
                       onClick={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
@@ -825,10 +825,10 @@ export function MediaCard({
                     <button
                       type='button'
                       className={cn(
-                        'h-8 w-8 rounded-md flex items-center justify-center border transition-all duration-100  shrink-0',
+                        'h-8 w-8 rounded-lg flex items-center justify-center border transition-all duration-100 active:scale-95 shrink-0',
                         isInLibrary
                           ? 'bg-green-500/20 text-green-400 border-green-500/30 hover:bg-green-500/30'
-                          : 'bg-white/[0.07] text-zinc-400 border-white/[0.09] hover:bg-white/15 hover:text-white hover:border-white/20',
+                          : 'bg-white/[0.06] text-zinc-400 border-white/[0.08] hover:bg-white/[0.12] hover:text-white hover:border-white/15',
                       )}
                       title={isInLibrary ? 'Remove from Library' : 'Add to Library'}
                       onClick={(e) => {
@@ -848,10 +848,10 @@ export function MediaCard({
                     <button
                       type='button'
                       className={cn(
-                        'h-8 w-8 rounded-md flex items-center justify-center border transition-all duration-100  shrink-0',
+                        'h-8 w-8 rounded-lg flex items-center justify-center border transition-all duration-100 active:scale-95 shrink-0',
                         isInAnyList
                           ? 'bg-violet-500/20 text-violet-400 border-violet-500/30 hover:bg-violet-500/30'
-                          : 'bg-white/[0.07] text-zinc-400 border-white/[0.09] hover:bg-white/15 hover:text-white hover:border-white/20',
+                          : 'bg-white/[0.06] text-zinc-400 border-white/[0.08] hover:bg-white/[0.12] hover:text-white hover:border-white/15',
                       )}
                       title='Add to List'
                       onClick={toggleListPicker}
@@ -867,7 +867,7 @@ export function MediaCard({
                     {onRemoveFromContinue && (
                       <button
                         type='button'
-                        className='h-8 w-8 rounded-md flex items-center justify-center border transition-all duration-100  shrink-0 bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25 hover:text-red-300'
+                        className='h-8 w-8 rounded-lg flex items-center justify-center border transition-all duration-100 active:scale-95 shrink-0 bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25 hover:text-red-300'
                         title='Remove from Continue Watching'
                         onClick={(e) => {
                           e.preventDefault();
@@ -891,7 +891,7 @@ export function MediaCard({
                           key={status}
                           type='button'
                           className={cn(
-                            'flex-1 h-7 rounded-md text-[11px] font-semibold border transition-all duration-100 ',
+                            'flex-1 h-7 rounded-lg text-[11px] font-semibold border transition-all duration-100',
                             isActive
                               ? cn(colors.bg, colors.border, colors.text)
                               : 'bg-white/[0.06] border-white/[0.1] text-zinc-400 hover:bg-white/12 hover:text-zinc-100 hover:border-white/20',

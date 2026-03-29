@@ -140,11 +140,6 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const setBandwidthLimit = useCallback(async (limit?: number) => {
-    await api.setDownloadBandwidth(limit);
-    toast.success(limit ? `Bandwidth limited to ${(limit / 1024 / 1024).toFixed(1)} MB/s` : 'Bandwidth limit removed');
-  }, []);
-
   const refetchDownloads = useCallback(async () => {
     try {
       const items = await api.getDownloads();
@@ -155,6 +150,58 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const pauseActiveDownloads = useCallback(async () => {
+    try {
+      const pausedCount = await api.pauseActiveDownloads();
+      if (pausedCount === 0) return 0;
+
+      setDownloads((prev) =>
+        prev.map((download) =>
+          download.status === 'downloading' || download.status === 'pending'
+            ? { ...download, status: 'paused', speed: 0 }
+            : download,
+        ),
+      );
+      await refetchDownloads();
+      toast.success(
+        pausedCount === 1 ? 'Paused 1 download' : `Paused ${pausedCount} downloads`,
+      );
+      return pausedCount;
+    } catch (e) {
+      toast.error('Failed to pause active downloads', { description: getErrorMessage(e) });
+      throw e;
+    }
+  }, [refetchDownloads]);
+
+  const clearCompletedDownloads = useCallback(
+    async (deleteFile = false) => {
+      try {
+        const clearedCount = await api.clearCompletedDownloads(deleteFile);
+        if (clearedCount === 0) return 0;
+
+        setDownloads((prev) => prev.filter((download) => download.status !== 'completed'));
+        await refetchDownloads();
+        toast.success(
+          clearedCount === 1
+            ? 'Cleared 1 completed download'
+            : `Cleared ${clearedCount} completed downloads`,
+        );
+        return clearedCount;
+      } catch (e) {
+        toast.error('Failed to clear completed downloads', {
+          description: getErrorMessage(e),
+        });
+        throw e;
+      }
+    },
+    [refetchDownloads],
+  );
+
+  const setBandwidthLimit = useCallback(async (limit?: number) => {
+    await api.setDownloadBandwidth(limit);
+    toast.success(limit ? `Bandwidth limited to ${(limit / 1024 / 1024).toFixed(1)} MB/s` : 'Bandwidth limit removed');
+  }, []);
+
   const activeCount = downloads.filter((d) => d.status === 'downloading').length;
 
   const contextValue = useMemo(
@@ -163,9 +210,11 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       activeCount,
       startDownload,
       pauseDownload,
+      pauseActiveDownloads,
       resumeDownload,
       cancelDownload,
       removeDownload,
+      clearCompletedDownloads,
       setBandwidthLimit,
       refetchDownloads,
     }),
@@ -174,9 +223,11 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       activeCount,
       startDownload,
       pauseDownload,
+      pauseActiveDownloads,
       resumeDownload,
       cancelDownload,
       removeDownload,
+      clearCompletedDownloads,
       setBandwidthLimit,
       refetchDownloads,
     ],

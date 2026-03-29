@@ -108,12 +108,17 @@ export function Hero({ items, onFirstImageLoaded }: HeroProps) {
     // Prefetch adjacent slides for smooth transitions
     const next = items[(activeIndex + 1) % items.length];
     const prev = items[(activeIndex - 1 + items.length) % items.length];
-    [next, prev].forEach(item => {
-      if (item) {
-        queryClient.prefetchQuery({
-            queryKey: ['details', item.type, item.id],
-            queryFn: () => api.getMediaDetails(item.type, item.id),
-            staleTime: 1000 * 60 * 30
+    [next, prev].forEach((prefetchItem) => {
+      if (prefetchItem) {
+        const queryKey = ['details', prefetchItem.type, prefetchItem.id];
+        if (queryClient.getQueryData(queryKey)) {
+          return;
+        }
+
+        void queryClient.prefetchQuery({
+          queryKey,
+          queryFn: () => api.getMediaDetails(prefetchItem.type, prefetchItem.id),
+          staleTime: 1000 * 60 * 30,
         });
       }
     });
@@ -262,7 +267,7 @@ export function Hero({ items, onFirstImageLoaded }: HeroProps) {
             {/* Actions */}
             <div className="flex items-center gap-3 pt-6 animate-in fade-in slide-in-from-bottom-10 duration-700 delay-300">
                 <Link to={`/details/${item.type}/${item.id}`} state={{ from }}>
-                    <Button size="lg" className="h-12 px-8 text-[15px] font-semibold bg-white hover:bg-zinc-200 text-black transition-colors rounded-xl shadow-lg hover:shadow-xl hover:scale-[1.02] duration-300">
+                    <Button size="lg" className="h-12 px-8 text-[15px] font-semibold bg-white hover:bg-zinc-200 text-black transition-colors rounded-md shadow border border-transparent hover:border-zinc-800 transition-colors">
                         <Play className="w-5 h-5 mr-2 fill-current" />
                         Watch Now
                     </Button>
@@ -271,7 +276,7 @@ export function Hero({ items, onFirstImageLoaded }: HeroProps) {
                     size="lg"
                     variant="secondary"
                     className={cn(
-                        "h-12 px-8 backdrop-blur-md border border-white/[0.08] transition-all duration-300 rounded-xl shadow-sm text-[15px] font-semibold",
+                        "h-12 px-8 backdrop-blur-md border border-white/[0.08] transition-all duration-300 rounded-md shadow-sm text-[15px] font-semibold",
                         isInLibrary 
                             ? "bg-green-500/10 text-green-400 hover:bg-green-500/15 border-green-500/20" 
                             : "bg-zinc-950/50 hover:bg-white/5 hover:border-white/10 text-white/90 hover:text-white"

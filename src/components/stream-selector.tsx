@@ -25,6 +25,9 @@ import {
   type SourceFilter,
   type SortMode,
 } from '@/lib/stream-selector-utils';
+import { buildPlayerNavigationTarget } from '@/lib/player-navigation';
+import { buildStreamRankingOptions } from '@/lib/stream-ranking';
+import { resolveStreamCandidate as resolvePlayableStreamCandidate } from '@/lib/stream-resolution';
 
 const isDev = import.meta.env.DEV;
 
@@ -40,7 +43,8 @@ function isDebridProcessingError(message: string): boolean {
 function isDebridSetupError(message: string): boolean {
   const lower = message.toLowerCase();
   return (
-    lower.includes('no debrid token configured') ||
+    lower.includes('requires a configured debrid provider') ||
+    lower.includes('requires debrid or a direct-link addon') ||
     lower.includes('api token is invalid or expired') ||
     lower.includes('real-debrid auth error')
   );
@@ -63,6 +67,7 @@ function isCloudflareError(message: string): boolean {
 interface StreamSelectorProps {
   open: boolean;
   onClose: () => void;
+  onBeforePlayerNavigation?: () => void | Promise<void>;
   type: 'movie' | 'series' | 'anime';
   id: string;
   streamId?: string;
@@ -191,6 +196,7 @@ function buildResolveFeedback(
 export function StreamSelector({
   open,
   onClose,
+  onBeforePlayerNavigation,
   type,
   id,
   streamId,
@@ -288,33 +294,11 @@ export function StreamSelector({
   }, [filters]);
 
   const resolveStreamCandidate = useCallback(
-    async (stream: TorrentioStream) => {
-      const normalizedUrl = stream.url?.trim();
-      const url = isHttpStreamUrl(normalizedUrl) ? normalizedUrl : undefined;
-      const magnet = normalizedUrl?.startsWith('magnet')
-        ? normalizedUrl
-        : stream.infoHash
-          ? `magnet:?xt=urn:btih:${stream.infoHash}`
-          : '';
-
-      if (!magnet && !url) throw new Error('Stream has no URL or InfoHash');
-      if (!url) {
-        const [hasAddons, debridConfig] = await Promise.all([
-          api.checkApiKeys(),
-          api.getDebridConfig(),
-        ]);
-        if (!hasAddons) {
-          throw new Error('No stream addons configured. Add an addon in Settings → Streaming.');
-        }
-        if (!debridConfig.apiKey?.trim()) {
-          throw new Error(
-            'Real-Debrid is not configured. Add your API key in Settings → Streaming.',
-          );
-        }
-      }
-
-      return api.resolveStream(magnet || '', stream.infoHash, stream.fileIdx, season, episode, url);
-    },
+    (stream: TorrentioStream) =>
+      resolvePlayableStreamCandidate(stream, {
+        season,
+        episode,
+      }),
     [season, episode],
   );
 
@@ -349,6 +333,32 @@ export function StreamSelector({
       addon: effectiveAddonFilter,
     };
   }, [effectiveAddonFilter, filters]);
+
+  const {
+    data: rankedStreams = [],
+    error: rankedStreamsError,
+    isLoading: isLoadingRankedStreams,
+    refetch: refetchRankedStreams,
+  } = useQuery({
+    queryKey: ['streams', streamMediaType, lookupId, season, episode, absoluteEpisode],
+    queryFn: () =>
+      api.getStreams(
+        streamMediaType,
+        lookupId,
+        season,
+        episode,
+        absoluteEpisode,
+        buildStreamRankingOptions({
+          mediaId: id,
+          mediaType: streamMediaType,
+          season: absoluteSeason ?? season,
+          episode: absoluteEpisode ?? episode,
+        }),
+      ),
+    enabled: open && !!lookupId && isOnline,
+    staleTime: 1000 * 60 * 3,
+    retry: 0,
+  });
 
   const addonStreamQueries = useQueries({
     queries: enabledAddons.map((addon) => ({
@@ -386,48 +396,28 @@ export function StreamSelector({
     })),
   });
 
-  const streams = useMemo(() => {
-    const merged: TorrentioStream[] = [];
-    const dedupSeen = new Set<string>();
-
-    for (const query of addonStreamQueries) {
-      for (const stream of query.data?.streams ?? []) {
-        const normalizedInfoHash = stream.infoHash?.trim().toLowerCase();
-        const normalizedUrl = stream.url?.trim();
-        const dedupKey = normalizedInfoHash
-          ? `h:${normalizedInfoHash}:${stream.fileIdx ?? 0}`
-          : normalizedUrl
-            ? `u:${normalizedUrl}`
-            : getStreamKey(stream);
-
-        if (!dedupSeen.has(dedupKey)) {
-          dedupSeen.add(dedupKey);
-          merged.push(stream);
-        }
-      }
-    }
-
-    return merged;
-  }, [addonStreamQueries]);
+  const streams = rankedStreams;
 
   const settledAddonQueryCount = addonStreamQueries.filter((q) => q.isSuccess || q.isError).length;
   const hasPendingAddonQueries = addonStreamQueries.some((q) => q.isPending || q.isFetching);
   const isLoading =
     isLoadingAddonConfigs ||
-    (enabledAddons.length > 0 && streams.length === 0 && hasPendingAddonQueries);
+    (enabledAddons.length > 0 && streams.length === 0 && (isLoadingRankedStreams || hasPendingAddonQueries));
   const isBackgroundLoadingSources =
     streams.length > 0 &&
     addonStreamQueries.length > 0 &&
     settledAddonQueryCount < addonStreamQueries.length;
   const fatalAddonError =
-    streams.length === 0 &&
-    addonStreamQueries.length > 0 &&
-    addonStreamQueries.every((q) => q.isError)
-      ? (addonStreamQueries.find((q) => q.error)?.error ?? null)
+    streams.length === 0
+      ? (rankedStreamsError ??
+          (addonStreamQueries.length > 0 && addonStreamQueries.every((q) => q.isError)
+            ? (addonStreamQueries.find((q) => q.error)?.error ?? null)
+            : null))
       : null;
 
   const refetchStreams = () => {
     void refetchAddonConfigs();
+    void refetchRankedStreams();
     for (const query of addonStreamQueries) {
       void query.refetch();
     }
@@ -484,7 +474,7 @@ export function StreamSelector({
       setActiveResolveKey(getStreamKey(stream));
       setActiveResolveFeedback(buildResolveFeedback(stream, 'play'));
     },
-    onSuccess: (data, stream) => {
+    onSuccess: async (data, stream) => {
       const feedback = buildResolveFeedback(stream, 'play');
       if (inlineMode && onStreamResolved) {
         void Promise.resolve(onStreamResolved(data)).finally(() => {
@@ -495,32 +485,31 @@ export function StreamSelector({
 
       const playerSeason = absoluteSeason ?? season;
       const playerEpisode = absoluteEpisode ?? episode;
-      const playerRoute =
-        playerSeason !== undefined && playerEpisode !== undefined
-          ? `/player/${streamMediaType}/${id}/${playerSeason}/${playerEpisode}`
-          : `/player/${streamMediaType}/${id}`;
-      navigate(playerRoute, {
-        state: {
-          streamUrl: data.url,
-          streamLookupId: lookupId,
-          streamSeason: season,
-          streamEpisode: episode,
-          absoluteSeason: playerSeason,
-          absoluteEpisode: playerEpisode,
-          selectedStreamKey: getStreamKey(stream),
-          openingStreamName: feedback.title,
-          openingStreamSource: feedback.subtitle,
-          title,
-          poster,
-          backdrop,
-          logo,
-          isWebFriendly: data.is_web_friendly,
-          format: data.format,
-          startTime,
-          aniskipEpisode,
-          from,
-        },
+      const playerNavigation = buildPlayerNavigationTarget(streamMediaType, id, {
+        streamUrl: data.url,
+        streamLookupId: lookupId,
+        streamSeason: season,
+        streamEpisode: episode,
+        absoluteSeason: playerSeason,
+        absoluteEpisode: playerEpisode,
+        selectedStreamKey: getStreamKey(stream),
+        streamSourceName: stream.source_name,
+        streamFamily: stream.stream_family,
+        openingStreamName: feedback.title,
+        openingStreamSource: feedback.subtitle,
+        title,
+        poster,
+        backdrop,
+        logo,
+        format: data.format,
+        startTime,
+        aniskipEpisode,
+        from,
       });
+
+      await Promise.resolve(onBeforePlayerNavigation?.()).catch(() => undefined);
+
+      navigate(playerNavigation.target, { state: playerNavigation.state });
       closeSelector();
     },
     onError: (err) => {
@@ -533,8 +522,8 @@ export function StreamSelector({
           duration: 4500,
         });
       } else if (isDebridSetupError(msg)) {
-        toast.error('Real-Debrid setup required', {
-          description: 'Check your Real-Debrid API key in Settings → Streaming, then retry.',
+        toast.error('Stream needs debrid or direct playback', {
+          description: msg,
           duration: 6000,
         });
       } else if (isCloudflareError(msg)) {

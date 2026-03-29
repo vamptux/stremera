@@ -23,7 +23,7 @@ export function useSpoilerProtection() {
     try {
       localStorage.setItem(SPOILER_STORAGE_KEY, enabled ? 'true' : 'false');
     } catch {
-      // localStorage unavailable (sandboxed / private mode) — state still works in memory
+      // localStorage unavailable in restricted contexts — state still works in memory
     }
   }, []);
 

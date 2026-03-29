@@ -3,11 +3,12 @@ import { api, type MediaItem, type WatchStatus } from "@/lib/api";
 import { format, parseISO, isSameDay, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, addMonths, subMonths, startOfWeek, endOfWeek, addDays, startOfDay, endOfDay, isWithinInterval, isValid } from "date-fns";
 import { Link, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import { useState, useMemo } from "react";
+import { useEffect, useEffectEvent, useState, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { usePrivacy } from "@/contexts/privacy-context";
+
+const DETAILS_BATCH_SIZE = 12;
 
 interface CalendarEvent {
   id: string; // episode id or movie id
@@ -41,8 +42,8 @@ function parseMovieReleaseDate(value?: string): Date | null {
 
 export function Calendar() {
   const location = useLocation();
-  const { isIncognito } = usePrivacy();
   const [currentMonth, setCurrentMonth] = useState(new Date());
+  const [detailsBatchCount, setDetailsBatchCount] = useState(1);
   const from = `${location.pathname}${location.search}`;
 
   // 1. Get Library
@@ -54,14 +55,12 @@ export function Calendar() {
   const { data: allWatchStatuses } = useQuery({
     queryKey: ['watch-statuses'],
     queryFn: api.getAllWatchStatuses,
-    enabled: !isIncognito,
     staleTime: 1000 * 60 * 5,
   });
 
   const { data: watchHistory } = useQuery({
     queryKey: ['watch-history'],
     queryFn: api.getWatchHistory,
-    enabled: !isIncognito,
     staleTime: 1000 * 60 * 3,
   });
 
@@ -118,15 +117,42 @@ export function Calendar() {
     [libraryItems, allWatchStatuses, watchHistoryById]
   );
 
+  const resetDetailsBatchCount = useEffectEvent(() => {
+    setDetailsBatchCount(1);
+  });
+
+  useEffect(() => {
+    resetDetailsBatchCount();
+  }, [schedulableItems]);
+
+  const detailQueryItems = useMemo(
+    () => schedulableItems.slice(0, detailsBatchCount * DETAILS_BATCH_SIZE),
+    [detailsBatchCount, schedulableItems],
+  );
+
   const detailsQueries = useQueries({
-    queries: schedulableItems.map(item => ({
+    queries: detailQueryItems.map(item => ({
       queryKey: ['details', item.type, item.id],
       queryFn: () => api.getMediaDetails(item.type, item.id),
       staleTime: 1000 * 60 * 60, // 1 hour
     }))
   });
 
-  const isDetailsLoading = detailsQueries.some((query) => query.isLoading || query.isFetching);
+  const isCurrentBatchLoading = detailsQueries.some((query) => query.isLoading || query.isFetching);
+  const hasPendingDetailBatches = detailQueryItems.length < schedulableItems.length;
+  const isDetailsLoading = isCurrentBatchLoading || hasPendingDetailBatches;
+
+  const loadNextDetailsBatch = useEffectEvent(() => {
+    setDetailsBatchCount((previous) => previous + 1);
+  });
+
+  useEffect(() => {
+    if (detailQueryItems.length === 0) return;
+    if (isCurrentBatchLoading) return;
+    if (detailQueryItems.length >= schedulableItems.length) return;
+
+    loadNextDetailsBatch();
+  }, [detailQueryItems.length, isCurrentBatchLoading, schedulableItems.length]);
 
   // 3. Flatten into events
   const events = useMemo(() => {

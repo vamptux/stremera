@@ -255,6 +255,8 @@ pub struct DownloadManager {
     /// Serialises concurrent disk writes so a slow save from task A can never
     /// be overwritten by a stale snapshot from task B that serialised earlier.
     save_lock: Arc<Mutex<()>>,
+    /// Last successfully saved JSON snapshot; used to skip redundant disk writes.
+    last_saved_snapshot: Arc<Mutex<Option<String>>>,
     /// Shared HTTP client — reused across all download tasks so that TCP
     /// connections are pooled and TLS handshakes are amortised.
     http_client: reqwest::Client,
@@ -292,6 +294,12 @@ fn build_progress_event(item: &DownloadItem) -> DownloadProgressEvent {
         speed: item.speed,
         progress: item.progress,
         status: item.status.clone(),
+    }
+}
+
+fn emit_download_progress_events(app_handle: &AppHandle, events: Vec<DownloadProgressEvent>) {
+    for event in events {
+        let _ = app_handle.emit("download://progress", event);
     }
 }
 
@@ -358,43 +366,74 @@ async fn save_to_disk(
     save_lock: &Arc<Mutex<()>>,
     app_handle: &AppHandle,
 ) {
-    // Serialise while holding downloads, then release immediately.
-    let content = {
+    let _save_guard = save_lock.lock().await;
+    let Some(json) = ({
         let guard = downloads.lock().await;
         serde_json::to_string_pretty(&*guard).ok()
-        // guard is dropped at the end of this block
+    }) else {
+        return;
     };
 
-    if let Some(json) = content {
-        if let Ok(app_dir) = app_handle.path().app_data_dir() {
-            if !app_dir.exists() {
-                let _ = tokio::fs::create_dir_all(&app_dir).await;
-            }
-            let path = app_dir.join(DOWNLOADS_FILE);
-            // Hold save_lock so concurrent saves are serialised and the latest
-            // snapshot always wins (we re-read inside save_lock so we always
-            // write the most up-to-date state).
-            let _save_guard = save_lock.lock().await;
-            let latest = {
-                let guard = downloads.lock().await;
-                serde_json::to_string_pretty(&*guard).ok()
-            };
-            if let Some(json) = latest.or(Some(json)) {
-                let tmp = path.with_extension("json.tmp");
-                if tokio::fs::write(&tmp, &json).await.is_ok()
-                    && tokio::fs::rename(&tmp, &path).await.is_err()
-                {
-                    let _ = tokio::fs::remove_file(&path).await;
-                    let _ = tokio::fs::rename(&tmp, &path).await;
-                }
-            }
+    if let Ok(app_dir) = app_handle.path().app_data_dir() {
+        if !app_dir.exists() {
+            let _ = tokio::fs::create_dir_all(&app_dir).await;
         }
+
+        let path = app_dir.join(DOWNLOADS_FILE);
+        let tmp = path.with_extension("json.tmp");
+        if tokio::fs::write(&tmp, &json).await.is_ok()
+            && tokio::fs::rename(&tmp, &path).await.is_err()
+        {
+            let _ = tokio::fs::remove_file(&path).await;
+            let _ = tokio::fs::rename(&tmp, &path).await;
+        }
+    }
+}
+
+async fn save_to_disk_if_changed(
+    downloads: &Arc<Mutex<HashMap<String, DownloadItem>>>,
+    save_lock: &Arc<Mutex<()>>,
+    last_saved_snapshot: &Arc<Mutex<Option<String>>>,
+    app_handle: &AppHandle,
+) {
+    let _save_guard = save_lock.lock().await;
+    let Some(json) = ({
+        let guard = downloads.lock().await;
+        serde_json::to_string_pretty(&*guard).ok()
+    }) else {
+        return;
+    };
+
+    {
+        let snapshot = last_saved_snapshot.lock().await;
+        if snapshot.as_deref() == Some(json.as_str()) {
+            return;
+        }
+    }
+
+    if let Ok(app_dir) = app_handle.path().app_data_dir() {
+        if !app_dir.exists() {
+            let _ = tokio::fs::create_dir_all(&app_dir).await;
+        }
+
+        let path = app_dir.join(DOWNLOADS_FILE);
+        let tmp = path.with_extension("json.tmp");
+        if tokio::fs::write(&tmp, &json).await.is_ok()
+            && tokio::fs::rename(&tmp, &path).await.is_err()
+        {
+            let _ = tokio::fs::remove_file(&path).await;
+            let _ = tokio::fs::rename(&tmp, &path).await;
+        }
+
+        let mut snapshot = last_saved_snapshot.lock().await;
+        *snapshot = Some(json);
     }
 }
 
 async fn run_download_task(
     downloads: Arc<Mutex<HashMap<String, DownloadItem>>>,
     save_lock: Arc<Mutex<()>>,
+    last_saved_snapshot: Arc<Mutex<Option<String>>>,
     bandwidth_limit: Arc<Mutex<Option<u64>>>,
     app_handle: AppHandle,
     client: reqwest::Client,
@@ -473,7 +512,13 @@ async fn run_download_task(
                     }
                 }
                 if should_persist {
-                    save_to_disk(&downloads, &save_lock, &app_handle).await;
+                    save_to_disk_if_changed(
+                        &downloads,
+                        &save_lock,
+                        &last_saved_snapshot,
+                        &app_handle,
+                    )
+                    .await;
                 }
             }
         }
@@ -510,8 +555,10 @@ async fn run_download_task(
 
     if let Ok(metadata) = file.metadata().await {
         let on_disk = metadata.len();
-        if on_disk > 0 {
-            downloaded_size = on_disk;
+        let should_persist = downloaded_size != on_disk;
+        downloaded_size = on_disk;
+
+        {
             let mut guard = downloads.lock().await;
             if let Some(item) = guard.get_mut(&id) {
                 item.downloaded_size = downloaded_size;
@@ -519,6 +566,11 @@ async fn run_download_task(
                     compute_download_progress(downloaded_size, total_size, &item.status);
                 item.updated_at = unix_timestamp_secs();
             }
+        }
+
+        if should_persist {
+            save_to_disk_if_changed(&downloads, &save_lock, &last_saved_snapshot, &app_handle)
+                .await;
         }
 
         if let Err(error) = file.seek(SeekFrom::Start(downloaded_size)).await {
@@ -599,10 +651,7 @@ async fn run_download_task(
                         .await
                         .map(|metadata| metadata.len())
                         .unwrap_or(0);
-                    let gap = downloaded_size.saturating_sub(on_disk_size);
-                    let is_truncated = gap > 65_536
-                        && downloaded_size > 0
-                        && (gap as f64 / downloaded_size as f64) > 0.01;
+                    let is_truncated = on_disk_size < downloaded_size;
 
                     if is_truncated {
                         #[cfg(debug_assertions)]
@@ -800,7 +849,13 @@ async fn run_download_task(
                 }
 
                 if should_persist {
-                    save_to_disk(&downloads, &save_lock, &app_handle).await;
+                    save_to_disk_if_changed(
+                        &downloads,
+                        &save_lock,
+                        &last_saved_snapshot,
+                        &app_handle,
+                    )
+                    .await;
                 }
             }
         }
@@ -989,6 +1044,7 @@ impl DownloadManager {
             abort_handles: Arc::new(Mutex::new(HashMap::new())),
             bandwidth_limit: Arc::new(Mutex::new(None)), // No limit by default
             save_lock: Arc::new(Mutex::new(())),
+            last_saved_snapshot: Arc::new(Mutex::new(None)),
             http_client,
             app_handle,
         };
@@ -1121,6 +1177,13 @@ impl DownloadManager {
 
                             if needs_save {
                                 write_download_snapshot_blocking(&path, &downloads);
+                                if let Ok(json) = serde_json::to_string_pretty(&*downloads) {
+                                    let mut snapshot = self.last_saved_snapshot.blocking_lock();
+                                    *snapshot = Some(json);
+                                }
+                            } else {
+                                let mut snapshot = self.last_saved_snapshot.blocking_lock();
+                                *snapshot = Some(content);
                             }
                         }
                         Err(e) => {
@@ -1135,7 +1198,13 @@ impl DownloadManager {
     }
 
     async fn save_downloads(&self) {
-        save_to_disk(&self.downloads, &self.save_lock, &self.app_handle).await;
+        save_to_disk_if_changed(
+            &self.downloads,
+            &self.save_lock,
+            &self.last_saved_snapshot,
+            &self.app_handle,
+        )
+        .await;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1226,6 +1295,7 @@ impl DownloadManager {
 
         let downloads = self.downloads.clone();
         let save_lock = self.save_lock.clone();
+        let last_saved_snapshot = self.last_saved_snapshot.clone();
         let bandwidth_limit = self.bandwidth_limit.clone();
         let app_handle = self.app_handle.clone();
         let client = self.http_client.clone();
@@ -1237,6 +1307,7 @@ impl DownloadManager {
             run_download_task(
                 downloads,
                 save_lock,
+                last_saved_snapshot,
                 bandwidth_limit,
                 app_handle,
                 client,
@@ -1293,6 +1364,74 @@ impl DownloadManager {
             .await;
         }
         Ok(())
+    }
+
+    pub async fn pause_active_downloads(&self) -> usize {
+        let active_ids = {
+            let downloads = self.downloads.lock().await;
+            downloads
+                .iter()
+                .filter_map(|(id, item)| {
+                    matches!(
+                        item.status,
+                        DownloadStatus::Downloading | DownloadStatus::Pending
+                    )
+                    .then_some(id.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if active_ids.is_empty() {
+            return 0;
+        }
+
+        {
+            let mut handles = self.abort_handles.lock().await;
+            for id in &active_ids {
+                if let Some(handle) = handles.remove(id) {
+                    handle.abort();
+                }
+            }
+        }
+
+        let events = {
+            let mut downloads = self.downloads.lock().await;
+            let mut events = Vec::with_capacity(active_ids.len());
+
+            for id in &active_ids {
+                let Some(item) = downloads.get_mut(id) else {
+                    continue;
+                };
+
+                if !matches!(
+                    item.status,
+                    DownloadStatus::Downloading | DownloadStatus::Pending
+                ) {
+                    continue;
+                }
+
+                item.status = DownloadStatus::Paused;
+                item.error = None;
+                item.speed = 0;
+                item.updated_at = unix_timestamp_secs();
+                item.progress = compute_download_progress(
+                    item.downloaded_size,
+                    item.total_size,
+                    &item.status,
+                );
+                events.push(build_progress_event(item));
+            }
+
+            events
+        };
+
+        if events.is_empty() {
+            return 0;
+        }
+
+        emit_download_progress_events(&self.app_handle, events.clone());
+        self.save_downloads().await;
+        events.len()
     }
 
     pub async fn resume_download(&self, id: String) -> Result<(), String> {
@@ -1391,6 +1530,52 @@ impl DownloadManager {
         }
 
         Ok(())
+    }
+
+    pub async fn remove_completed_downloads(&self, delete_file: bool) -> usize {
+        let (completed_ids, file_paths) = {
+            let mut downloads = self.downloads.lock().await;
+            let completed_ids = downloads
+                .iter()
+                .filter_map(|(id, item)| {
+                    (item.status == DownloadStatus::Completed).then_some(id.clone())
+                })
+                .collect::<Vec<_>>();
+
+            if completed_ids.is_empty() {
+                return 0;
+            }
+
+            let file_paths = completed_ids
+                .iter()
+                .filter_map(|id| downloads.get(id))
+                .filter(|_| delete_file)
+                .map(|item| PathBuf::from(&item.file_path).join(&item.file_name))
+                .collect::<Vec<_>>();
+
+            for id in &completed_ids {
+                downloads.remove(id);
+            }
+
+            (completed_ids, file_paths)
+        };
+
+        {
+            let mut handles = self.abort_handles.lock().await;
+            for id in &completed_ids {
+                if let Some(handle) = handles.remove(id) {
+                    handle.abort();
+                }
+            }
+        }
+
+        self.save_downloads().await;
+
+        for path in file_paths {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+
+        completed_ids.len()
     }
 
     /// Verifies that the on-disk file for a completed download still exists.

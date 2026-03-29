@@ -1,34 +1,30 @@
 import { useEffect, useRef } from 'react';
 import { toast } from 'sonner';
 import { getErrorMessage } from '@/lib/api';
-import { checkForAppUpdate, installAppUpdate } from '@/lib/app-updater';
+import { useAppUpdater } from '@/hooks/use-app-updater';
 
-async function installFromToast(update: NonNullable<Awaited<ReturnType<typeof checkForAppUpdate>>>) {
-  toast.loading('Downloading update…', { id: 'app-update-toast' });
-
-  try {
-    await installAppUpdate(update, (status) => {
-      toast.loading(status, { id: 'app-update-toast' });
-    });
-  } catch (error) {
-    toast.error('Failed to install update', {
-      id: 'app-update-toast',
-      description: getErrorMessage(error),
-    });
-  }
-}
+const UPDATE_TOAST_ID = 'app-update-toast';
+const LAST_NOTIFIED_VERSION_KEY = 'stremera:last-notified-app-update-version';
 
 export function AppUpdateManager() {
   const didCheckRef = useRef(false);
+  const { checkForUpdates, installUpdate, isSupported } = useAppUpdater();
 
   useEffect(() => {
-    if (import.meta.env.DEV || didCheckRef.current) return;
+    if (import.meta.env.DEV || didCheckRef.current || !isSupported) return;
     didCheckRef.current = true;
 
     void (async () => {
       try {
-        const update = await checkForAppUpdate();
+        const update = await checkForUpdates();
         if (!update) return;
+
+        const lastNotifiedVersion = window.localStorage.getItem(LAST_NOTIFIED_VERSION_KEY);
+        if (lastNotifiedVersion === update.version) {
+          return;
+        }
+
+        window.localStorage.setItem(LAST_NOTIFIED_VERSION_KEY, update.version);
 
         toast.info(`Update ${update.version} is ready`, {
           description:
@@ -37,7 +33,15 @@ export function AppUpdateManager() {
           action: {
             label: 'Install',
             onClick: () => {
-              void installFromToast(update);
+              toast.loading('Downloading update…', { id: UPDATE_TOAST_ID });
+              void installUpdate(update, (status) => {
+                toast.loading(status, { id: UPDATE_TOAST_ID });
+              }).catch((error) => {
+                toast.error('Failed to install update', {
+                  id: UPDATE_TOAST_ID,
+                  description: getErrorMessage(error),
+                });
+              });
             },
           },
         });
@@ -47,7 +51,7 @@ export function AppUpdateManager() {
         }
       }
     })();
-  }, []);
+  }, [checkForUpdates, installUpdate, isSupported]);
 
   return null;
 }
