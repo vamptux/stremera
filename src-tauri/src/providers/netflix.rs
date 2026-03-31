@@ -1,4 +1,4 @@
-use super::{MediaItem, build_provider_http_client};
+use super::{build_provider_http_client, MediaItem};
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;

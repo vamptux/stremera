@@ -1,5 +1,6 @@
 use super::{
     config_store::{get_effective_playback_rd_token, normalize_addon_url},
+    normalize_non_empty, normalize_stream_media_type,
     playback_state::PlaybackStateService,
     stream_fetcher::{
         fetch_prepared_streams_for_addon, fetch_ranked_streams, resolve_stream_ranking_scope,
@@ -13,12 +14,12 @@ use super::{
         build_magnet, build_stream_query_ids, has_playable_stream_source, is_http_url,
         is_placeholder_no_stream, normalize_http_url,
     },
-    normalize_non_empty, normalize_stream_media_type, BEST_STREAM_CANDIDATE_TIMEOUT_SECS,
-    BEST_STREAM_FIRST_CANDIDATE_TIMEOUT_SECS, BEST_STREAM_MAX_CANDIDATES, SETTINGS_STORE_FILE,
+    BEST_STREAM_CANDIDATE_TIMEOUT_SECS, BEST_STREAM_FIRST_CANDIDATE_TIMEOUT_SECS,
+    BEST_STREAM_MAX_CANDIDATES, SETTINGS_STORE_FILE,
 };
 use crate::providers::{
     realdebrid::RealDebrid,
-    stremio_addon::{StremioAddonTransport, TorrentioStream},
+    addons::{AddonTransport, TorrentioStream},
 };
 use std::time::Duration;
 use tauri::{command, AppHandle, State};
@@ -29,7 +30,7 @@ use tauri_plugin_store::StoreExt;
 pub async fn get_streams(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
-    provider: State<'_, StremioAddonTransport>,
+    provider: State<'_, AddonTransport>,
     rd_provider: State<'_, RealDebrid>,
     media_type: String,
     id: String,
@@ -38,6 +39,7 @@ pub async fn get_streams(
     absolute_episode: Option<u32>,
     ranking_media_id: Option<String>,
     ranking_media_type: Option<String>,
+    ranking_title: Option<String>,
     ranking_season: Option<u32>,
     ranking_episode: Option<u32>,
 ) -> Result<Vec<TorrentioStream>, String> {
@@ -51,6 +53,7 @@ pub async fn get_streams(
         episode,
         ranking_media_type,
         ranking_media_id,
+        ranking_title,
         ranking_season,
         ranking_episode,
     )?;
@@ -76,7 +79,7 @@ pub async fn get_streams(
 #[allow(clippy::too_many_arguments)]
 pub async fn get_streams_for_addon(
     app: AppHandle,
-    provider: State<'_, StremioAddonTransport>,
+    provider: State<'_, AddonTransport>,
     rd_provider: State<'_, RealDebrid>,
     media_type: String,
     id: String,
@@ -169,7 +172,7 @@ pub async fn resolve_stream(
 pub async fn resolve_best_stream(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
-    addon_transport: State<'_, StremioAddonTransport>,
+    addon_transport: State<'_, AddonTransport>,
     rd_provider: State<'_, RealDebrid>,
     media_type: String,
     id: String,
@@ -178,6 +181,7 @@ pub async fn resolve_best_stream(
     absolute_episode: Option<u32>,
     ranking_media_id: Option<String>,
     ranking_media_type: Option<String>,
+    ranking_title: Option<String>,
     ranking_season: Option<u32>,
     ranking_episode: Option<u32>,
 ) -> Result<BestResolvedStream, String> {
@@ -191,6 +195,7 @@ pub async fn resolve_best_stream(
         episode,
         ranking_media_type,
         ranking_media_id,
+        ranking_title,
         ranking_season,
         ranking_episode,
     )?;
@@ -213,7 +218,8 @@ pub async fn resolve_best_stream(
     )
     .await?;
 
-    streams.retain(|stream| !is_placeholder_no_stream(stream) && has_playable_stream_source(stream));
+    streams
+        .retain(|stream| !is_placeholder_no_stream(stream) && has_playable_stream_source(stream));
 
     if streams.is_empty() {
         return Err("No streams found for this content.".to_string());
@@ -284,8 +290,12 @@ pub async fn resolve_best_stream(
                     is_web_friendly: resolved.is_web_friendly,
                     format: resolved.format,
                     used_fallback: index > 0,
-                    source_name: streams.get(index).and_then(|stream| stream.source_name.clone()),
-                    stream_family: streams.get(index).and_then(|stream| stream.stream_family.clone()),
+                    source_name: streams
+                        .get(index)
+                        .and_then(|stream| stream.source_name.clone()),
+                    stream_family: streams
+                        .get(index)
+                        .and_then(|stream| stream.stream_family.clone()),
                 });
             }
             Ok((index, Ok(Err(error)), _)) => {
@@ -310,11 +320,7 @@ pub async fn resolve_best_stream(
                     .get(index)
                     .and_then(|stream| stream.source_name.as_deref())
                     .unwrap_or("Unknown source");
-                errors.push(format!(
-                    "{} timed out after {}s",
-                    source_name,
-                    timeout_secs
-                ));
+                errors.push(format!("{} timed out after {}s", source_name, timeout_secs));
             }
             Err(error) => {
                 errors.push(format!("Stream candidate task failed: {}", error));
@@ -332,7 +338,10 @@ pub async fn resolve_best_stream(
         let suffix = if debrid_requirement_sources.is_empty() {
             String::new()
         } else {
-            format!(" Affected sources: {}.", debrid_requirement_sources.join(", "))
+            format!(
+                " Affected sources: {}.",
+                debrid_requirement_sources.join(", ")
+            )
         };
         return Err(format!("{}{}", missing_debrid_provider_message(), suffix));
     }
@@ -345,7 +354,10 @@ pub async fn resolve_best_stream(
             let suffix = if debrid_requirement_sources.is_empty() {
                 String::new()
             } else {
-                format!(" Affected sources: {}.", debrid_requirement_sources.join(", "))
+                format!(
+                    " Affected sources: {}.",
+                    debrid_requirement_sources.join(", ")
+                )
             };
             return Err(format!("{}{}", missing_debrid_provider_message(), suffix));
         }

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button } from '@/components/ui/button';
+
 import {
   ArrowLeft,
   Loader2,
@@ -16,7 +16,6 @@ import {
   Download,
   Rewind,
   FastForward,
-  StepForward,
   ArrowLeftRight,
 } from 'lucide-react';
 import { api, type Episode, type SkipSegment } from '@/lib/api';
@@ -28,13 +27,16 @@ import {
   command,
   setProperty,
   observeProperties,
-  MpvConfig,
-  MpvObservableProperty,
+  listenEvents,
+  setVideoMarginRatio,
+  type MpvConfig,
+  type MpvObservableProperty,
   destroy,
 } from 'tauri-plugin-libmpv-api';
 import { cn } from '@/lib/utils';
 import { Sidebar } from '@/components/sidebar';
 import { DownloadModal } from '@/components/download-modal';
+import { DesktopTitlebar } from '@/components/desktop-titlebar';
 import {
   PlayerEpisodesPanel,
   PlayerEpisodesToggleButton,
@@ -42,12 +44,13 @@ import {
 import { PlayerProgressBar } from '@/components/player-progress-bar';
 import {
   type Track,
+  areTrackListsEqual,
   normalizeTrackList,
   doesTrackSelectionMatch,
 } from '@/lib/player-track-utils';
 import { useStreamRecovery } from '@/hooks/use-stream-recovery';
 import { usePlayerViewportMode } from '@/hooks/use-player-viewport-mode';
-import { PlayerPlaybackSettings } from '@/components/player-playback-settings';
+import { AudioTrackSelector, SubtitleTrackSelector } from '@/components/player-track-selectors';
 import { PlayerOsdOverlay, type PlayerOsdAction } from '@/components/player-osd-overlay';
 import { PlayerSlider } from '@/components/player-slider';
 import { PlayerActionOverlays } from '@/components/player-action-overlays';
@@ -57,16 +60,19 @@ import { usePlayerTrackPreferences } from '@/hooks/use-player-track-preferences'
 import { usePlayerResumeController } from '@/hooks/use-player-resume-controller';
 import { usePlayerStreamSession } from '@/hooks/use-player-stream-session';
 import { usePlayerRouteState } from '@/hooks/use-player-route-state';
-import {
-  usePlayerUpNext,
-  type NextEpisodeStreamCoordinates,
-} from '@/hooks/use-player-up-next';
+import { usePlayerNavigationGuard } from '@/hooks/use-player-navigation-guard';
+import { usePlayerSurfaceLayout } from '@/hooks/use-player-surface-layout';
+import { type NextEpisodeStreamCoordinates } from '@/hooks/use-player-up-next';
 import {
   buildEpisodeStreamTargetLookupKey,
   buildFallbackEpisodeStreamTarget,
   resolveEpisodeStreamTarget,
 } from '@/lib/episode-stream-target';
-import { buildPlayerRoute } from '@/lib/player-navigation';
+import {
+  buildDetailsReopenSelectorState,
+  getLatestEpisodeResumeStartTime,
+} from '@/lib/history-playback';
+import { normalizeSkipSegments } from '@/lib/skip-segments';
 import { resolveRankedBestStream } from '@/lib/stream-resolution';
 
 // --- Types & Constants ---
@@ -123,19 +129,39 @@ const OPTIMISTIC_SEEK_HOLD_MS = 450;
 const OPTIMISTIC_SEEK_SETTLED_DELTA_SECS = 1.1;
 const TRACK_SWITCH_VERIFY_ATTEMPTS = 8;
 const TRACK_SWITCH_VERIFY_DELAY_MS = 150;
+const CONTROLS_AUTO_HIDE_DELAY_MS = 3000;
+const PLAYBACK_READY_AUTO_HIDE_DELAY_MS = 2600;
+const PLAYER_INTERACTIVE_TARGET_SELECTOR =
+  'button, a, input, textarea, select, [role="button"], [role="menu"], [role="menuitem"], [data-radix-popper-content-wrapper]';
+type TimerHandle = ReturnType<typeof setTimeout>;
+type SelectedEpisodeStreamTarget = NextEpisodeStreamCoordinates & { startTime?: number };
+
+function shouldIgnorePlayerSurfaceInteraction(event: React.MouseEvent<HTMLDivElement>): boolean {
+  const target = event.target as HTMLElement;
+  return !event.currentTarget.contains(target) || !!target.closest(PLAYER_INTERACTIVE_TARGET_SELECTOR);
+}
+
+function clearTimer(timerRef: React.MutableRefObject<TimerHandle | null>) {
+  if (timerRef.current === null) return;
+  clearTimeout(timerRef.current);
+  timerRef.current = null;
+}
 
 // --- Component ---
 
 export function Player() {
-  const { season, episode } = useParams();
+  const { type, id, season, episode } = useParams();
   // Force full remount on episode change to ensure clean state
-  return <InnerPlayer key={`${season}:${episode}`} />;
+  return <InnerPlayer key={`${type ?? 'type'}:${id ?? 'id'}:${season ?? 'season'}:${episode ?? 'episode'}`} />;
 }
 
 function InnerPlayer() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
+  const topChromeRef = useRef<HTMLDivElement | null>(null);
+  const bottomChromeRef = useRef<HTMLDivElement | null>(null);
+  const episodesPanelFrameRef = useRef<HTMLDivElement | null>(null);
   const isNavigatingAwayRef = useRef(false);
 
   const {
@@ -236,9 +262,12 @@ function InnerPlayer() {
   const [showStreamSelector, setShowStreamSelector] = useState(false);
   const [selectedEpisodeForStream, setSelectedEpisodeForStream] = useState<Episode | null>(null);
   const [selectedEpisodeStreamTarget, setSelectedEpisodeStreamTarget] =
-    useState<NextEpisodeStreamCoordinates | null>(null);
+    useState<SelectedEpisodeStreamTarget | null>(null);
 
   const [showDownloadModal, setShowDownloadModal] = useState(false);
+  const [mpvSurfaceReady, setMpvSurfaceReady] = useState(false);
+  const [surfaceLayoutRefreshToken, setSurfaceLayoutRefreshToken] = useState(0);
+  const showErrorOverlay = !!error && !isResolving && !isLoading;
 
   // OSD (on-screen display) for keyboard/mouse action feedback
   const [osdAction, setOsdAction] = useState<PlayerOsdAction | null>(null);
@@ -278,12 +307,16 @@ function InnerPlayer() {
     },
   });
 
-  const invalidateWatchHistoryOnce = useCallback(() => {
-    if (watchHistoryInvalidatedRef.current) return;
-    watchHistoryInvalidatedRef.current = true;
+  const invalidatePlaybackQueries = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ['continue-watching'] });
     void queryClient.invalidateQueries({ queryKey: ['watch-history'] });
   }, [queryClient]);
+
+  const invalidateWatchHistoryOnce = useCallback(() => {
+    if (watchHistoryInvalidatedRef.current) return;
+    watchHistoryInvalidatedRef.current = true;
+    invalidatePlaybackQueries();
+  }, [invalidatePlaybackQueries]);
 
   const flushPlaybackBeforeNavigation = useCallback(async () => {
     try {
@@ -291,11 +324,15 @@ function InnerPlayer() {
     } finally {
       if (!watchHistoryInvalidatedRef.current) {
         watchHistoryInvalidatedRef.current = true;
-        void queryClient.invalidateQueries({ queryKey: ['continue-watching'] });
-        void queryClient.invalidateQueries({ queryKey: ['watch-history'] });
+        invalidatePlaybackQueries();
       }
     }
-  }, [queryClient]);
+  }, [invalidatePlaybackQueries]);
+
+  const { allowNextNavigation } = usePlayerNavigationGuard({
+    enabled: !!type && !!id && !!(activeStreamUrl || routeStreamUrl),
+    flushBeforeNavigation: flushPlaybackBeforeNavigation,
+  });
 
   // Intelligent back navigation: replace the player in history so pressing back
   // from the destination page never re-launches the player.
@@ -308,15 +345,21 @@ function InnerPlayer() {
     restorePlayerSurface();
     await flushPlaybackBeforeNavigation();
     await beginPlayerExit();
+    allowNextNavigation();
 
     const backSeason = selectedEpisodeForStream?.season ?? routeAbsoluteSeason;
     const backEpisode = selectedEpisodeForStream?.episode ?? routeAbsoluteEpisode;
-    const reopenSelectorState = {
-      reopenStreamSelector: true,
-      reopenStreamSeason: backSeason,
-      reopenStreamEpisode: backEpisode,
-      reopenStartTime: currentTimeRef.current > 5 ? currentTimeRef.current : undefined,
-    };
+    const reopenSelectorState = buildDetailsReopenSelectorState({
+      from: from && !from.startsWith('/player') ? from : `/details/${effectiveResolveMediaType}/${id}`,
+      season: backSeason,
+      episode: backEpisode,
+      startTime:
+        currentTimeRef.current > 5
+          ? currentTimeRef.current
+          : startTime && startTime > 5
+            ? startTime
+            : undefined,
+    });
 
     // If we have a valid non-player origin, go there (replacing player in stack)
     if (from && !from.startsWith('/player')) {
@@ -344,11 +387,14 @@ function InnerPlayer() {
     effectiveResolveMediaType,
     id,
     restorePlayerSurface,
+    startTime,
+    allowNextNavigation,
   ]);
 
   // -- Refs --
-  const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const forceShowTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const controlsTimeoutRef = useRef<TimerHandle | null>(null);
+  const forceShowTimeoutRef = useRef<TimerHandle | null>(null);
+  const singleClickTimerRef = useRef<TimerHandle | null>(null);
   const lastTimeUpdateRef = useRef(0);
   const pendingSeekDeadlineRef = useRef(0);
   const pendingSeekTargetRef = useRef<number | null>(null);
@@ -365,12 +411,14 @@ function InnerPlayer() {
   const handleEndedRef = useRef<(() => void) | undefined>(undefined);
   const lastAutoResolveLookupIdRef = useRef<string | null>(null);
   const errorRef = useRef<string | null>(error);
-  const osdTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const osdClearTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const osdTimerRef = useRef<TimerHandle | null>(null);
+  const osdClearTimerRef = useRef<TimerHandle | null>(null);
   const osdAnimationFrameRef = useRef<number | null>(null);
   const selectorOpenRequestIdRef = useRef(0);
   /** Always-current playing state — used in closures to avoid stale captures. */
   const isPlayingRef = useRef(false);
+  /** Timestamp (ms) when playback was first verified — used to suppress transient idle events. */
+  const playbackVerifiedAtRef = useRef(0);
   const isDev = import.meta.env.DEV;
   const trackSwitchingRef = useRef<{ audio: boolean; sub: boolean }>({
     audio: false,
@@ -401,6 +449,7 @@ function InnerPlayer() {
     pendingSeekTargetRef.current = null;
     pendingSeekDeadlineRef.current = 0;
     lastTimeUpdateRef.current = 0;
+    playbackVerifiedAtRef.current = 0;
     setCurrentTime(0);
     setDuration(0);
   }, [activeStreamUrl]);
@@ -499,7 +548,11 @@ function InnerPlayer() {
     return resolvedAniSkipEpisode ?? resolvedAbsoluteEpisode;
   }, [resolvedAbsoluteEpisode, isAnime, resolvedAniSkipEpisode]);
 
-  const { data: skipSegments = [] } = useQuery<SkipSegment[]>({
+  const skipDurationHint = Number.isFinite(duration) && duration > 0 ? Math.round(duration) : 0;
+  const canFetchSkipTimes =
+    skipTimesEnabled && !!skipTimesEpisode && (!isAnime || duration > 0 || hasPlaybackStarted);
+
+  const { data: rawSkipSegments = [] } = useQuery<SkipSegment[]>({
     queryKey: [
       'skip-times',
       effectiveResolveMediaType,
@@ -508,6 +561,7 @@ function InnerPlayer() {
       resolvedAbsoluteSeason,
       resolvedAbsoluteEpisode,
       skipTimesEpisode,
+      skipDurationHint,
     ],
     queryFn: () =>
       api.getSkipTimes(
@@ -516,14 +570,18 @@ function InnerPlayer() {
         details?.imdbId ?? undefined,
         resolvedAbsoluteSeason,
         skipTimesEpisode,
-        // Pass 0 - AniSkip accepts 0 to skip length-based filtering.
-        0,
+        duration > 0 ? duration : undefined,
       ),
-    enabled: skipTimesEnabled && !!skipTimesEpisode,
+    enabled: canFetchSkipTimes,
     staleTime: 1000 * 60 * 60 * 12, // 12 h - crowdsourced data changes rarely
     gcTime: 1000 * 60 * 60 * 24,
     retry: 1,
   });
+
+  const skipSegments = useMemo(
+    () => normalizeSkipSegments(rawSkipSegments, duration),
+    [rawSkipSegments, duration],
+  );
 
   // -- Derived State --
   const seasons = useMemo(() => {
@@ -700,38 +758,8 @@ function InnerPlayer() {
       selectedStreamKeyRef,
     });
 
-  const {
-    dismissUpNext,
-    getFreshPrefetchedPlan,
-    nextPlaybackPlan,
-    showUpNext,
-    startUpNextCountdown,
-    upNextCountdown,
-  } = usePlayerUpNext({
-    mediaType: effectiveResolveMediaType,
-    mediaId: id,
-    currentSeason: resolvedAbsoluteSeason,
-    currentEpisode: resolvedAbsoluteEpisode,
-    currentStreamLookupId: streamLookupId,
-    currentTime,
-    duration,
-    hasPlaybackStarted,
-  });
-
-  const nextEpisode = useMemo(() => {
-    if (!nextPlaybackPlan) return null;
-    return {
-      title: nextPlaybackPlan.canonical.title,
-      episode: nextPlaybackPlan.canonical.episode,
-    };
-  }, [nextPlaybackPlan]);
-
-  const nextEpisodeLabel = useMemo(() => {
-    if (!nextPlaybackPlan) return '';
-    const trimmedTitle = nextPlaybackPlan.canonical.title?.trim();
-    if (trimmedTitle) return trimmedTitle;
-    return `Episode ${nextPlaybackPlan.canonical.episode}`;
-  }, [nextPlaybackPlan]);
+  const displaySeason = resolvedAbsoluteSeason;
+  const displayEpisode = resolvedAbsoluteEpisode;
 
   // -- Helpers --
 
@@ -741,12 +769,6 @@ function InnerPlayer() {
     document.documentElement.style.backgroundColor = val;
     const root = document.getElementById('root');
     if (root) root.style.backgroundColor = val;
-  }, []);
-
-  const beginLoading = useCallback(() => {
-    setIsLoading(true);
-    isLoadingRef.current = true;
-    setHasPlaybackStarted(false);
   }, []);
 
   const stopLoading = useCallback(
@@ -760,19 +782,47 @@ function InnerPlayer() {
     [setTransparent],
   );
 
+  usePlayerSurfaceLayout({
+    playerContainerRef,
+    topChromeRef,
+    bottomChromeRef,
+    episodesPanelFrameRef,
+    refreshToken: surfaceLayoutRefreshToken,
+    activeStreamUrl,
+    mpvSurfaceReady,
+    isFullscreen,
+    isLoading,
+    isResolving,
+    hasError: !!error,
+    showErrorOverlay,
+    showEpisodes,
+    showStreamSelector,
+    showDownloadModal,
+  });
+
+  const reopenSelectorForSavedStreamFailure = useCallback(() => {
+    setError(null);
+    setIsResolving(false);
+    setResolveStatus('');
+    setShowControls(true);
+    setShowEpisodes(false);
+    setSelectedEpisodeStreamTarget(null);
+    setSelectedEpisodeForStream(currentEpisodeFromAbsoluteRoute ?? currentEpisodeFromRoute);
+    setShowStreamSelector(true);
+  }, [currentEpisodeFromAbsoluteRoute, currentEpisodeFromRoute]);
+
   const {
     clearRecoveryTimers,
     markPlaybackStarted,
     recoverFromSlowStartup,
-    recoverFromStaleSavedStream,
   } = useStreamRecovery({
     activeStreamUrl,
-    initialStreamUrl: routeStreamUrl,
     preparedBackupStream,
     isHistoryResume,
     isOffline,
     mediaType: effectiveResolveMediaType,
     mediaId: id,
+    title,
     resolveSeason: resolvedStreamSeason,
     resolveEpisode: resolvedStreamEpisode,
     absoluteEpisode: resolvedAbsoluteEpisode,
@@ -785,12 +835,12 @@ function InnerPlayer() {
     activeStreamSourceNameRef,
     activeStreamFamilyRef,
     errorRef,
-    beginLoading,
     stopLoading,
     setError,
     setIsResolving,
     setResolveStatus,
     setActiveStreamUrl,
+    onSavedStreamUnavailable: reopenSelectorForSavedStreamFailure,
     reportStreamFailure,
   });
 
@@ -798,40 +848,56 @@ function InnerPlayer() {
     markPlaybackStarted();
     stopLoading(true);
     setHasPlaybackStarted(true);
+    playbackVerifiedAtRef.current = performance.now();
     setError(null);
+    // Cancel any pending force-show error timers — playback is confirmed good
+    clearTimer(forceShowTimeoutRef);
+    setShowControls(true);
+    clearTimer(controlsTimeoutRef);
+    if (isPlayingRef.current) {
+      controlsTimeoutRef.current = setTimeout(() => {
+        if (mountedRef.current && isPlayingRef.current) {
+          setShowControls(false);
+        }
+        controlsTimeoutRef.current = null;
+      }, PLAYBACK_READY_AUTO_HIDE_DELAY_MS);
+    }
     reportStreamVerified();
   }, [markPlaybackStarted, reportStreamVerified, stopLoading]);
 
-  const clearUiTimers = useCallback(() => {
-    if (controlsTimeoutRef.current) {
-      clearTimeout(controlsTimeoutRef.current);
+  const scheduleControlsAutoHide = useCallback((delayMs = CONTROLS_AUTO_HIDE_DELAY_MS) => {
+    clearTimer(controlsTimeoutRef);
+    controlsTimeoutRef.current = setTimeout(() => {
+      if (mountedRef.current && isPlayingRef.current) {
+        setShowControls(false);
+      }
       controlsTimeoutRef.current = null;
-    }
-    if (forceShowTimeoutRef.current) {
-      clearTimeout(forceShowTimeoutRef.current);
-      forceShowTimeoutRef.current = null;
-    }
-    if (osdTimerRef.current) {
-      clearTimeout(osdTimerRef.current);
-      osdTimerRef.current = null;
-    }
-    if (osdClearTimerRef.current) {
-      clearTimeout(osdClearTimerRef.current);
-      osdClearTimerRef.current = null;
-    }
+    }, delayMs);
+  }, []);
+
+  const cancelPendingSingleClick = useCallback(() => {
+    clearTimer(singleClickTimerRef);
+  }, []);
+
+  const clearUiTimers = useCallback(() => {
+    clearTimer(controlsTimeoutRef);
+    clearTimer(forceShowTimeoutRef);
+    clearTimer(osdTimerRef);
+    clearTimer(osdClearTimerRef);
     if (osdAnimationFrameRef.current !== null) {
       cancelAnimationFrame(osdAnimationFrameRef.current);
       osdAnimationFrameRef.current = null;
     }
-  }, []);
+    cancelPendingSingleClick();
+  }, [cancelPendingSingleClick]);
 
   /**
    * Briefly show a centred on-screen indicator for keyboard/pointer actions.
    * The indicator fades out after ~1.1 s and is fully removed after the transition.
    */
   const triggerOsd = useCallback((action: PlayerOsdAction) => {
-    if (osdTimerRef.current) clearTimeout(osdTimerRef.current);
-    if (osdClearTimerRef.current) clearTimeout(osdClearTimerRef.current);
+    clearTimer(osdTimerRef);
+    clearTimer(osdClearTimerRef);
     if (osdAnimationFrameRef.current !== null) {
       cancelAnimationFrame(osdAnimationFrameRef.current);
       osdAnimationFrameRef.current = null;
@@ -849,7 +915,7 @@ function InnerPlayer() {
       action.kind === 'play' || action.kind === 'pause'
         ? 340
         : action.kind === 'message'
-          ? 1600
+          ? 2800
           : 900;
     osdTimerRef.current = setTimeout(() => {
       setOsdVisible(false);
@@ -885,9 +951,21 @@ function InnerPlayer() {
 
   const updateTracks = useCallback((rawTracks: unknown) => {
     const normalizedTracks = normalizeTrackList(rawTracks);
+    if (areTrackListsEqual(trackListRef.current, normalizedTracks)) {
+      return trackListRef.current;
+    }
+
     trackListRef.current = normalizedTracks;
-    setAudioTracks(normalizedTracks.filter((track) => track.type === 'audio'));
-    setSubTracks(normalizedTracks.filter((track) => track.type === 'sub'));
+    const nextAudioTracks = normalizedTracks.filter((track) => track.type === 'audio');
+    const nextSubTracks = normalizedTracks.filter((track) => track.type === 'sub');
+
+    setAudioTracks((previousTracks) =>
+      areTrackListsEqual(previousTracks, nextAudioTracks) ? previousTracks : nextAudioTracks,
+    );
+    setSubTracks((previousTracks) =>
+      areTrackListsEqual(previousTracks, nextSubTracks) ? previousTracks : nextSubTracks,
+    );
+
     return normalizedTracks;
   }, []);
 
@@ -917,16 +995,13 @@ function InnerPlayer() {
     setShowControls(true);
     setShowEpisodes(false);
     await flushPlaybackBeforeNavigation();
-  }, [flushPlaybackBeforeNavigation, prepareForInternalPlayerNavigation]);
+    allowNextNavigation();
+  }, [allowNextNavigation, flushPlaybackBeforeNavigation, prepareForInternalPlayerNavigation]);
 
   const handleEnded = useCallback(() => {
     setIsPlaying(false);
     saveProgressRef.current?.();
-    if (nextPlaybackPlan) {
-      setShowControls(true);
-      startUpNextCountdown();
-    }
-  }, [nextPlaybackPlan, startUpNextCountdown]);
+  }, []);
 
   useEffect(() => {
     handleEndedRef.current = handleEnded;
@@ -1029,118 +1104,6 @@ function InnerPlayer() {
     lastAutoResolveLookupIdRef.current = null;
   }, [id, season, episode]);
 
-  const playNext = useCallback(async () => {
-    if (!nextPlaybackPlan || !id) return;
-
-    const targetRoute = buildPlayerRoute(
-      effectiveResolveMediaType,
-      id,
-      nextPlaybackPlan.canonical.season,
-      nextPlaybackPlan.canonical.episode,
-    );
-
-    const prefetchedPlan = getFreshPrefetchedPlan(nextPlaybackPlan.lookupKey);
-    const hasPrefetched =
-      prefetchedPlan &&
-      prefetchedPlan.canonical.season === nextPlaybackPlan.canonical.season &&
-      prefetchedPlan.canonical.episode === nextPlaybackPlan.canonical.episode;
-
-    const baseState = {
-      title,
-      poster,
-      backdrop,
-      logo,
-      startTime: 0,
-      absoluteSeason: nextPlaybackPlan.canonical.season,
-      absoluteEpisode: nextPlaybackPlan.canonical.episode,
-      streamSeason: nextPlaybackPlan.source.season,
-      streamEpisode: nextPlaybackPlan.source.episode,
-      aniskipEpisode: nextPlaybackPlan.source.aniskipEpisode,
-      streamLookupId: nextPlaybackPlan.source.lookupId,
-      from, // Propagate origin so back nav stays consistent
-    };
-
-    if (hasPrefetched) {
-      await prepareForPlayerNavigation();
-      navigate(targetRoute, {
-        state: {
-          ...baseState,
-          streamUrl: prefetchedPlan.primaryStream?.url,
-          streamSourceName: prefetchedPlan.primaryStream?.sourceName,
-          streamFamily: prefetchedPlan.primaryStream?.streamFamily,
-          format: prefetchedPlan.primaryStream?.format,
-          preparedBackupStream: prefetchedPlan.backupStream
-            ? {
-                url: prefetchedPlan.backupStream.url,
-                format: prefetchedPlan.backupStream.format,
-                sourceName: prefetchedPlan.backupStream.sourceName,
-                streamFamily: prefetchedPlan.backupStream.streamFamily,
-              }
-            : undefined,
-        },
-      });
-      return;
-    }
-
-    try {
-      const resolved = await resolveRankedBestStream({
-        mediaType: effectiveResolveMediaType,
-        mediaId: id,
-        streamLookupId: nextPlaybackPlan.source.lookupId,
-        streamSeason: nextPlaybackPlan.source.season,
-        streamEpisode: nextPlaybackPlan.source.episode,
-        absoluteEpisode: nextPlaybackPlan.canonical.episode,
-        rankingTarget: {
-          mediaId: id,
-          mediaType: effectiveResolveMediaType,
-          season: nextPlaybackPlan.canonical.season,
-          episode: nextPlaybackPlan.canonical.episode,
-        },
-      });
-
-      await prepareForPlayerNavigation();
-      navigate(targetRoute, {
-        state: {
-          ...baseState,
-          streamUrl: resolved.url,
-          streamSourceName: resolved.source_name,
-          streamFamily: resolved.stream_family,
-          format: resolved.format,
-        },
-      });
-      return;
-    } catch {
-      // Fallback to route transition and let page auto-resolve.
-    }
-
-    await prepareForPlayerNavigation();
-    navigate(targetRoute, {
-      state: {
-        ...baseState,
-      },
-    });
-  }, [
-    getFreshPrefetchedPlan,
-    navigate,
-    effectiveResolveMediaType,
-    id,
-    nextPlaybackPlan,
-    title,
-    poster,
-    logo,
-    from,
-    backdrop,
-    prepareForPlayerNavigation,
-  ]);
-
-  // Auto-navigate when the up-next countdown expires
-  useEffect(() => {
-    if (showUpNext && upNextCountdown === 0) {
-      dismissUpNext();
-      void playNext();
-    }
-  }, [dismissUpNext, showUpNext, upNextCountdown, playNext]);
-
   const playEpisode = useCallback(
     async (ep: Episode) => {
       if (!id) return;
@@ -1153,7 +1116,6 @@ function InnerPlayer() {
         /* ignore */
       }
       setIsPlaying(false);
-      dismissUpNext();
       const requestId = ++selectorOpenRequestIdRef.current;
 
       const target = await resolveEpisodeStreamTarget(
@@ -1161,6 +1123,17 @@ function InnerPlayer() {
         id,
         streamLookupId || id,
         ep,
+      );
+
+      if (requestId !== selectorOpenRequestIdRef.current) {
+        return;
+      }
+
+      const startTime = await getLatestEpisodeResumeStartTime(
+        id,
+        effectiveResolveMediaType,
+        target.absoluteSeason,
+        target.absoluteEpisode,
       );
 
       if (requestId !== selectorOpenRequestIdRef.current) {
@@ -1175,17 +1148,17 @@ function InnerPlayer() {
         absoluteSeason: target.absoluteSeason,
         absoluteEpisode: target.absoluteEpisode,
         aniskipEpisode: target.aniskipEpisode,
+        startTime,
         lookupKey: buildEpisodeStreamTargetLookupKey(effectiveResolveMediaType, target),
       });
       setShowStreamSelector(true);
       setShowEpisodes(false);
     },
-    [dismissUpNext, effectiveResolveMediaType, id, streamLookupId],
+    [effectiveResolveMediaType, id, streamLookupId],
   );
 
   const openInlineStreamSelector = useCallback(async () => {
     if (!isSeriesLike || !id || !sidebarCurrentEpisode) return;
-    dismissUpNext();
     const requestId = ++selectorOpenRequestIdRef.current;
 
     const target = await resolveEpisodeStreamTarget(
@@ -1193,6 +1166,17 @@ function InnerPlayer() {
       id,
       streamLookupId || id,
       sidebarCurrentEpisode,
+    );
+
+    if (requestId !== selectorOpenRequestIdRef.current) {
+      return;
+    }
+
+    const startTime = await getLatestEpisodeResumeStartTime(
+      id,
+      effectiveResolveMediaType,
+      target.absoluteSeason,
+      target.absoluteEpisode,
     );
 
     if (requestId !== selectorOpenRequestIdRef.current) {
@@ -1207,12 +1191,12 @@ function InnerPlayer() {
       absoluteSeason: target.absoluteSeason,
       absoluteEpisode: target.absoluteEpisode,
       aniskipEpisode: target.aniskipEpisode,
+      startTime,
       lookupKey: buildEpisodeStreamTargetLookupKey(effectiveResolveMediaType, target),
     });
     setShowStreamSelector(true);
     setShowEpisodes(false);
   }, [
-    dismissUpNext,
     effectiveResolveMediaType,
     id,
     isSeriesLike,
@@ -1412,17 +1396,18 @@ function InnerPlayer() {
           e.preventDefault();
           toggleMute();
           break;
-        case 'n':
-          e.preventDefault();
-          if (nextEpisode) void playNext();
-          break;
         case 'd':
           e.preventDefault();
           if (activeStreamUrl) setShowDownloadModal(true);
           break;
         case 'escape':
-          if (showUpNext) {
-            dismissUpNext();
+          if (showEpisodes) {
+            setShowEpisodes(false);
+            return;
+          }
+          if (isFullscreen) {
+            e.preventDefault();
+            void toggleFullscreen();
             return;
           }
           break;
@@ -1438,11 +1423,9 @@ function InnerPlayer() {
     toggleMute,
     handleVolumeChange,
     triggerOsd,
-    dismissUpNext,
-    nextEpisode,
-    playNext,
     activeStreamUrl,
-    showUpNext,
+    isFullscreen,
+    showEpisodes,
   ]);
 
   // -- Effects --
@@ -1497,6 +1480,7 @@ function InnerPlayer() {
               mediaType: effectiveResolveMediaType,
               season: resolvedAbsoluteSeason,
               episode: resolvedAbsoluteEpisode,
+              title,
             },
           }),
           new Promise<never>((_, reject) =>
@@ -1537,6 +1521,7 @@ function InnerPlayer() {
     resolvedAbsoluteEpisode,
     isResolving,
     error,
+    title,
     isDev,
     shouldBypassResolveCache,
     shouldWaitForResolvedLookupId,
@@ -1564,11 +1549,12 @@ function InnerPlayer() {
     }
 
     isDestroyedRef.current = false;
-  mpvInitializedRef.current = false;
+    mpvInitializedRef.current = false;
 
     // Local cancelled flag prevents stale async continuations (fixes StrictMode double-fire race)
     let cancelled = false;
     let unlisten: (() => void) | undefined;
+    let unlistenEvents: (() => void) | undefined;
     let loadfileSent = false;
 
     const initPlayer = async () => {
@@ -1587,6 +1573,8 @@ function InnerPlayer() {
           /* ignore */
         }
 
+        setMpvSurfaceReady(false);
+
         await new Promise((r) => setTimeout(r, 150));
         if (cancelled) return;
 
@@ -1594,8 +1582,9 @@ function InnerPlayer() {
 
         const mpvConfig: MpvConfig = {
           initialOptions: {
-            vo: 'gpu-next',
-            hwdec: 'auto',
+            vo: 'gpu',
+            hwdec: 'd3d11va-copy',
+            'gpu-api': 'd3d11',
             'gpu-context': 'd3d11',
             'keep-open': 'yes',
             cache: 'yes',
@@ -1622,6 +1611,7 @@ function InnerPlayer() {
           if (!isNaN(parsed) && parsed !== 1.0) await setProperty('speed', parsed);
         }
         mpvInitializedRef.current = true;
+        setMpvSurfaceReady(true);
 
         unlisten = await observeProperties(OBSERVED_PROPERTIES, (event) => {
           if (cancelled || !mountedRef.current || isDestroyedRef.current) return;
@@ -1653,10 +1643,7 @@ function InnerPlayer() {
                   setCurrentTime(data);
                 }
                 // Mark playback as started once we have a valid time position
-                if (
-                  isLoadingRef.current &&
-                  (data > 0.1 || (data >= 0 && durationRef.current > 0))
-                ) {
+                if (isLoadingRef.current && data > 0.1) {
                   markPlaybackReady();
                 }
                 void applyResumeIfReady();
@@ -1702,6 +1689,18 @@ function InnerPlayer() {
                 // Before loadfile completes, idle-active is just MPV's initial state — ignore it
                 if (isLoadingRef.current && !loadfileSent) break;
 
+                // Grace period: MPV can fire idle-active transiently during buffering, seeking,
+                // or internal state transitions right after playback was confirmed. Suppress these
+                // for a short window to avoid premature "stream disconnected" errors.
+                const IDLE_GRACE_MS = 4000;
+                const verifiedAt = playbackVerifiedAtRef.current;
+                if (verifiedAt > 0 && performance.now() - verifiedAt < IDLE_GRACE_MS) break;
+
+                // If playback has been progressing normally (time > threshold), this is likely a
+                // transient buffer stall, not a real disconnect. Let MPV handle reconnection.
+                const hasProgressedMeaningfully =
+                  currentTimeRef.current > 2 && durationRef.current > 0;
+
                 const nearEnd =
                   durationRef.current > 0 &&
                   currentTimeRef.current >= Math.max(0, durationRef.current - 1);
@@ -1710,10 +1709,22 @@ function InnerPlayer() {
                 const currentUrl = lastStreamUrlRef.current || activeStreamUrl;
                 if (!currentUrl) break;
 
-                if (isHistoryResume && recoverFromStaleSavedStream()) break;
-
                 const duringInitialLoad = isLoadingRef.current;
+
+                // For history resume: if playback already progressed past initial frames,
+                // treat this as a transient stall instead of an immediate failure.
+                if (isHistoryResume && hasProgressedMeaningfully) break;
+
                 reportStreamFailure(duringInitialLoad ? 'load-failed' : 'disconnected', currentUrl);
+                if (isHistoryResume) {
+                  if (duringInitialLoad) stopLoading();
+                  reopenSelectorForSavedStreamFailure();
+                  break;
+                }
+
+                // For non-resume streams that have been playing, give them more tolerance
+                if (hasProgressedMeaningfully) break;
+
                 void recoverFromSlowStartup(currentUrl).then((didRecover) => {
                   if (didRecover || !mountedRef.current || errorRef.current) return;
 
@@ -1721,6 +1732,9 @@ function InnerPlayer() {
                     durationRef.current > 0 &&
                     currentTimeRef.current >= Math.max(0, durationRef.current - 1);
                   if (stillNearEnd) return;
+
+                  // Final check: if playback started while recovery was in-flight, skip the error
+                  if (playbackVerifiedAtRef.current > 0 && currentTimeRef.current > 0.5) return;
 
                   setError(
                     duringInitialLoad
@@ -1732,16 +1746,35 @@ function InnerPlayer() {
               }
               break;
             case 'core-idle':
-              if (data === false && isLoadingRef.current && durationRef.current > 0) {
-                markPlaybackReady();
+              if (data === false) {
+                if (isLoadingRef.current && (durationRef.current > 0 || loadfileSent)) {
+                  markPlaybackReady();
+                }
                 void applyResumeIfReady();
               }
               break;
           }
         });
 
+        unlistenEvents = await listenEvents((event) => {
+          if (cancelled || !mountedRef.current || isDestroyedRef.current) return;
+
+          if (
+            event.event === 'file-loaded' ||
+            event.event === 'video-reconfig' ||
+            event.event === 'playback-restart'
+          ) {
+            window.requestAnimationFrame(() => {
+              if (!cancelled && mountedRef.current && !isDestroyedRef.current) {
+                setSurfaceLayoutRefreshToken((version) => version + 1);
+              }
+            });
+          }
+        });
+
         if (cancelled) {
           if (unlisten) unlisten();
+          if (unlistenEvents) unlistenEvents();
           return;
         }
 
@@ -1756,15 +1789,14 @@ function InnerPlayer() {
         clearUiTimers();
         forceShowTimeoutRef.current = setTimeout(() => {
           if (!cancelled && mountedRef.current && isLoadingRef.current && !errorRef.current) {
-            if (recoverFromStaleSavedStream()) {
-              return;
-            }
             if (isDev) console.warn('Force showing player after timeout.');
             // Show transparent player so the user can see controls and try another stream
             stopLoading(true);
             // If nothing has started after another 5 s, show a definitive error
             forceShowTimeoutRef.current = setTimeout(() => {
               if (cancelled || !mountedRef.current || errorRef.current) return;
+              // Playback may have started between the two timers — don't show error
+              if (playbackVerifiedAtRef.current > 0) return;
               if (durationRef.current > 0 && currentTimeRef.current > 0.1) return;
               reportStreamFailure('load-failed');
               setError('Stream failed to load. Try another stream.');
@@ -1774,7 +1806,6 @@ function InnerPlayer() {
         }, 6500);
       } catch (err) {
         if (cancelled) return; // Don't set error for cancelled inits
-        if (recoverFromStaleSavedStream()) return;
         if (isDev) console.error('MPV Init Error:', err);
         reportStreamFailure('load-failed');
         if (mountedRef.current) {
@@ -1790,11 +1821,14 @@ function InnerPlayer() {
       cancelled = true;
       isDestroyedRef.current = true;
       mpvInitializedRef.current = false;
+      setMpvSurfaceReady(false);
       if (unlisten) unlisten();
+      if (unlistenEvents) unlistenEvents();
       clearUiTimers();
       clearResumeRetryTimer();
       clearRecoveryTimers();
       destroy().catch(() => {});
+      void setVideoMarginRatio({ left: 0, right: 0, top: 0, bottom: 0 }).catch(() => {});
       restorePlayerSurface();
       saveProgressRef.current?.();
     };
@@ -1811,25 +1845,28 @@ function InnerPlayer() {
     clearUiTimers,
     isDev,
     markPlaybackReady,
+    reopenSelectorForSavedStreamFailure,
     restorePlayerSurface,
     prepareForStreamLoad,
     stopLoading,
     clearOptimisticSeek,
-    recoverFromStaleSavedStream,
     isAnime,
   ]);
 
-  const handleMouseMove = () => {
+  const handleMouseMove = useCallback(() => {
     setShowControls(true);
-    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
-    controlsTimeoutRef.current = setTimeout(() => {
-      if (isPlaying) setShowControls(false);
-    }, 3000);
-  };
+    scheduleControlsAutoHide();
+  }, [scheduleControlsAutoHide]);
+
+  const handleMouseLeave = useCallback(() => {
+    if (!isPlaying) return;
+    clearTimer(controlsTimeoutRef);
+    setShowControls(false);
+  }, [isPlaying]);
 
   // Hide cursor when controls are hidden during playback
   useEffect(() => {
-    const container = document.getElementById('mpv-container');
+    const container = playerContainerRef.current;
     if (!container) return;
     if (!showControls && isPlaying) {
       container.style.cursor = 'none';
@@ -1843,7 +1880,7 @@ function InnerPlayer() {
       document.body.style.cursor = '';
       document.documentElement.style.cursor = '';
     };
-  }, [showControls, isPlaying]);
+  }, [isPlaying, playerContainerRef, showControls]);
 
   useEffect(() => {
     return () => {
@@ -1865,17 +1902,7 @@ function InnerPlayer() {
 
   const handlePlayerClick = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      const target = event.target as HTMLElement;
-
-      // Ignore clicks from portal content and interactive controls
-      if (!event.currentTarget.contains(target)) return;
-      if (
-        target.closest(
-          'button, a, input, textarea, select, [role="button"], [role="menu"], [role="menuitem"], [data-radix-popper-content-wrapper]',
-        )
-      ) {
-        return;
-      }
+      if (shouldIgnorePlayerSurfaceInteraction(event)) return;
 
       // Close episode panel when clicking outside it
       if (showEpisodes) {
@@ -1885,17 +1912,32 @@ function InnerPlayer() {
 
       if (isLoading || isResolving || error) return;
 
-      setShowControls(true);
-      triggerOsd({ kind: isPlayingRef.current ? 'pause' : 'play' });
-      void togglePlay();
+      // Delay single-click action so a double-click can cancel it.
+      cancelPendingSingleClick();
+      singleClickTimerRef.current = setTimeout(() => {
+        singleClickTimerRef.current = null;
+        setShowControls(true);
+        triggerOsd({ kind: isPlayingRef.current ? 'pause' : 'play' });
+        void togglePlay();
+      }, 200);
     },
-    [showEpisodes, isLoading, isResolving, error, togglePlay, triggerOsd],
+    [cancelPendingSingleClick, showEpisodes, isLoading, isResolving, error, togglePlay, triggerOsd],
+  );
+
+  const handlePlayerDoubleClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (shouldIgnorePlayerSurfaceInteraction(event)) return;
+
+      // Cancel the pending single-click play/pause
+      cancelPendingSingleClick();
+
+      void toggleFullscreen();
+    },
+    [cancelPendingSingleClick, toggleFullscreen],
   );
 
   // -- Render Logic --
   // Don't show error overlay in the brief window before auto-resolve starts
-  const showErrorOverlay = error && !isResolving && !isLoading;
-
   const selectorEpisodeStream = selectedEpisodeStreamTarget;
 
   const selectorAbsoluteSeason = selectorEpisodeStream?.absoluteSeason ?? resolvedAbsoluteSeason;
@@ -1907,7 +1949,13 @@ function InnerPlayer() {
   const isSelectorForCurrentEpisode =
     selectorAbsoluteSeason === resolvedAbsoluteSeason &&
     selectorAbsoluteEpisode === resolvedAbsoluteEpisode;
-  const selectorStartTime = isSelectorForCurrentEpisode ? currentTimeRef.current : 0;
+  const selectorStartTime = isSelectorForCurrentEpisode
+    ? currentTimeRef.current > 5
+      ? currentTimeRef.current
+      : startTime && startTime > 5
+        ? startTime
+        : 0
+    : selectedEpisodeStreamTarget?.startTime ?? 0;
   const currentSelectorStreamKey =
     routeSelectedStreamKey && routeStreamUrl && activeStreamUrl === routeStreamUrl
       ? routeSelectedStreamKey
@@ -1926,13 +1974,17 @@ function InnerPlayer() {
         !isFullscreen && 'pl-[60px]',
       )}
       onMouseMove={handleMouseMove}
-      onMouseLeave={() => isPlaying && setShowControls(false)}
+      onMouseLeave={handleMouseLeave}
       onClick={handlePlayerClick}
+      onDoubleClick={handlePlayerDoubleClick}
       id='mpv-container'
     >
       {!isFullscreen && (
+        <DesktopTitlebar className='z-[85] bg-gradient-to-b from-black/70 via-black/35 to-transparent backdrop-blur-[2px]' />
+      )}
+      {!isFullscreen && (
         <div
-          className='fixed left-0 top-0 z-[70] pointer-events-auto'
+          className='fixed left-0 top-0 z-[70] h-screen pointer-events-auto'
           onClick={(e) => e.stopPropagation()}
           onPointerDown={(e) => e.stopPropagation()}
         >
@@ -1961,17 +2013,22 @@ function InnerPlayer() {
           <h2 className='text-2xl font-bold mb-2'>Playback Error</h2>
           <p className='text-gray-400 mb-6'>{error}</p>
           <div className='flex items-center gap-3'>
-            <Button
-              variant='outline'
+            <button
+              type='button'
               onClick={() => {
                 void openInlineStreamSelector();
               }}
+              className='rounded-lg border border-white/20 bg-white/5 px-4 py-2 text-sm font-medium text-white hover:bg-white/10 transition-colors'
             >
               Choose Stream
-            </Button>
-            <Button onClick={navigateBack} variant='outline'>
+            </button>
+            <button
+              type='button'
+              onClick={navigateBack}
+              className='rounded-lg border border-white/20 bg-white/5 px-4 py-2 text-sm font-medium text-white hover:bg-white/10 transition-colors'
+            >
               Go Back
-            </Button>
+            </button>
           </div>
         </div>
       )}
@@ -2011,69 +2068,80 @@ function InnerPlayer() {
       {/* Controls Overlay */}
       <div
         className={cn(
-          'absolute inset-0 z-40 pointer-events-none flex flex-col pr-6 transition-opacity duration-300 bg-gradient-to-b from-black/80 via-transparent to-black/90',
-          'justify-between pt-6 pb-6',
-          isFullscreen ? 'pl-6' : 'pl-[84px]',
+          'absolute inset-0 z-40 pointer-events-none flex flex-col transition-opacity duration-300 bg-gradient-to-b from-black/80 via-transparent to-black/90',
+          'justify-between pb-6',
+          !isFullscreen && 'pt-12',
+          isFullscreen && 'pt-6',
+          isFullscreen ? 'px-8' : 'pl-[84px] pr-6',
           showControls || !isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none',
         )}
       >
         <div
+          ref={topChromeRef}
           className='pointer-events-auto flex items-center justify-between'
           onClick={(e) => e.stopPropagation()}
         >
-          <Button
-            variant='ghost'
-            size='icon'
+          <button
+            type='button'
             onClick={navigateBack}
-            className='text-white hover:bg-white/20'
+            className='flex h-9 w-9 items-center justify-center rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors'
           >
-            <ArrowLeft className='w-6 h-6' />
-          </Button>
-          <div className='text-center'>
-            <h1 className='text-lg font-bold line-clamp-1'>{title}</h1>
-            {season && episode && (
-              <p className='text-sm text-gray-300'>
-                S{season}:E{episode}
+            <ArrowLeft className='w-5 h-5' />
+          </button>
+          <div className='text-center min-w-0 flex-1 mx-4'>
+            <h1 className='text-[15px] font-semibold line-clamp-1 leading-snug'>{title}</h1>
+            {displaySeason !== undefined && displayEpisode !== undefined && (
+              <p className='text-xs text-white/50 mt-0.5'>
+                S{displaySeason}:E{displayEpisode}
+                {episodeCountInSeason ? ` / ${episodeCountInSeason}` : ''}
               </p>
             )}
           </div>
-          <div className='w-10' />
+          <button
+            type='button'
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleFullscreen();
+            }}
+            className='flex h-9 w-9 items-center justify-center rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors'
+            title={isFullscreen ? 'Exit Fullscreen (F)' : 'Fullscreen (F)'}
+          >
+            {isFullscreen ? (
+              <Minimize className='w-5 h-5' strokeWidth={2.5} />
+            ) : (
+              <Maximize className='w-5 h-5' strokeWidth={2.5} />
+            )}
+          </button>
         </div>
 
-        {/* Center Play — shown when paused and no OSD is active (osdAction null = fully faded) */}
+        {/* Center Play — shown when paused and OSD has fully cleared */}
         <div className='absolute inset-0 flex items-center justify-center pointer-events-none'>
-          {!isPlaying && !isLoading && !isResolving && !error && !osdAction && (
+          {!isPlaying && !isLoading && !isResolving && !error && !osdVisible && (
             <button
               type='button'
-              className='pointer-events-auto cursor-pointer outline-none transition-all duration-150 hover:scale-110 active:scale-95 animate-in fade-in zoom-in-95 duration-150'
+              className='pointer-events-auto cursor-pointer outline-none transition-all duration-150 hover:scale-105 active:scale-95 animate-in fade-in duration-200'
               onClick={(e) => {
                 e.stopPropagation();
                 triggerOsd({ kind: 'play' });
                 togglePlay();
               }}
             >
-              <Play className='w-10 h-10 fill-white text-white drop-shadow-[0_2px_12px_rgba(0,0,0,0.7)]' />
+              <div className='flex h-14 w-14 items-center justify-center rounded-full bg-black/40 backdrop-blur-sm'>
+                <Play className='w-6 h-6 fill-white text-white ml-0.5' />
+              </div>
             </button>
           )}
         </div>
 
         {/* Bottom Bar */}
         <div
+          ref={bottomChromeRef}
           className='pointer-events-auto space-y-0'
           onClick={(e) => e.stopPropagation()}
         >
-          {/* Progress info row — title/episode left · time right */}
-          <div className='flex items-center justify-between px-0.5 pb-2'>
-            <div className='min-w-0 flex-1'>
-              <p className='text-sm font-semibold text-white leading-none truncate'>{title}</p>
-              {season && episode && (
-                <p className='text-[11px] text-white/45 mt-0.5 leading-none'>
-                  S{season} · E{episode}
-                  {episodeCountInSeason ? ` / ${episodeCountInSeason}` : ''}
-                </p>
-              )}
-            </div>
-            <div className='text-right shrink-0 ml-4'>
+          {/* Time display — right-aligned above the progress bar */}
+          <div className='flex items-center justify-end px-0.5 pb-2'>
+            <div className='shrink-0'>
               <button
                 type='button'
                 onClick={(e) => {
@@ -2100,7 +2168,6 @@ function InnerPlayer() {
               </button>
             </div>
           </div>
-          {/* Progress Bar — thumbless custom track */}
           <PlayerProgressBar
             duration={duration}
             currentTime={currentTime}
@@ -2121,10 +2188,10 @@ function InnerPlayer() {
                   triggerOsd({ kind: 'seek', direction: 'backward', seconds: 10 });
                   void seekRelative(-10);
                 }}
-                className='flex h-10 w-10 items-center justify-center rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors'
+                className='flex h-9 w-9 items-center justify-center rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors'
                 title='Rewind 10s (←)'
               >
-                <Rewind className='w-6 h-6' strokeWidth={2.5} />
+                <Rewind className='w-[18px] h-[18px]' strokeWidth={2.5} />
               </button>
 
               {/* Play / Pause */}
@@ -2150,10 +2217,10 @@ function InnerPlayer() {
                   triggerOsd({ kind: 'seek', direction: 'forward', seconds: 10 });
                   void seekRelative(10);
                 }}
-                className='flex h-10 w-10 items-center justify-center rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors'
+                className='flex h-9 w-9 items-center justify-center rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors'
                 title='Forward 10s (→)'
               >
-                <FastForward className='w-6 h-6' strokeWidth={2.5} />
+                <FastForward className='w-[18px] h-[18px]' strokeWidth={2.5} />
               </button>
 
               {/* Volume Control (Horizontal & Sleek) */}
@@ -2168,26 +2235,25 @@ function InnerPlayer() {
                   if (e.key === 'ArrowUp' || e.key === 'ArrowDown') e.stopPropagation();
                 }}
               >
-                <Button
-                  variant='ghost'
-                  size='icon'
+                <button
+                  type='button'
                   onClick={toggleMute}
-                  className='text-white hover:bg-white/20 z-10 h-10 w-10'
+                  className='flex h-9 w-9 items-center justify-center rounded-lg text-white/80 hover:text-white hover:bg-white/10 z-10 transition-colors'
                 >
                   {isMuted || volume === 0 ? (
-                    <VolumeX className='w-6 h-6' strokeWidth={2.5} />
+                    <VolumeX className='w-[18px] h-[18px]' strokeWidth={2.5} />
                   ) : volume < 50 ? (
-                    <Volume1 className='w-6 h-6' strokeWidth={2.5} />
+                    <Volume1 className='w-[18px] h-[18px]' strokeWidth={2.5} />
                   ) : (
-                    <Volume2 className='w-6 h-6' strokeWidth={2.5} />
+                    <Volume2 className='w-[18px] h-[18px]' strokeWidth={2.5} />
                   )}
-                </Button>
+                </button>
 
                 <div
                   className={cn(
-                    'transition-all duration-300 ease-in-out flex items-center gap-2',
+                    'transition-[width,opacity] duration-300 ease-in-out flex items-center gap-1.5',
                     isHoveringVolume
-                      ? 'w-36 opacity-100 ml-1'
+                      ? 'w-32 opacity-100 ml-0.5'
                       : 'w-0 opacity-0 ml-0 pointer-events-none',
                   )}
                 >
@@ -2198,7 +2264,7 @@ function InnerPlayer() {
                     onValueChange={(val) => handleVolumeChange(val[0])}
                     className='w-24'
                   />
-                  <span className='text-[11px] font-mono text-white/50 tabular-nums w-8 leading-none flex-shrink-0'>
+                  <span className='text-[10px] font-mono text-white/40 tabular-nums w-7 leading-none flex-shrink-0'>
                     {isMuted ? '0' : volume}%
                   </span>
                 </div>
@@ -2207,62 +2273,54 @@ function InnerPlayer() {
               {/* Speed */}
               <Popover>
                 <PopoverTrigger asChild>
-                  <Button
-                    variant='ghost'
-                    size='sm'
-                    className='text-white font-mono hover:bg-white/20'
+                  <button
+                    type='button'
+                    className={cn(
+                      'flex h-9 items-center justify-center rounded-lg px-2 text-[11px] font-semibold tabular-nums transition-colors',
+                      playbackSpeed === 1
+                        ? 'text-white/50 hover:text-white hover:bg-white/10'
+                        : 'text-primary hover:bg-white/10',
+                    )}
                     onClick={(event) => {
                       event.stopPropagation();
                     }}
                   >
                     {playbackSpeed}x
-                  </Button>
+                  </button>
                 </PopoverTrigger>
                 <PopoverContent
                   side='top'
-                  className='w-20 p-1 bg-black/90 border-white/10'
+                  className='w-16 p-1 bg-black/90 border-white/10 backdrop-blur-xl'
                   onClick={(event) => {
                     event.stopPropagation();
                   }}
                 >
-                  <div className='flex flex-col gap-1'>
+                  <div className='flex flex-col'>
                     {SPEED_OPTIONS.map((s) => (
-                      <Button
+                      <button
                         key={s}
-                        variant='ghost'
-                        size='sm'
+                        type='button'
                         onClick={() => {
                           setPlaybackSpeed(s);
                           localStorage.setItem('player:speed', s.toString());
                           void setProperty('speed', s);
                         }}
                         className={cn(
-                          'h-6 justify-start',
-                          s === playbackSpeed && 'bg-primary/20 text-primary',
+                          'h-6 rounded px-2 text-left text-[11px] tabular-nums transition-colors hover:bg-white/10',
+                          s === playbackSpeed
+                            ? 'text-primary font-semibold'
+                            : 'text-white/70',
                         )}
                       >
                         {s}x
-                      </Button>
+                      </button>
                     ))}
                   </div>
                 </PopoverContent>
               </Popover>
             </div>
 
-            <div className='flex items-center gap-2'>
-              {/* Next Episode */}
-              {nextEpisode && (
-                <Button
-                  variant='ghost'
-                  size='icon'
-                  onClick={playNext}
-                  className='text-white hover:bg-white/20 h-10 w-10'
-                  title='Next Episode'
-                >
-                  <StepForward className='w-6 h-6' strokeWidth={2.5} />
-                </Button>
-              )}
-
+            <div className='flex items-center gap-1'>
               {/* Episodes List Toggle */}
               {details?.episodes && (
                 <PlayerEpisodesToggleButton
@@ -2273,25 +2331,31 @@ function InnerPlayer() {
 
               {/* Stream / Quality Hot-Swap */}
               {isSeriesLike && !!id && (
-                <Button
-                  variant='ghost'
-                  size='icon'
-                  className='text-white hover:bg-white/20 h-10 w-10'
+                <button
+                  type='button'
+                  className='flex h-9 w-9 items-center justify-center rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors'
                   title='Choose Stream / Quality'
-                  onClick={(e) => {
+                  onClick={(e: React.MouseEvent) => {
                     e.stopPropagation();
                     void openInlineStreamSelector();
                   }}
                 >
-                  <ArrowLeftRight className='w-5 h-5' strokeWidth={2.5} />
-                </Button>
+                  <ArrowLeftRight className='w-[18px] h-[18px]' strokeWidth={2.5} />
+                </button>
               )}
 
-              {/* Playback Settings */}
-              <PlayerPlaybackSettings
+              {/* Audio Track Selector */}
+              <AudioTrackSelector
                 audioTracks={audioTracks}
+                trackSwitching={trackSwitching}
+                onSelectTrack={(trackType, trackId, options) => {
+                  void setTrack(trackType, trackId, options);
+                }}
+              />
+
+              {/* Subtitle Track Selector */}
+              <SubtitleTrackSelector
                 subTracks={subTracks}
-                showActiveIndicator={Boolean(activeAudioTrack || activeSubTrack)}
                 subtitlesOff={subtitlesOff}
                 trackSwitching={trackSwitching}
                 subtitleDelay={subtitleDelay}
@@ -2316,28 +2380,15 @@ function InnerPlayer() {
                 }}
               />
 
-              {/* Fullscreen */}
-              <Button
-                variant='ghost'
-                size='icon'
+              {/* Download */}
+              <button
+                type='button'
                 onClick={() => setShowDownloadModal(true)}
-                className='text-white hover:bg-white/20 h-10 w-10'
+                className='flex h-9 w-9 items-center justify-center rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors disabled:opacity-30 disabled:pointer-events-none'
                 disabled={!activeStreamUrl}
               >
-                <Download className='w-6 h-6' strokeWidth={2.5} />
-              </Button>
-              <Button
-                variant='ghost'
-                size='icon'
-                onClick={toggleFullscreen}
-                className='text-white hover:bg-white/20 h-10 w-10'
-              >
-                {isFullscreen ? (
-                  <Minimize className='w-6 h-6' strokeWidth={2.5} />
-                ) : (
-                  <Maximize className='w-6 h-6' strokeWidth={2.5} />
-                )}
-              </Button>
+                <Download className='w-[18px] h-[18px]' strokeWidth={2.5} />
+              </button>
             </div>
           </div>
         </div>
@@ -2361,22 +2412,10 @@ function InnerPlayer() {
               }
             : null
         }
-        upNextAction={
-          showUpNext && nextEpisode
-            ? {
-                countdown: upNextCountdown,
-                title: nextEpisodeLabel,
-                onDismiss: dismissUpNext,
-                onPlayNext: () => {
-                  dismissUpNext();
-                  void playNext();
-                },
-              }
-            : null
-        }
       />
 
       <PlayerEpisodesPanel
+        panelRef={episodesPanelFrameRef}
         open={showEpisodes}
         seasons={seasons}
         selectedSeason={selectedSeason}

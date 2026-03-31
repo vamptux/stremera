@@ -1,40 +1,33 @@
 use super::{
-    history_helpers::should_skip_watch_progress_save, PlaybackLanguagePreferences, WatchProgress,
+    history_helpers::should_skip_watch_progress_save,
+    playback_preferences_commands::sanitize_language_pref,
+    resume_store::ResumeStore,
+    PlaybackLanguagePreferences,
+    WatchProgress,
 };
 use crate::providers::Episode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_store::StoreExt;
 
 const PLAYBACK_STATE_STORE_FILE: &str = "playback_state.json";
-const PLAYBACK_RESUME_INDEX_KEY: &str = "playback_resume_index";
-const PLAYBACK_SESSION_INDEX_KEY: &str = "playback_session_index";
 const PLAYBACK_STREAM_HEALTH_INDEX_KEY: &str = "playback_stream_health_index";
 const PLAYBACK_SOURCE_HEALTH_INDEX_KEY: &str = "playback_source_health_index";
 const PLAYBACK_STREAM_FAMILY_INDEX_KEY: &str = "playback_stream_family_index";
 const PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY: &str = "playback_language_preferences_index";
 const PLAYBACK_EPISODE_MAPPING_INDEX_KEY: &str = "playback_episode_mapping_index";
-const PLAYBACK_RESUME_ITEM_PREFIX: &str = "playback_resume_item:";
-const PLAYBACK_SESSION_ITEM_PREFIX: &str = "playback_session_item:";
 const PLAYBACK_STREAM_HEALTH_ITEM_PREFIX: &str = "playback_stream_health_item:";
 const PLAYBACK_SOURCE_HEALTH_ITEM_PREFIX: &str = "playback_source_health_item:";
 const PLAYBACK_STREAM_FAMILY_ITEM_PREFIX: &str = "playback_stream_family_item:";
 const PLAYBACK_LANGUAGE_PREFERENCES_ITEM_PREFIX: &str = "playback_language_preferences_item:";
 const PLAYBACK_EPISODE_MAPPING_ITEM_PREFIX: &str = "playback_episode_mapping_item:";
-const LEGACY_SECONDS_TIMESTAMP_CUTOFF: u64 = 1_000_000_000_000;
-const SAVED_STREAM_SIGNED_MAX_AGE_MS: u64 = 1000 * 60 * 90;
-const SAVED_STREAM_MANIFEST_MAX_AGE_MS: u64 = 1000 * 60 * 60 * 4;
-const SAVED_STREAM_DEBRID_MAX_AGE_MS: u64 = 1000 * 60 * 45;
-const SAVED_STREAM_DIRECT_MAX_AGE_MS: u64 = 1000 * 60 * 60 * 20;
-const STREAM_HEALTH_RECENT_FAILURE_WINDOW_MS: u64 = 1000 * 60 * 20;
 const SOURCE_HEALTH_RECENT_FAILURE_WINDOW_MS: u64 = 1000 * 60 * 30;
 const SOURCE_HEALTH_RECENT_SUCCESS_WINDOW_MS: u64 = 1000 * 60 * 60 * 6;
 const STREAM_FAMILY_RECENT_FAILURE_WINDOW_MS: u64 = 1000 * 60 * 60 * 18;
 const STREAM_FAMILY_RECENT_SUCCESS_WINDOW_MS: u64 = 1000 * 60 * 60 * 24 * 7;
-const PLAYBACK_SESSION_RETENTION_MS: u64 = 1000 * 60 * 60 * 24 * 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaybackStreamKind {
@@ -71,7 +64,6 @@ impl PlaybackStreamKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlaybackStreamOutcomeKind {
     Verified,
-    ExpiredSavedStream,
     StartupTimeout,
     LoadFailed,
     Disconnected,
@@ -81,7 +73,6 @@ impl PlaybackStreamOutcomeKind {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "verified" => Some(Self::Verified),
-            "expired-saved-stream" => Some(Self::ExpiredSavedStream),
             "startup-timeout" => Some(Self::StartupTimeout),
             "load-failed" => Some(Self::LoadFailed),
             "disconnected" => Some(Self::Disconnected),
@@ -92,36 +83,11 @@ impl PlaybackStreamOutcomeKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Verified => "verified",
-            Self::ExpiredSavedStream => "expired-saved-stream",
             Self::StartupTimeout => "startup-timeout",
             Self::LoadFailed => "load-failed",
             Self::Disconnected => "disconnected",
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PlaybackSessionSnapshot {
-    pub media_id: String,
-    pub media_type: String,
-    pub season: Option<u32>,
-    pub episode: Option<u32>,
-    pub absolute_season: Option<u32>,
-    pub absolute_episode: Option<u32>,
-    pub stream_season: Option<u32>,
-    pub stream_episode: Option<u32>,
-    pub aniskip_episode: Option<u32>,
-    pub title: String,
-    pub started_at: u64,
-    pub updated_at: u64,
-    pub last_position: f64,
-    pub duration: f64,
-    pub last_stream_url: Option<String>,
-    pub last_stream_format: Option<String>,
-    pub last_stream_lookup_id: Option<String>,
-    pub last_stream_key: Option<String>,
-    pub source_name: Option<String>,
-    pub stream_family: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -153,20 +119,6 @@ pub(crate) struct PlaybackStreamHealthSnapshot {
     pub last_failure_reason: Option<String>,
     pub consecutive_failures: u32,
     pub cooldown_until: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PlaybackStreamReusePolicy {
-    pub kind: String,
-    pub is_remote: bool,
-    pub should_bypass: bool,
-    pub can_reuse_directly: bool,
-    pub last_failure_reason: Option<String>,
-    pub consecutive_failures: u32,
-    pub cooldown_until: Option<u64>,
-    pub last_verified_at: Option<u64>,
-    pub last_failure_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,11 +168,41 @@ struct PlaybackRuntimeState {
 #[derive(Default)]
 pub(crate) struct PlaybackStateService {
     runtime: Mutex<PlaybackRuntimeState>,
+    resume_store: Mutex<Option<ResumeStore>>,
 }
 
 impl PlaybackStateService {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    fn with_resume_store<T>(
+        &self,
+        app: &AppHandle,
+        operation: impl FnOnce(&mut ResumeStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut guard = self
+            .resume_store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if guard.is_none() {
+            *guard = Some(self.initialize_resume_store(app)?);
+        }
+
+        let resume_store = guard
+            .as_mut()
+            .ok_or_else(|| "Playback resume store failed to initialize.".to_string())?;
+
+        operation(resume_store)
+    }
+
+    fn initialize_resume_store(&self, app: &AppHandle) -> Result<ResumeStore, String> {
+        let app_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&app_dir)
+            .map_err(|error| format!("Failed to create app data directory: {}", error))?;
+
+        ResumeStore::open(&app_dir.join("playback_resume.sqlite3"))
     }
 
     pub(crate) fn track_progress(
@@ -229,161 +211,14 @@ impl PlaybackStateService {
         key: &str,
         progress: &WatchProgress,
     ) -> Result<(), String> {
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
-        let mut resume_index = load_index(&store, PLAYBACK_RESUME_INDEX_KEY)?;
-        let mut session_index = load_index(&store, PLAYBACK_SESSION_INDEX_KEY)?;
+        self.with_resume_store(app, |resume_store| resume_store.upsert_progress(key, progress))?;
 
-        if !resume_index.iter().any(|existing| existing == key) {
-            resume_index.push(key.to_string());
-            resume_index.sort();
+        let store = app
+            .store(PLAYBACK_STATE_STORE_FILE)
+            .map_err(|e| e.to_string())?;
+        if upsert_stream_health_snapshot(&store, key, progress)? {
+            store.save().map_err(|e| e.to_string())?;
         }
-        if !session_index.iter().any(|existing| existing == key) {
-            session_index.push(key.to_string());
-            session_index.sort();
-        }
-
-        let existing_session = store
-            .get(playback_session_item_key(key))
-            .and_then(|value| serde_json::from_value::<PlaybackSessionSnapshot>(value).ok());
-        let started_at = existing_session
-            .as_ref()
-            .map(|session| session.started_at)
-            .unwrap_or(progress.last_watched);
-
-        store.set(playback_resume_item_key(key), json!(progress));
-        store.set(
-            playback_session_item_key(key),
-            json!(PlaybackSessionSnapshot {
-                media_id: progress.id.clone(),
-                media_type: progress.type_.clone(),
-                season: progress.season,
-                episode: progress.episode,
-                absolute_season: progress.absolute_season,
-                absolute_episode: progress.absolute_episode,
-                stream_season: progress.stream_season,
-                stream_episode: progress.stream_episode,
-                aniskip_episode: progress.aniskip_episode,
-                title: progress.title.clone(),
-                started_at,
-                updated_at: progress.last_watched,
-                last_position: progress.position,
-                duration: progress.duration,
-                last_stream_url: progress.last_stream_url.clone(),
-                last_stream_format: progress.last_stream_format.clone(),
-                last_stream_lookup_id: progress.last_stream_lookup_id.clone(),
-                last_stream_key: progress.last_stream_key.clone(),
-                source_name: progress
-                    .source_name
-                    .as_deref()
-                    .and_then(normalize_stream_meta)
-                    .or_else(|| {
-                        existing_session
-                            .as_ref()
-                            .and_then(|session| session.source_name.clone())
-                    }),
-                stream_family: progress
-                    .stream_family
-                    .as_deref()
-                    .and_then(normalize_stream_meta)
-                    .or_else(|| {
-                        existing_session
-                            .as_ref()
-                            .and_then(|session| session.stream_family.clone())
-                    }),
-            }),
-        );
-        prune_stale_session_entries(&store, &mut session_index);
-        store.set(PLAYBACK_RESUME_INDEX_KEY, json!(resume_index));
-        store.set(PLAYBACK_SESSION_INDEX_KEY, json!(session_index));
-        upsert_stream_health_snapshot(&store, key, progress)?;
-        store.save().map_err(|e| e.to_string())?;
-
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn touch_session(
-        &self,
-        app: &AppHandle,
-        key: &str,
-        media_id: &str,
-        media_type: &str,
-        season: Option<u32>,
-        episode: Option<u32>,
-        absolute_season: Option<u32>,
-        absolute_episode: Option<u32>,
-        stream_season: Option<u32>,
-        stream_episode: Option<u32>,
-        aniskip_episode: Option<u32>,
-        title: &str,
-        stream_url: Option<String>,
-        stream_format: Option<String>,
-        stream_lookup_id: Option<String>,
-        stream_key: Option<String>,
-        source_name: Option<String>,
-        stream_family: Option<String>,
-        position: Option<f64>,
-        duration: Option<f64>,
-        timestamp_ms: u64,
-    ) -> Result<(), String> {
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
-        let mut session_index = load_index(&store, PLAYBACK_SESSION_INDEX_KEY)?;
-        let existing_session = store
-            .get(playback_session_item_key(key))
-            .and_then(|value| serde_json::from_value::<PlaybackSessionSnapshot>(value).ok());
-
-        if !session_index.iter().any(|existing| existing == key) {
-            session_index.push(key.to_string());
-            session_index.sort();
-        }
-
-        let normalized_title = normalize_stream_meta(title)
-            .or_else(|| existing_session.as_ref().map(|session| session.title.clone()))
-            .unwrap_or_else(|| media_id.trim().to_string());
-
-        store.set(
-            playback_session_item_key(key),
-            json!(PlaybackSessionSnapshot {
-                media_id: media_id.trim().to_string(),
-                media_type: media_type.trim().to_string(),
-                season,
-                episode,
-                absolute_season,
-                absolute_episode,
-                stream_season,
-                stream_episode,
-                aniskip_episode,
-                title: normalized_title,
-                started_at: existing_session
-                    .as_ref()
-                    .map(|session| session.started_at)
-                    .unwrap_or(timestamp_ms),
-                updated_at: timestamp_ms,
-                last_position: position
-                    .or_else(|| existing_session.as_ref().map(|session| session.last_position))
-                    .unwrap_or(0.0),
-                duration: duration
-                    .or_else(|| existing_session.as_ref().map(|session| session.duration))
-                    .unwrap_or(0.0),
-                last_stream_url: stream_url
-                    .or_else(|| existing_session.as_ref().and_then(|session| session.last_stream_url.clone())),
-                last_stream_format: stream_format
-                    .or_else(|| existing_session.as_ref().and_then(|session| session.last_stream_format.clone())),
-                last_stream_lookup_id: stream_lookup_id
-                    .or_else(|| existing_session.as_ref().and_then(|session| session.last_stream_lookup_id.clone())),
-                last_stream_key: stream_key
-                    .or_else(|| existing_session.as_ref().and_then(|session| session.last_stream_key.clone())),
-                source_name: source_name
-                    .and_then(|value| normalize_stream_meta(&value))
-                    .or_else(|| existing_session.as_ref().and_then(|session| session.source_name.clone())),
-                stream_family: stream_family
-                    .and_then(|value| normalize_stream_meta(&value))
-                    .or_else(|| existing_session.as_ref().and_then(|session| session.stream_family.clone())),
-            }),
-        );
-        prune_stale_session_entries(&store, &mut session_index);
-        store.set(PLAYBACK_SESSION_INDEX_KEY, json!(session_index));
-        store.save().map_err(|e| e.to_string())?;
 
         Ok(())
     }
@@ -420,8 +255,7 @@ impl PlaybackStateService {
         &self,
         app: &AppHandle,
     ) -> Result<Vec<(String, WatchProgress)>, String> {
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
-        load_progress_entries(&store, PLAYBACK_RESUME_INDEX_KEY, playback_resume_item_key)
+        self.with_resume_store(app, |resume_store| resume_store.load_entries())
     }
 
     pub(crate) fn merge_history_entries(
@@ -433,39 +267,17 @@ impl PlaybackStateService {
             return Ok(0);
         }
 
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
-        let mut resume_index = load_index(&store, PLAYBACK_RESUME_INDEX_KEY)?;
-        let existing_entries = load_progress_entries(&store, PLAYBACK_RESUME_INDEX_KEY, playback_resume_item_key)?;
-        let mut existing_by_key: HashMap<String, WatchProgress> = existing_entries.into_iter().collect();
-        let mut imported = 0usize;
-
-        for (key, progress) in entries {
-            let should_write = match existing_by_key.get(&key) {
-                Some(existing) => progress.last_watched > existing.last_watched,
-                None => true,
-            };
-
-            if !should_write {
-                continue;
-            }
-
-            if !resume_index.iter().any(|entry| entry == &key) {
-                resume_index.push(key.clone());
-            }
-
-            store.set(playback_resume_item_key(&key), json!(progress.clone()));
-            existing_by_key.insert(key.clone(), progress.clone());
-            self.mark_history_persisted(key, progress);
-            imported += 1;
-        }
+        let imported = self.with_resume_store(app, |resume_store| {
+            resume_store.merge_entries(entries.clone())
+        })?;
 
         if imported == 0 {
             return Ok(0);
         }
 
-        resume_index.sort();
-        store.set(PLAYBACK_RESUME_INDEX_KEY, json!(resume_index));
-        store.save().map_err(|e| e.to_string())?;
+        for (key, progress) in entries {
+            self.mark_history_persisted(key, progress);
+        }
 
         Ok(imported)
     }
@@ -475,63 +287,7 @@ impl PlaybackStateService {
         app: &AppHandle,
         key: &str,
     ) -> Result<Option<WatchProgress>, String> {
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
-        Ok(store
-            .get(playback_resume_item_key(key))
-            .and_then(|value| serde_json::from_value::<WatchProgress>(value).ok()))
-    }
-
-    pub(crate) fn get_stream_reuse_policy(
-        &self,
-        app: &AppHandle,
-        key: &str,
-        progress: Option<&WatchProgress>,
-    ) -> Result<PlaybackStreamReusePolicy, String> {
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
-        let health = load_stream_health_snapshot(&store, key);
-        let stream_url = progress
-            .and_then(|item| item.last_stream_url.clone())
-            .or_else(|| health.as_ref().and_then(|item| item.last_stream_url.clone()));
-        let kind = classify_stream_kind(stream_url.as_deref());
-        let last_watched_ms = progress
-            .map(|item| normalize_last_watched_ms(item.last_watched))
-            .or_else(|| health.as_ref().and_then(|item| item.resolved_at))
-            .unwrap_or(0);
-        let should_bypass_from_age = should_bypass_stream_for_age(kind, last_watched_ms);
-        let now = normalized_now_unix_millis();
-
-        let (last_failure_reason, consecutive_failures, cooldown_until, last_verified_at, last_failure_at) =
-            if let Some(snapshot) = health.as_ref() {
-                (
-                    snapshot.last_failure_reason.clone(),
-                    snapshot.consecutive_failures,
-                    snapshot.cooldown_until,
-                    snapshot.last_verified_at,
-                    snapshot.last_failure_at,
-                )
-            } else {
-                (None, 0, None, None, None)
-            };
-
-        let has_recent_failures = last_failure_at.is_some_and(|failure_at| {
-            now.saturating_sub(failure_at) <= STREAM_HEALTH_RECENT_FAILURE_WINDOW_MS
-                && consecutive_failures >= 2
-        });
-        let is_cooling_down = cooldown_until.is_some_and(|value| value > now);
-        let should_bypass = should_bypass_from_age || is_cooling_down || has_recent_failures;
-
-        Ok(PlaybackStreamReusePolicy {
-            kind: kind.as_str().to_string(),
-            is_remote: kind.is_remote(),
-            should_bypass,
-            can_reuse_directly: matches!(kind, PlaybackStreamKind::LocalFile | PlaybackStreamKind::Localhost)
-                || (kind.is_remote() && !should_bypass),
-            last_failure_reason,
-            consecutive_failures,
-            cooldown_until,
-            last_verified_at,
-            last_failure_at,
-        })
+        self.with_resume_store(app, |resume_store| resume_store.get_entry(key))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -552,7 +308,9 @@ impl PlaybackStateService {
         outcome: PlaybackStreamOutcomeKind,
         timestamp_ms: u64,
     ) -> Result<(), String> {
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
+        let store = app
+            .store(PLAYBACK_STATE_STORE_FILE)
+            .map_err(|e| e.to_string())?;
         let mut health_index = load_index(&store, PLAYBACK_STREAM_HEALTH_INDEX_KEY)?;
         let mut snapshot = load_stream_health_snapshot(&store, key).unwrap_or_else(|| {
             PlaybackStreamHealthSnapshot {
@@ -592,7 +350,9 @@ impl PlaybackStateService {
         snapshot.last_stream_format = normalized_format;
         snapshot.last_stream_lookup_id = normalized_lookup_id;
         snapshot.last_stream_key = normalized_stream_key;
-        snapshot.stream_kind = classify_stream_kind(normalized_url.as_deref()).as_str().to_string();
+        snapshot.stream_kind = classify_stream_kind(normalized_url.as_deref())
+            .as_str()
+            .to_string();
         snapshot.resolved_at = Some(timestamp_ms);
 
         match outcome {
@@ -616,10 +376,7 @@ impl PlaybackStateService {
             }
         }
 
-        if !health_index.iter().any(|existing| existing == key) {
-            health_index.push(key.to_string());
-            health_index.sort();
-        }
+        insert_sorted_unique(&mut health_index, key);
 
         store.set(playback_stream_health_item_key(key), json!(snapshot));
         store.set(PLAYBACK_STREAM_HEALTH_INDEX_KEY, json!(health_index));
@@ -632,8 +389,11 @@ impl PlaybackStateService {
             upsert_source_health_snapshot(&store, source_name, outcome, timestamp_ms)?;
         }
 
-        if let Some(scope_key) = playback_stream_family_scope_key(Some(media_type), Some(media_id)) {
-            if let Some(stream_family) = stream_family.and_then(|value| normalize_stream_family(&value)) {
+        if let Some(scope_key) = playback_stream_family_scope_key(Some(media_type), Some(media_id))
+        {
+            if let Some(stream_family) =
+                stream_family.and_then(|value| normalize_stream_family(&value))
+            {
                 upsert_stream_family_snapshot(
                     &store,
                     &scope_key,
@@ -664,23 +424,20 @@ impl PlaybackStateService {
         let Some(source_name) = source_name.and_then(normalize_source_name) else {
             return Ok(0);
         };
-        let Some(scope_key) = playback_stream_family_scope_key(Some(media_type), Some(media_id)) else {
+        let Some(scope_key) = playback_stream_family_scope_key(Some(media_type), Some(media_id))
+        else {
             return Ok(0);
         };
 
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
-        let now_ms = normalized_now_unix_millis();
+        let store = app
+            .store(PLAYBACK_STATE_STORE_FILE)
+            .map_err(|e| e.to_string())?;
+        let now_ms = current_timestamp_ms();
 
         if preferred_title_source_from_success(&store, &scope_key, now_ms).as_deref()
             == Some(source_name.as_str())
         {
             return Ok(3);
-        }
-
-        if preferred_title_source_from_session(&store, &scope_key, now_ms).as_deref()
-            == Some(source_name.as_str())
-        {
-            return Ok(2);
         }
 
         Ok(0)
@@ -695,9 +452,44 @@ impl PlaybackStateService {
             return Ok(2);
         };
 
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
+        let store = app
+            .store(PLAYBACK_STATE_STORE_FILE)
+            .map_err(|e| e.to_string())?;
         let snapshot = load_source_health_snapshot(&store, &source_name);
-        Ok(score_source_health_priority(snapshot.as_ref(), normalized_now_unix_millis()))
+        Ok(score_source_health_priority(
+            snapshot.as_ref(),
+            current_timestamp_ms(),
+        ))
+    }
+
+    pub(crate) fn source_health_priorities_for_names<'a>(
+        &self,
+        app: &AppHandle,
+        source_names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<HashMap<String, u8>, String> {
+        let store = app
+            .store(PLAYBACK_STATE_STORE_FILE)
+            .map_err(|e| e.to_string())?;
+        let now_ms = current_timestamp_ms();
+        let mut priorities = HashMap::new();
+        let mut seen = HashSet::new();
+
+        for source_name in source_names {
+            let Some(source_name) = normalize_source_name(source_name) else {
+                continue;
+            };
+            if !seen.insert(source_name.clone()) {
+                continue;
+            }
+
+            let snapshot = load_source_health_snapshot(&store, &source_name);
+            priorities.insert(
+                source_name,
+                score_source_health_priority(snapshot.as_ref(), now_ms),
+            );
+        }
+
+        Ok(priorities)
     }
 
     pub(crate) fn stream_family_priority(
@@ -709,21 +501,24 @@ impl PlaybackStateService {
         episode: Option<u32>,
         stream_family: Option<&str>,
     ) -> Result<u8, String> {
-        let Some(scope_key) = playback_stream_family_scope_key(Some(media_type), Some(media_id)) else {
+        let Some(scope_key) = playback_stream_family_scope_key(Some(media_type), Some(media_id))
+        else {
             return Ok(2);
         };
         let Some(stream_family) = stream_family.and_then(normalize_stream_family) else {
             return Ok(2);
         };
 
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
+        let store = app
+            .store(PLAYBACK_STATE_STORE_FILE)
+            .map_err(|e| e.to_string())?;
         let snapshot_key = playback_stream_family_snapshot_key(&scope_key, &stream_family);
         let snapshot = load_playback_stream_family_snapshot(&store, &snapshot_key);
         Ok(score_stream_family_priority(
             snapshot.as_ref(),
             season,
             episode,
-            normalized_now_unix_millis(),
+            current_timestamp_ms(),
         ))
     }
 
@@ -738,10 +533,15 @@ impl PlaybackStateService {
             return Ok(defaults);
         };
 
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
+        let store = app
+            .store(PLAYBACK_STATE_STORE_FILE)
+            .map_err(|e| e.to_string())?;
         let snapshot = load_playback_language_preferences_snapshot(&store, &scope_key);
 
-        Ok(merge_playback_language_preferences(defaults, snapshot.as_ref()))
+        Ok(merge_playback_language_preferences(
+            defaults,
+            snapshot.as_ref(),
+        ))
     }
 
     pub(crate) fn record_playback_language_preference_outcome(
@@ -753,14 +553,15 @@ impl PlaybackStateService {
         preferred_subtitle_language: Option<String>,
         timestamp_ms: u64,
     ) -> Result<(), String> {
-        let Some(scope_key) = playback_language_preferences_scope_key(
-            Some(media_type),
-            Some(media_id),
-        ) else {
+        let Some(scope_key) =
+            playback_language_preferences_scope_key(Some(media_type), Some(media_id))
+        else {
             return Ok(());
         };
 
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
+        let store = app
+            .store(PLAYBACK_STATE_STORE_FILE)
+            .map_err(|e| e.to_string())?;
         let mut preferences_index = load_index(&store, PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY)?;
         let preferred_audio_language = sanitize_playback_language_pref(preferred_audio_language);
         let preferred_subtitle_language =
@@ -777,10 +578,7 @@ impl PlaybackStateService {
             return Ok(());
         }
 
-        if !preferences_index.iter().any(|entry| entry == &scope_key) {
-            preferences_index.push(scope_key.clone());
-            preferences_index.sort();
-        }
+        insert_sorted_unique(&mut preferences_index, &scope_key);
 
         store.set(
             playback_language_preferences_item_key(&scope_key),
@@ -822,11 +620,13 @@ impl PlaybackStateService {
             return Ok(());
         };
 
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
+        let store = app
+            .store(PLAYBACK_STATE_STORE_FILE)
+            .map_err(|e| e.to_string())?;
         let mut episode_mapping_index = load_index(&store, PLAYBACK_EPISODE_MAPPING_INDEX_KEY)?;
         let normalized_fallback_lookup_id = fallback_lookup_id.and_then(normalize_stream_meta);
         let mut changed = false;
-        let updated_at = normalized_now_unix_millis();
+        let updated_at = current_timestamp_ms();
 
         for episode in episodes {
             let source_lookup_id = episode
@@ -867,14 +667,12 @@ impl PlaybackStateService {
                 changed = true;
             }
 
-            if !episode_mapping_index.iter().any(|existing| existing == &snapshot_key) {
-                episode_mapping_index.push(snapshot_key);
+            if insert_sorted_unique(&mut episode_mapping_index, &snapshot_key) {
                 changed = true;
             }
         }
 
         if changed {
-            episode_mapping_index.sort();
             store.set(
                 PLAYBACK_EPISODE_MAPPING_INDEX_KEY,
                 json!(episode_mapping_index),
@@ -900,7 +698,9 @@ impl PlaybackStateService {
             return Ok(None);
         };
 
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
+        let store = app
+            .store(PLAYBACK_STATE_STORE_FILE)
+            .map_err(|e| e.to_string())?;
         Ok(load_playback_episode_mapping_snapshot(
             &store,
             &playback_episode_mapping_snapshot_key(
@@ -917,25 +717,21 @@ impl PlaybackStateService {
             return Ok(());
         }
 
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
+        self.with_resume_store(app, |resume_store| resume_store.remove_keys(keys))?;
+
+        let store = app
+            .store(PLAYBACK_STATE_STORE_FILE)
+            .map_err(|e| e.to_string())?;
         let key_set: HashSet<&String> = keys.iter().collect();
-        let mut resume_index = load_index(&store, PLAYBACK_RESUME_INDEX_KEY)?;
-        let mut session_index = load_index(&store, PLAYBACK_SESSION_INDEX_KEY)?;
         let mut health_index = load_index(&store, PLAYBACK_STREAM_HEALTH_INDEX_KEY)?;
         let mut source_health_index = load_index(&store, PLAYBACK_SOURCE_HEALTH_INDEX_KEY)?;
 
         for key in keys {
-            store.delete(playback_resume_item_key(key));
-            store.delete(playback_session_item_key(key));
             store.delete(playback_stream_health_item_key(key));
         }
 
-        resume_index.retain(|entry| !key_set.contains(entry));
-        session_index.retain(|entry| !key_set.contains(entry));
         health_index.retain(|entry| !key_set.contains(entry));
         prune_stale_source_health_entries(&store, &mut source_health_index);
-        store.set(PLAYBACK_RESUME_INDEX_KEY, json!(resume_index));
-        store.set(PLAYBACK_SESSION_INDEX_KEY, json!(session_index));
         store.set(PLAYBACK_STREAM_HEALTH_INDEX_KEY, json!(health_index));
         store.set(PLAYBACK_SOURCE_HEALTH_INDEX_KEY, json!(source_health_index));
         store.save().map_err(|e| e.to_string())?;
@@ -952,9 +748,11 @@ impl PlaybackStateService {
     }
 
     pub(crate) fn clear(&self, app: &AppHandle) -> Result<(), String> {
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
-        let resume_index = load_index(&store, PLAYBACK_RESUME_INDEX_KEY)?;
-        let session_index = load_index(&store, PLAYBACK_SESSION_INDEX_KEY)?;
+        self.with_resume_store(app, |resume_store| resume_store.clear())?;
+
+        let store = app
+            .store(PLAYBACK_STATE_STORE_FILE)
+            .map_err(|e| e.to_string())?;
         let stream_health_index = load_index(&store, PLAYBACK_STREAM_HEALTH_INDEX_KEY)?;
         let source_health_index = load_index(&store, PLAYBACK_SOURCE_HEALTH_INDEX_KEY)?;
         let stream_family_index = load_index(&store, PLAYBACK_STREAM_FAMILY_INDEX_KEY)?;
@@ -962,12 +760,6 @@ impl PlaybackStateService {
             load_index(&store, PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY)?;
         let episode_mapping_index = load_index(&store, PLAYBACK_EPISODE_MAPPING_INDEX_KEY)?;
 
-        for key in &resume_index {
-            store.delete(playback_resume_item_key(key));
-        }
-        for key in &session_index {
-            store.delete(playback_session_item_key(key));
-        }
         for key in &stream_health_index {
             store.delete(playback_stream_health_item_key(key));
         }
@@ -984,16 +776,26 @@ impl PlaybackStateService {
             store.delete(playback_episode_mapping_item_key(key));
         }
 
-        store.set(PLAYBACK_RESUME_INDEX_KEY, json!(Vec::<String>::new()));
-        store.set(PLAYBACK_SESSION_INDEX_KEY, json!(Vec::<String>::new()));
-        store.set(PLAYBACK_STREAM_HEALTH_INDEX_KEY, json!(Vec::<String>::new()));
-        store.set(PLAYBACK_SOURCE_HEALTH_INDEX_KEY, json!(Vec::<String>::new()));
-        store.set(PLAYBACK_STREAM_FAMILY_INDEX_KEY, json!(Vec::<String>::new()));
+        store.set(
+            PLAYBACK_STREAM_HEALTH_INDEX_KEY,
+            json!(Vec::<String>::new()),
+        );
+        store.set(
+            PLAYBACK_SOURCE_HEALTH_INDEX_KEY,
+            json!(Vec::<String>::new()),
+        );
+        store.set(
+            PLAYBACK_STREAM_FAMILY_INDEX_KEY,
+            json!(Vec::<String>::new()),
+        );
         store.set(
             PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY,
             json!(Vec::<String>::new()),
         );
-        store.set(PLAYBACK_EPISODE_MAPPING_INDEX_KEY, json!(Vec::<String>::new()));
+        store.set(
+            PLAYBACK_EPISODE_MAPPING_INDEX_KEY,
+            json!(Vec::<String>::new()),
+        );
         store.save().map_err(|e| e.to_string())?;
 
         let mut runtime = self
@@ -1006,53 +808,13 @@ impl PlaybackStateService {
     }
 
     pub(crate) fn clear_saved_stream_links(&self, app: &AppHandle) -> Result<(), String> {
-        let store = app.store(PLAYBACK_STATE_STORE_FILE).map_err(|e| e.to_string())?;
-        let resume_index = load_index(&store, PLAYBACK_RESUME_INDEX_KEY)?;
-        let session_index = load_index(&store, PLAYBACK_SESSION_INDEX_KEY)?;
+        self.with_resume_store(app, |resume_store| resume_store.clear_saved_stream_links())?;
+
+        let store = app
+            .store(PLAYBACK_STATE_STORE_FILE)
+            .map_err(|e| e.to_string())?;
         let stream_health_index = load_index(&store, PLAYBACK_STREAM_HEALTH_INDEX_KEY)?;
         let mut changed = false;
-
-        for key in &resume_index {
-            let item_key = playback_resume_item_key(key);
-            let Some(value) = store.get(&item_key) else {
-                continue;
-            };
-            let Ok(mut item) = serde_json::from_value::<WatchProgress>(value) else {
-                continue;
-            };
-
-            if item.last_stream_url.is_some()
-                || item.last_stream_format.is_some()
-                || item.last_stream_key.is_some()
-            {
-                item.last_stream_url = None;
-                item.last_stream_format = None;
-                item.last_stream_key = None;
-                store.set(item_key, json!(item));
-                changed = true;
-            }
-        }
-
-        for key in &session_index {
-            let item_key = playback_session_item_key(key);
-            let Some(value) = store.get(&item_key) else {
-                continue;
-            };
-            let Ok(mut item) = serde_json::from_value::<PlaybackSessionSnapshot>(value) else {
-                continue;
-            };
-
-            if item.last_stream_url.is_some()
-                || item.last_stream_format.is_some()
-                || item.last_stream_key.is_some()
-            {
-                item.last_stream_url = None;
-                item.last_stream_format = None;
-                item.last_stream_key = None;
-                store.set(item_key, json!(item));
-                changed = true;
-            }
-        }
 
         for key in &stream_health_index {
             let item_key = playback_stream_health_item_key(key);
@@ -1094,14 +856,6 @@ impl PlaybackStateService {
     }
 }
 
-fn playback_resume_item_key(key: &str) -> String {
-    format!("{}{}", PLAYBACK_RESUME_ITEM_PREFIX, key)
-}
-
-fn playback_session_item_key(key: &str) -> String {
-    format!("{}{}", PLAYBACK_SESSION_ITEM_PREFIX, key)
-}
-
 fn playback_stream_health_item_key(key: &str) -> String {
     format!("{}{}", PLAYBACK_STREAM_HEALTH_ITEM_PREFIX, key)
 }
@@ -1134,23 +888,16 @@ fn playback_episode_mapping_snapshot_key(
     )
 }
 
-fn normalize_last_watched_ms(last_watched: u64) -> u64 {
-    if last_watched == 0 {
-        0
-    } else if last_watched < LEGACY_SECONDS_TIMESTAMP_CUTOFF {
-        last_watched.saturating_mul(1000)
-    } else {
-        last_watched
-    }
-}
-
-fn normalized_now_unix_millis() -> u64 {
-    normalize_last_watched_ms(crate::commands::now_unix_millis())
+fn current_timestamp_ms() -> u64 {
+    crate::commands::now_unix_millis()
 }
 
 fn normalize_stream_meta(value: &str) -> Option<String> {
     let trimmed = value.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("null")
+        || trimmed.eq_ignore_ascii_case("undefined")
+    {
         None
     } else {
         Some(trimmed.to_string())
@@ -1176,9 +923,7 @@ fn normalize_stream_family(value: &str) -> Option<String> {
 }
 
 fn sanitize_playback_language_pref(value: Option<String>) -> Option<String> {
-    value
-        .and_then(|candidate| normalize_stream_meta(&candidate))
-        .map(|candidate| candidate.to_ascii_lowercase())
+    sanitize_language_pref(value, true)
 }
 
 fn canonical_media_type_for_title_scope(media_type: &str) -> Option<&'static str> {
@@ -1235,15 +980,6 @@ fn load_playback_episode_mapping_snapshot<R: tauri::Runtime>(
         .and_then(|value| serde_json::from_value::<PlaybackEpisodeMappingSnapshot>(value).ok())
 }
 
-fn load_playback_session_snapshot<R: tauri::Runtime>(
-    store: &tauri_plugin_store::Store<R>,
-    key: &str,
-) -> Option<PlaybackSessionSnapshot> {
-    store
-        .get(playback_session_item_key(key))
-        .and_then(|value| serde_json::from_value::<PlaybackSessionSnapshot>(value).ok())
-}
-
 fn episode_mapping_snapshot_matches(
     left: &PlaybackEpisodeMappingSnapshot,
     right: &PlaybackEpisodeMappingSnapshot,
@@ -1285,7 +1021,9 @@ fn preferred_title_source_from_success<R: tauri::Runtime>(
         .filter(|snapshot_key| playback_snapshot_belongs_to_scope(snapshot_key, scope_key))
         .filter_map(|snapshot_key| load_playback_stream_family_snapshot(store, &snapshot_key))
         .filter_map(|snapshot| {
-            let source_name = snapshot.source_name.and_then(|value| normalize_source_name(&value))?;
+            let source_name = snapshot
+                .source_name
+                .and_then(|value| normalize_source_name(&value))?;
             let last_success_at = snapshot.last_success_at?;
             Some((source_name, last_success_at))
         })
@@ -1293,30 +1031,6 @@ fn preferred_title_source_from_success<R: tauri::Runtime>(
             now_ms.saturating_sub(*last_success_at) <= STREAM_FAMILY_RECENT_SUCCESS_WINDOW_MS
         })
         .max_by_key(|(_, last_success_at)| *last_success_at)
-        .map(|(source_name, _)| source_name)
-}
-
-fn preferred_title_source_from_session<R: tauri::Runtime>(
-    store: &tauri_plugin_store::Store<R>,
-    scope_key: &str,
-    now_ms: u64,
-) -> Option<String> {
-    let session_index = load_index(store, PLAYBACK_SESSION_INDEX_KEY).ok()?;
-
-    session_index
-        .into_iter()
-        .filter_map(|session_key| load_playback_session_snapshot(store, &session_key))
-        .filter(|session| {
-            playback_stream_family_scope_key(Some(&session.media_type), Some(&session.media_id))
-                .as_deref()
-                == Some(scope_key)
-        })
-        .filter_map(|session| {
-            let source_name = session.source_name.and_then(|value| normalize_source_name(&value))?;
-            Some((source_name, session.updated_at))
-        })
-        .filter(|(_, updated_at)| now_ms.saturating_sub(*updated_at) <= PLAYBACK_SESSION_RETENTION_MS)
-        .max_by_key(|(_, updated_at)| *updated_at)
         .map(|(source_name, _)| source_name)
 }
 
@@ -1423,28 +1137,6 @@ fn classify_stream_kind(stream_url: Option<&str>) -> PlaybackStreamKind {
     PlaybackStreamKind::RemoteDirect
 }
 
-fn stream_max_age_ms(kind: PlaybackStreamKind) -> Option<u64> {
-    match kind {
-        PlaybackStreamKind::RemoteDebrid => Some(SAVED_STREAM_DEBRID_MAX_AGE_MS),
-        PlaybackStreamKind::RemoteSigned => Some(SAVED_STREAM_SIGNED_MAX_AGE_MS),
-        PlaybackStreamKind::RemoteManifest => Some(SAVED_STREAM_MANIFEST_MAX_AGE_MS),
-        PlaybackStreamKind::RemoteDirect => Some(SAVED_STREAM_DIRECT_MAX_AGE_MS),
-        _ => None,
-    }
-}
-
-fn should_bypass_stream_for_age(kind: PlaybackStreamKind, last_watched_ms: u64) -> bool {
-    let Some(max_age_ms) = stream_max_age_ms(kind) else {
-        return false;
-    };
-
-    if last_watched_ms == 0 {
-        return false;
-    }
-
-    normalized_now_unix_millis().saturating_sub(last_watched_ms) > max_age_ms
-}
-
 fn compute_stream_cooldown_until(
     kind: PlaybackStreamKind,
     outcome: PlaybackStreamOutcomeKind,
@@ -1456,11 +1148,6 @@ fn compute_stream_cooldown_until(
 
     let cooldown_ms = match outcome {
         PlaybackStreamOutcomeKind::Verified => 0,
-        PlaybackStreamOutcomeKind::ExpiredSavedStream => match kind {
-            PlaybackStreamKind::RemoteSigned => 1000 * 60 * 30,
-            PlaybackStreamKind::RemoteDebrid => 1000 * 60 * 20,
-            _ => 1000 * 60 * 12,
-        },
         PlaybackStreamOutcomeKind::StartupTimeout => 1000 * 60 * 8,
         PlaybackStreamOutcomeKind::LoadFailed => 1000 * 60 * 10,
         PlaybackStreamOutcomeKind::Disconnected => 1000 * 60 * 5,
@@ -1495,7 +1182,10 @@ fn score_source_health_priority(
         return 2;
     };
 
-    if snapshot.cooldown_until.is_some_and(|cooldown_until| cooldown_until > now_ms) {
+    if snapshot
+        .cooldown_until
+        .is_some_and(|cooldown_until| cooldown_until > now_ms)
+    {
         return 0;
     }
 
@@ -1521,13 +1211,14 @@ fn is_nearby_episode(
     candidate_season: Option<u32>,
     candidate_episode: Option<u32>,
 ) -> bool {
-    let Some((target_season, target_episode, candidate_season, candidate_episode)) =
-        target_season
-            .zip(target_episode)
-            .zip(candidate_season.zip(candidate_episode))
-            .map(|((left_season, left_episode), (right_season, right_episode))| {
+    let Some((target_season, target_episode, candidate_season, candidate_episode)) = target_season
+        .zip(target_episode)
+        .zip(candidate_season.zip(candidate_episode))
+        .map(
+            |((left_season, left_episode), (right_season, right_episode))| {
                 (left_season, left_episode, right_season, right_episode)
-            })
+            },
+        )
     else {
         return false;
     };
@@ -1555,7 +1246,9 @@ fn score_stream_family_priority(
             )
     });
 
-    if snapshot.cooldown_until.is_some_and(|cooldown_until| cooldown_until > now_ms)
+    if snapshot
+        .cooldown_until
+        .is_some_and(|cooldown_until| cooldown_until > now_ms)
         && recent_nearby_failure
     {
         return 0;
@@ -1587,16 +1280,15 @@ fn upsert_source_health_snapshot<R: tauri::Runtime>(
     timestamp_ms: u64,
 ) -> Result<(), String> {
     let mut source_health_index = load_index(store, PLAYBACK_SOURCE_HEALTH_INDEX_KEY)?;
-    let mut snapshot = load_source_health_snapshot(store, source_name).unwrap_or(
-        PlaybackSourceHealthSnapshot {
+    let mut snapshot =
+        load_source_health_snapshot(store, source_name).unwrap_or(PlaybackSourceHealthSnapshot {
             source_name: source_name.to_string(),
             last_success_at: None,
             last_failure_at: None,
             last_failure_reason: None,
             consecutive_failures: 0,
             cooldown_until: None,
-        },
-    );
+        });
 
     snapshot.source_name = source_name.to_string();
 
@@ -1613,7 +1305,6 @@ fn upsert_source_health_snapshot<R: tauri::Runtime>(
             snapshot.last_failure_reason = Some(outcome.as_str().to_string());
             snapshot.consecutive_failures = snapshot.consecutive_failures.saturating_add(1);
             snapshot.cooldown_until = Some(timestamp_ms.saturating_add(match outcome {
-                PlaybackStreamOutcomeKind::ExpiredSavedStream => 1000 * 60 * 25,
                 PlaybackStreamOutcomeKind::StartupTimeout => 1000 * 60 * 12,
                 PlaybackStreamOutcomeKind::LoadFailed => 1000 * 60 * 15,
                 PlaybackStreamOutcomeKind::Disconnected => 1000 * 60 * 6,
@@ -1622,12 +1313,12 @@ fn upsert_source_health_snapshot<R: tauri::Runtime>(
         }
     }
 
-    if !source_health_index.iter().any(|existing| existing == source_name) {
-        source_health_index.push(source_name.to_string());
-        source_health_index.sort();
-    }
+    insert_sorted_unique(&mut source_health_index, source_name);
 
-    store.set(playback_source_health_item_key(source_name), json!(snapshot));
+    store.set(
+        playback_source_health_item_key(source_name),
+        json!(snapshot),
+    );
     prune_stale_source_health_entries(store, &mut source_health_index);
     store.set(PLAYBACK_SOURCE_HEALTH_INDEX_KEY, json!(source_health_index));
 
@@ -1695,7 +1386,6 @@ fn upsert_stream_family_snapshot<R: tauri::Runtime>(
             snapshot.last_failure_reason = Some(outcome.as_str().to_string());
             snapshot.consecutive_failures = snapshot.consecutive_failures.saturating_add(1);
             snapshot.cooldown_until = Some(timestamp_ms.saturating_add(match outcome {
-                PlaybackStreamOutcomeKind::ExpiredSavedStream => 1000 * 60 * 20,
                 PlaybackStreamOutcomeKind::StartupTimeout => 1000 * 60 * 10,
                 PlaybackStreamOutcomeKind::LoadFailed => 1000 * 60 * 12,
                 PlaybackStreamOutcomeKind::Disconnected => 1000 * 60 * 6,
@@ -1704,12 +1394,12 @@ fn upsert_stream_family_snapshot<R: tauri::Runtime>(
         }
     }
 
-    if !stream_family_index.iter().any(|existing| existing == &snapshot_key) {
-        stream_family_index.push(snapshot_key.clone());
-        stream_family_index.sort();
-    }
+    insert_sorted_unique(&mut stream_family_index, &snapshot_key);
 
-    store.set(playback_stream_family_item_key(&snapshot_key), json!(snapshot));
+    store.set(
+        playback_stream_family_item_key(&snapshot_key),
+        json!(snapshot),
+    );
     prune_stale_stream_family_entries(store, &mut stream_family_index);
     store.set(PLAYBACK_STREAM_FAMILY_INDEX_KEY, json!(stream_family_index));
 
@@ -1720,13 +1410,15 @@ fn prune_stale_source_health_entries<R: tauri::Runtime>(
     store: &tauri_plugin_store::Store<R>,
     source_health_index: &mut Vec<String>,
 ) {
-    let now_ms = normalized_now_unix_millis();
+    let now_ms = current_timestamp_ms();
     source_health_index.retain(|key| {
         let Some(snapshot) = load_source_health_snapshot(store, key) else {
             return false;
         };
 
-        let keep = snapshot.cooldown_until.is_some_and(|cooldown_until| cooldown_until > now_ms)
+        let keep = snapshot
+            .cooldown_until
+            .is_some_and(|cooldown_until| cooldown_until > now_ms)
             || snapshot.last_success_at.is_some_and(|last_success_at| {
                 now_ms.saturating_sub(last_success_at) <= SOURCE_HEALTH_RECENT_SUCCESS_WINDOW_MS
             })
@@ -1742,36 +1434,19 @@ fn prune_stale_source_health_entries<R: tauri::Runtime>(
     });
 }
 
-fn prune_stale_session_entries<R: tauri::Runtime>(
-    store: &tauri_plugin_store::Store<R>,
-    session_index: &mut Vec<String>,
-) {
-    let cutoff = normalized_now_unix_millis().saturating_sub(PLAYBACK_SESSION_RETENTION_MS);
-
-    session_index.retain(|key| {
-        let keep = load_playback_session_snapshot(store, key)
-            .map(|snapshot| snapshot.updated_at >= cutoff)
-            .unwrap_or(false);
-
-        if !keep {
-            store.delete(playback_session_item_key(key));
-        }
-
-        keep
-    });
-}
-
 fn prune_stale_stream_family_entries<R: tauri::Runtime>(
     store: &tauri_plugin_store::Store<R>,
     stream_family_index: &mut Vec<String>,
 ) {
-    let now_ms = normalized_now_unix_millis();
+    let now_ms = current_timestamp_ms();
     stream_family_index.retain(|key| {
         let Some(snapshot) = load_playback_stream_family_snapshot(store, key) else {
             return false;
         };
 
-        let keep = snapshot.cooldown_until.is_some_and(|cooldown_until| cooldown_until > now_ms)
+        let keep = snapshot
+            .cooldown_until
+            .is_some_and(|cooldown_until| cooldown_until > now_ms)
             || snapshot.last_success_at.is_some_and(|last_success_at| {
                 now_ms.saturating_sub(last_success_at) <= STREAM_FAMILY_RECENT_SUCCESS_WINDOW_MS
             })
@@ -1791,36 +1466,55 @@ fn upsert_stream_health_snapshot<R: tauri::Runtime>(
     store: &tauri_plugin_store::Store<R>,
     key: &str,
     progress: &WatchProgress,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let Some(stream_url) = progress.last_stream_url.as_deref() else {
-        return Ok(());
+        return Ok(false);
     };
 
     let mut health_index = load_index(store, PLAYBACK_STREAM_HEALTH_INDEX_KEY)?;
-    let mut snapshot = load_stream_health_snapshot(store, key).unwrap_or(PlaybackStreamHealthSnapshot {
-        last_stream_url: None,
-        last_stream_format: None,
-        last_stream_lookup_id: None,
-        last_stream_key: None,
-        stream_kind: PlaybackStreamKind::Unknown.as_str().to_string(),
-        resolved_at: None,
-        last_verified_at: None,
-        last_success_at: None,
-        last_failure_at: None,
-        last_failure_reason: None,
-        consecutive_failures: 0,
-        cooldown_until: None,
-    });
+    let mut snapshot =
+        load_stream_health_snapshot(store, key).unwrap_or(PlaybackStreamHealthSnapshot {
+            last_stream_url: None,
+            last_stream_format: None,
+            last_stream_lookup_id: None,
+            last_stream_key: None,
+            stream_kind: PlaybackStreamKind::Unknown.as_str().to_string(),
+            resolved_at: None,
+            last_verified_at: None,
+            last_success_at: None,
+            last_failure_at: None,
+            last_failure_reason: None,
+            consecutive_failures: 0,
+            cooldown_until: None,
+        });
 
     let normalized_url = normalize_stream_meta(stream_url);
+    let normalized_format = progress
+        .last_stream_format
+        .as_deref()
+        .and_then(normalize_stream_meta);
     let normalized_lookup_id = progress
         .last_stream_lookup_id
         .as_deref()
         .and_then(normalize_stream_meta);
-    let normalized_stream_key = progress.last_stream_key.as_deref().and_then(normalize_stream_meta);
+    let normalized_stream_key = progress
+        .last_stream_key
+        .as_deref()
+        .and_then(normalize_stream_meta);
+    let next_stream_kind = classify_stream_kind(normalized_url.as_deref())
+        .as_str()
+        .to_string();
     let stream_changed = snapshot.last_stream_url != normalized_url
         || snapshot.last_stream_lookup_id != normalized_lookup_id
         || snapshot.last_stream_key != normalized_stream_key;
+    let format_changed = snapshot.last_stream_format != normalized_format;
+    let stream_kind_changed = snapshot.stream_kind != next_stream_kind;
+    let missing_resolved_at = snapshot.resolved_at.is_none();
+    let index_changed = insert_sorted_unique(&mut health_index, key);
+
+    if !stream_changed && !format_changed && !stream_kind_changed && !missing_resolved_at && !index_changed {
+        return Ok(false);
+    }
 
     if stream_changed {
         snapshot.last_verified_at = None;
@@ -1832,24 +1526,30 @@ fn upsert_stream_health_snapshot<R: tauri::Runtime>(
     }
 
     snapshot.last_stream_url = normalized_url.clone();
-    snapshot.last_stream_format = progress
-        .last_stream_format
-        .as_deref()
-        .and_then(normalize_stream_meta);
+    snapshot.last_stream_format = normalized_format;
     snapshot.last_stream_lookup_id = normalized_lookup_id;
     snapshot.last_stream_key = normalized_stream_key;
-    snapshot.stream_kind = classify_stream_kind(normalized_url.as_deref()).as_str().to_string();
-    snapshot.resolved_at = Some(normalize_last_watched_ms(progress.last_watched));
-
-    if !health_index.iter().any(|existing| existing == key) {
-        health_index.push(key.to_string());
-        health_index.sort();
+    snapshot.stream_kind = next_stream_kind;
+    if stream_changed || missing_resolved_at {
+        snapshot.resolved_at = Some(progress.last_watched);
     }
 
     store.set(playback_stream_health_item_key(key), json!(snapshot));
-    store.set(PLAYBACK_STREAM_HEALTH_INDEX_KEY, json!(health_index));
+    if index_changed {
+        store.set(PLAYBACK_STREAM_HEALTH_INDEX_KEY, json!(health_index));
+    }
 
-    Ok(())
+    Ok(true)
+}
+
+fn insert_sorted_unique(index: &mut Vec<String>, value: &str) -> bool {
+    match index.binary_search_by(|existing| existing.as_str().cmp(value)) {
+        Ok(_) => false,
+        Err(position) => {
+            index.insert(position, value.to_string());
+            true
+        }
+    }
 }
 
 fn load_index<R: tauri::Runtime>(
@@ -1865,37 +1565,6 @@ fn load_index<R: tauri::Runtime>(
     store.set(index_key, json!(Vec::<String>::new()));
     store.save().map_err(|e| e.to_string())?;
     Ok(Vec::new())
-}
-
-fn load_progress_entries<R: tauri::Runtime>(
-    store: &tauri_plugin_store::Store<R>,
-    index_key: &str,
-    item_key: fn(&str) -> String,
-) -> Result<Vec<(String, WatchProgress)>, String> {
-    let index = load_index(store, index_key)?;
-    let original_len = index.len();
-    let mut cleaned_index = Vec::with_capacity(original_len);
-    let mut entries = Vec::with_capacity(original_len);
-
-    for key in index {
-        let Some(value) = store.get(item_key(&key)) else {
-            continue;
-        };
-
-        let Ok(progress) = serde_json::from_value::<WatchProgress>(value) else {
-            continue;
-        };
-
-        cleaned_index.push(key.clone());
-        entries.push((key, progress));
-    }
-
-    if cleaned_index.len() != original_len {
-        store.set(index_key, json!(cleaned_index));
-        store.save().map_err(|e| e.to_string())?;
-    }
-
-    Ok(entries)
 }
 
 #[cfg(test)]
@@ -1993,7 +1662,10 @@ mod tests {
             cooldown_until: None,
         };
 
-        assert_eq!(score_stream_family_priority(Some(&snapshot), Some(1), Some(5), now_ms), 4);
+        assert_eq!(
+            score_stream_family_priority(Some(&snapshot), Some(1), Some(5), now_ms),
+            4
+        );
     }
 
     #[test]
@@ -2015,7 +1687,10 @@ mod tests {
             cooldown_until: Some(110_000),
         };
 
-        assert_eq!(score_stream_family_priority(Some(&snapshot), Some(1), Some(6), now_ms), 0);
+        assert_eq!(
+            score_stream_family_priority(Some(&snapshot), Some(1), Some(6), now_ms),
+            0
+        );
     }
 
     #[test]
@@ -2043,6 +1718,9 @@ mod tests {
         let effective = merge_playback_language_preferences(defaults, Some(&scoped));
 
         assert_eq!(effective.preferred_audio_language.as_deref(), Some("ja"));
-        assert_eq!(effective.preferred_subtitle_language.as_deref(), Some("off"));
+        assert_eq!(
+            effective.preferred_subtitle_language.as_deref(),
+            Some("off")
+        );
     }
 }

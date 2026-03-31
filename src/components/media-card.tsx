@@ -26,6 +26,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { CreateListDialog } from '@/components/list/create-list-dialog';
 import { ListIcon } from '@/components/list/list-icons';
+import { buildYouTubeEmbedUrl, extractYouTubeVideoId } from '@/lib/trailer-utils';
 
 // ── Rating helpers ─────────────────────────────────────────────────────────────
 // Normalise a rating string (IMDb "8.3" or percentage "83") to a 0-100 score.
@@ -396,11 +397,14 @@ export function MediaCard({
       })()
     : null;
 
-  const trailerVideoId = details?.trailers?.[0]
-    ? (() => {
-        const m = details.trailers[0].url.match(/(?:v=|\/)([\w-]{11})(?:\?|&|\/|$)/);
-        return m ? m[1] : null;
-      })()
+  const trailerVideoId = extractYouTubeVideoId(details?.trailers?.[0]?.url);
+  const trailerPreviewUrl = trailerVideoId
+    ? buildYouTubeEmbedUrl(trailerVideoId, {
+        autoplay: true,
+        controls: false,
+        loop: true,
+        mute: trailerMuted,
+      })
     : null;
 
   const backdropSrc = details?.backdrop || item.backdrop || item.poster;
@@ -605,6 +609,16 @@ export function MediaCard({
         </div>
       </Link>
 
+      {/* Title + year below poster */}
+      <div className='mt-2 px-0.5 space-y-0.5'>
+        <p className='text-[12.5px] font-medium text-white/90 leading-tight line-clamp-2 tracking-[-0.01em]'>
+          {item.title}
+        </p>
+        {item.year && (
+          <p className='text-[11px] text-zinc-500 leading-none'>{item.year.split('-')[0]}</p>
+        )}
+      </div>
+
       {/* ── Hover popup card — rendered via portal so it never affects page scroll ── */}
       {showPopup &&
         popupPos &&
@@ -640,12 +654,13 @@ export function MediaCard({
             >
               {/* Backdrop / trailer area */}
               <div className='relative overflow-hidden bg-zinc-900 aspect-video max-h-[160px]'>
-                {playingTrailer && trailerVideoId ? (
+                {playingTrailer && trailerPreviewUrl ? (
                   <>
                     <iframe
-                      src={`https://www.youtube.com/embed/${trailerVideoId}?autoplay=1&mute=${trailerMuted ? 1 : 0}&controls=0&loop=1&playlist=${trailerVideoId}&modestbranding=1&playsinline=1&iv_load_policy=3`}
+                      src={trailerPreviewUrl}
                       className='absolute inset-0 w-full h-full border-0 pointer-events-none'
-                      allow='autoplay; encrypted-media'
+                      allow='accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share'
+                      referrerPolicy='strict-origin-when-cross-origin'
                       title='Trailer preview'
                     />
                     <button
@@ -958,8 +973,9 @@ export function MediaCard({
 export function MediaCardSkeleton() {
   return (
     <div className='space-y-2'>
-      <div className='aspect-[2/3] rounded-md bg-zinc-900/50 animate-pulse border border-white/5' />
-      <div className='h-4 rounded bg-zinc-900/40 animate-pulse w-3/4' />
+      <div className='aspect-[2/3] rounded-xl bg-zinc-900/50 animate-pulse border border-white/5' />
+      <div className='h-3.5 rounded-md bg-zinc-900/40 animate-pulse w-3/4' />
+      <div className='h-3 rounded-md bg-zinc-900/30 animate-pulse w-1/3' />
     </div>
   );
 }

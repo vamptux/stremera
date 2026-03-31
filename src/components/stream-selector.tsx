@@ -90,6 +90,9 @@ interface StreamSelectorProps {
     url: string;
     format: string;
     is_web_friendly: boolean;
+    selectedStreamKey: string;
+    sourceName?: string;
+    streamFamily?: string;
   }) => void | Promise<void>;
 }
 
@@ -353,6 +356,7 @@ export function StreamSelector({
           mediaType: streamMediaType,
           season: absoluteSeason ?? season,
           episode: absoluteEpisode ?? episode,
+          title,
         }),
       ),
     enabled: open && !!lookupId && isOnline,
@@ -476,8 +480,15 @@ export function StreamSelector({
     },
     onSuccess: async (data, stream) => {
       const feedback = buildResolveFeedback(stream, 'play');
-      if (inlineMode && onStreamResolved) {
-        void Promise.resolve(onStreamResolved(data)).finally(() => {
+      if (onStreamResolved) {
+        void Promise.resolve(
+          onStreamResolved({
+            ...data,
+            selectedStreamKey: getStreamKey(stream),
+            sourceName: stream.source_name?.trim() || undefined,
+            streamFamily: stream.stream_family?.trim() || undefined,
+          }),
+        ).finally(() => {
           closeSelector();
         });
         return;

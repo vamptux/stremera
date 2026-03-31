@@ -1,4 +1,5 @@
 use super::{normalize_non_empty, WatchProgress};
+use std::collections::HashMap;
 
 const WATCH_PROGRESS_POSITION_SAVE_DELTA_SECS: f64 = 4.0;
 const WATCH_PROGRESS_DURATION_SAVE_DELTA_SECS: f64 = 1.0;
@@ -13,6 +14,7 @@ const WATCH_PROGRESS_BETTER_RESUME_POSITION_DELTA_SECS: f64 = 45.0;
 const WATCH_PROGRESS_BETTER_RESUME_PROGRESS_RATIO_DELTA: f64 = 0.12;
 
 type WatchProgressEpisodeIdentity = (Option<u32>, Option<u32>, Option<u32>, Option<u32>);
+type SourceHealthPriorityMap = HashMap<String, u8>;
 
 pub(crate) fn build_history_key(
     type_lower: &str,
@@ -238,6 +240,92 @@ fn has_stream_family_watch_progress(item: &WatchProgress) -> bool {
         .is_some_and(|value| !value.trim().is_empty())
 }
 
+fn has_source_binding_watch_progress(item: &WatchProgress) -> bool {
+    has_usable_resume_lookup_id(item)
+        || has_stream_key_watch_progress(item)
+        || has_source_name_watch_progress(item)
+        || has_stream_family_watch_progress(item)
+        || has_stream_url_watch_progress(item)
+}
+
+fn normalize_watch_progress_source_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_ascii_lowercase())
+    }
+}
+
+fn watch_progress_source_priority(
+    item: &WatchProgress,
+    source_health_priorities: Option<&SourceHealthPriorityMap>,
+) -> u8 {
+    let Some(source_health_priorities) = source_health_priorities else {
+        return 2;
+    };
+
+    let Some(source_name) = item
+        .source_name
+        .as_deref()
+        .and_then(normalize_watch_progress_source_name)
+    else {
+        return 2;
+    };
+
+    source_health_priorities
+        .get(source_name.as_str())
+        .copied()
+        .unwrap_or(2)
+}
+
+fn same_source_watch_progress(left: &WatchProgress, right: &WatchProgress) -> bool {
+    let Some(left_source) = left
+        .source_name
+        .as_deref()
+        .and_then(normalize_watch_progress_source_name)
+    else {
+        return false;
+    };
+    let Some(right_source) = right
+        .source_name
+        .as_deref()
+        .and_then(normalize_watch_progress_source_name)
+    else {
+        return false;
+    };
+
+    left_source == right_source
+}
+
+fn replace_source_metadata_from_donor(target: &mut WatchProgress, donor: &WatchProgress) {
+    target.last_stream_lookup_id = donor.last_stream_lookup_id.clone();
+    target.last_stream_key = donor.last_stream_key.clone();
+    target.source_name = donor.source_name.clone();
+    target.stream_family = donor.stream_family.clone();
+    target.last_stream_url = donor.last_stream_url.clone();
+    target.last_stream_format = donor.last_stream_format.clone();
+}
+
+fn merge_missing_source_metadata_from_donor(target: &mut WatchProgress, donor: &WatchProgress) {
+    if !has_usable_resume_lookup_id(target) && has_usable_resume_lookup_id(donor) {
+        target.last_stream_lookup_id = donor.last_stream_lookup_id.clone();
+    }
+    if !has_stream_key_watch_progress(target) && has_stream_key_watch_progress(donor) {
+        target.last_stream_key = donor.last_stream_key.clone();
+    }
+    if !has_source_name_watch_progress(target) && has_source_name_watch_progress(donor) {
+        target.source_name = donor.source_name.clone();
+    }
+    if !has_stream_family_watch_progress(target) && has_stream_family_watch_progress(donor) {
+        target.stream_family = donor.stream_family.clone();
+    }
+    if !has_stream_url_watch_progress(target) && has_stream_url_watch_progress(donor) {
+        target.last_stream_url = donor.last_stream_url.clone();
+        target.last_stream_format = donor.last_stream_format.clone();
+    }
+}
+
 fn has_usable_resume_lookup_id(item: &WatchProgress) -> bool {
     item.last_stream_lookup_id.as_deref().is_some_and(|s| {
         let trimmed = s.trim();
@@ -318,9 +406,7 @@ fn hydrate_watch_progress_lookup_id(item: &mut WatchProgress) {
     }
 }
 
-fn watch_progress_episode_identity(
-    item: &WatchProgress,
-) -> WatchProgressEpisodeIdentity {
+fn watch_progress_episode_identity(item: &WatchProgress) -> WatchProgressEpisodeIdentity {
     (
         watch_progress_absolute_season(item),
         watch_progress_absolute_episode(item),
@@ -338,6 +424,7 @@ pub(crate) fn continue_watching_priority_score(item: &WatchProgress) -> u32 {
         } else {
             100
         };
+        score += (watch_progress_ratio(item) * 20.0).round() as u32;
     } else if item.position > 0.0 {
         score += 30;
     }
@@ -403,7 +490,11 @@ fn watch_progress_episode_affinity(reference: &WatchProgress, candidate: &WatchP
     0
 }
 
-fn watch_progress_quality_score(reference: &WatchProgress, candidate: &WatchProgress) -> u32 {
+fn watch_progress_quality_score(
+    reference: &WatchProgress,
+    candidate: &WatchProgress,
+    source_health_priorities: Option<&SourceHealthPriorityMap>,
+) -> u32 {
     let mut score = watch_progress_episode_affinity(reference, candidate);
 
     if has_episode_context_watch_progress(candidate) {
@@ -431,35 +522,50 @@ fn watch_progress_quality_score(reference: &WatchProgress, candidate: &WatchProg
         score += 4;
     }
 
+    match watch_progress_source_priority(candidate, source_health_priorities) {
+        0 => score = score.saturating_sub(24),
+        1 => score = score.saturating_sub(12),
+        3 => score += 6,
+        _ => {}
+    }
+
     score
 }
 
-fn merge_watch_progress_from_donor(target: &mut WatchProgress, donor: &WatchProgress) {
-    let should_prefer_donor_resume = !has_meaningful_resume_position(target)
-        || donor_has_materially_better_resume(target, donor);
+fn merge_watch_progress_from_donor(
+    target: &mut WatchProgress,
+    donor: &WatchProgress,
+    source_health_priorities: Option<&SourceHealthPriorityMap>,
+) {
+    let donor_can_supply_resume = donor_can_supply_episode_resume(target, donor);
+    let should_prefer_donor_resume = donor_can_supply_resume
+        && (!has_meaningful_resume_position(target)
+            || donor_has_materially_better_resume(target, donor));
+
+    let target_has_source_binding = has_source_binding_watch_progress(target);
+    let donor_has_source_binding = has_source_binding_watch_progress(donor);
+    let target_source_priority = watch_progress_source_priority(target, source_health_priorities);
+    let donor_source_priority = watch_progress_source_priority(donor, source_health_priorities);
+    let same_source = same_source_watch_progress(target, donor);
+    let should_replace_source_metadata = donor_can_supply_resume
+        && target_has_source_binding
+        && donor_has_source_binding
+        && !same_source
+        && donor_source_priority > target_source_priority;
+    let can_merge_missing_source_metadata = donor_has_source_binding
+        && (!target_has_source_binding || same_source || donor_source_priority > target_source_priority);
 
     merge_watch_progress_coordinates(target, donor);
 
-    if !has_usable_resume_lookup_id(target) && has_usable_resume_lookup_id(donor) {
-        target.last_stream_lookup_id = donor.last_stream_lookup_id.clone();
-    }
-    if !has_stream_key_watch_progress(target) && has_stream_key_watch_progress(donor) {
-        target.last_stream_key = donor.last_stream_key.clone();
-    }
-    if !has_source_name_watch_progress(target) && has_source_name_watch_progress(donor) {
-        target.source_name = donor.source_name.clone();
-    }
-    if !has_stream_family_watch_progress(target) && has_stream_family_watch_progress(donor) {
-        target.stream_family = donor.stream_family.clone();
-    }
-    if !has_stream_url_watch_progress(target) && has_stream_url_watch_progress(donor) {
-        target.last_stream_url = donor.last_stream_url.clone();
-        target.last_stream_format = donor.last_stream_format.clone();
+    if should_replace_source_metadata {
+        replace_source_metadata_from_donor(target, donor);
+    } else if can_merge_missing_source_metadata {
+        merge_missing_source_metadata_from_donor(target, donor);
     }
     if should_prefer_donor_resume {
         target.position = donor.position;
     }
-    if (target.duration <= 0.0 || should_prefer_donor_resume) && donor.duration > 0.0 {
+    if should_prefer_donor_resume && donor.duration > 0.0 {
         target.duration = donor.duration;
     }
     if target.poster.is_none() && donor.poster.is_some() {
@@ -470,7 +576,15 @@ fn merge_watch_progress_from_donor(target: &mut WatchProgress, donor: &WatchProg
     }
 }
 
-pub(crate) fn choose_watch_history_entry(mut items: Vec<WatchProgress>) -> Option<WatchProgress> {
+#[cfg(test)]
+pub(crate) fn choose_watch_history_entry(items: Vec<WatchProgress>) -> Option<WatchProgress> {
+    choose_watch_history_entry_with_source_health(items, None)
+}
+
+pub(crate) fn choose_watch_history_entry_with_source_health(
+    mut items: Vec<WatchProgress>,
+    source_health_priorities: Option<&SourceHealthPriorityMap>,
+) -> Option<WatchProgress> {
     items.sort_by(|a, b| b.last_watched.cmp(&a.last_watched));
 
     let mut chosen = items.first()?.clone();
@@ -486,14 +600,14 @@ pub(crate) fn choose_watch_history_entry(mut items: Vec<WatchProgress>) -> Optio
 
     let mut donors = items;
     donors.sort_by(|left, right| {
-        watch_progress_quality_score(&chosen, right)
-            .cmp(&watch_progress_quality_score(&chosen, left))
+        watch_progress_quality_score(&chosen, right, source_health_priorities)
+            .cmp(&watch_progress_quality_score(&chosen, left, source_health_priorities))
             .then_with(|| right.last_watched.cmp(&left.last_watched))
     });
 
     for mut donor in donors {
         hydrate_watch_progress_lookup_id(&mut donor);
-        merge_watch_progress_from_donor(&mut chosen, &donor);
+        merge_watch_progress_from_donor(&mut chosen, &donor, source_health_priorities);
 
         if has_complete_resume_snapshot(&chosen) {
             break;
@@ -504,13 +618,22 @@ pub(crate) fn choose_watch_history_entry(mut items: Vec<WatchProgress>) -> Optio
     Some(chosen)
 }
 
+#[cfg(test)]
 pub(crate) fn choose_continue_watching_entry(items: Vec<WatchProgress>) -> Option<WatchProgress> {
+    choose_continue_watching_entry_with_source_health(items, None)
+}
+
+pub(crate) fn choose_continue_watching_entry_with_source_health(
+    items: Vec<WatchProgress>,
+    source_health_priorities: Option<&SourceHealthPriorityMap>,
+) -> Option<WatchProgress> {
     if items.is_empty() {
         return None;
     }
 
     if !items.iter().any(is_series_like_watch_progress) {
-        return choose_watch_history_entry(items).filter(is_continue_watching_candidate);
+        return choose_watch_history_entry_with_source_health(items, source_health_priorities)
+            .filter(is_continue_watching_candidate);
     }
 
     let mut grouped: std::collections::HashMap<WatchProgressEpisodeIdentity, Vec<WatchProgress>> =
@@ -525,7 +648,9 @@ pub(crate) fn choose_continue_watching_entry(items: Vec<WatchProgress>) -> Optio
 
     let mut candidates = grouped
         .into_values()
-        .filter_map(choose_watch_history_entry)
+        .filter_map(|group| {
+            choose_watch_history_entry_with_source_health(group, source_health_priorities)
+        })
         .filter(is_continue_watching_candidate)
         .collect::<Vec<_>>();
 
@@ -538,12 +663,31 @@ pub(crate) fn choose_continue_watching_entry(items: Vec<WatchProgress>) -> Optio
     candidates.into_iter().next()
 }
 
+#[cfg(test)]
 pub(crate) fn choose_exact_watch_progress_entry(
     items: Vec<WatchProgress>,
     media_id: &str,
     media_type: &str,
     season: Option<u32>,
     episode: Option<u32>,
+) -> Option<WatchProgress> {
+    choose_exact_watch_progress_entry_with_source_health(
+        items,
+        media_id,
+        media_type,
+        season,
+        episode,
+        None,
+    )
+}
+
+pub(crate) fn choose_exact_watch_progress_entry_with_source_health(
+    items: Vec<WatchProgress>,
+    media_id: &str,
+    media_type: &str,
+    season: Option<u32>,
+    episode: Option<u32>,
+    source_health_priorities: Option<&SourceHealthPriorityMap>,
 ) -> Option<WatchProgress> {
     let normalized_type = normalize_watch_progress_type(media_type)?;
 
@@ -562,10 +706,14 @@ pub(crate) fn choose_exact_watch_progress_entry(
         .filter(|item| matches_exact_watch_progress_episode(item, season, episode))
         .collect::<Vec<_>>();
 
-    choose_watch_history_entry(matching_items)
+    choose_watch_history_entry_with_source_health(matching_items, source_health_priorities)
 }
 
 pub(crate) fn is_continue_watching_candidate(item: &WatchProgress) -> bool {
+    if item.position < WATCH_PROGRESS_MIN_RESUME_POSITION_SECS {
+        return false;
+    }
+
     if item.duration <= 0.0 {
         return true;
     }

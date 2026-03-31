@@ -1,6 +1,6 @@
-# Streamy
+# Stremera
 
-Streamy is a Tauri desktop app with a Rust backend and React frontend.
+Stremera is a Tauri desktop app with a Rust backend and React frontend.
 
 ## Development
 

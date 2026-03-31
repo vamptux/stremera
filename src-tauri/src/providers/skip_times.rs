@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 /// A single skippable segment (intro, outro, recap, opening, ending, etc.)
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SkipSegment {
     #[serde(rename = "type")]
     pub type_: String,
@@ -13,6 +13,104 @@ pub struct SkipSegment {
     pub start_time: f64,
     /// Segment end in seconds
     pub end_time: f64,
+}
+
+const MIN_SKIP_SEGMENT_DURATION_SECS: f64 = 1.0;
+const SKIP_SEGMENT_OVERLAP_EPSILON_SECS: f64 = 0.25;
+
+fn normalize_skip_segment_type(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized == "null" || normalized == "undefined" {
+        return None;
+    }
+
+    let normalized = match normalized.as_str() {
+        "opening" => "op",
+        "ending" => "ed",
+        _ => normalized.as_str(),
+    };
+
+    Some(normalized.to_string())
+}
+
+fn normalize_skip_time(value: f64) -> Option<f64> {
+    if !value.is_finite() {
+        return None;
+    }
+
+    Some((value.max(0.0) * 1000.0).round() / 1000.0)
+}
+
+fn normalize_skip_segments(
+    segments: Vec<SkipSegment>,
+    duration_hint: Option<f64>,
+) -> Vec<SkipSegment> {
+    let duration_limit = duration_hint.filter(|value| value.is_finite() && *value > 0.0);
+
+    let mut normalized_segments = segments
+        .into_iter()
+        .filter_map(|segment| {
+            let type_ = normalize_skip_segment_type(&segment.type_)?;
+            let start_time = normalize_skip_time(segment.start_time)?;
+            let end_time = normalize_skip_time(segment.end_time)?;
+
+            if let Some(duration_limit) = duration_limit {
+                if start_time >= duration_limit {
+                    return None;
+                }
+
+                let clamped_end_time = end_time.min(duration_limit);
+                if clamped_end_time - start_time < MIN_SKIP_SEGMENT_DURATION_SECS {
+                    return None;
+                }
+
+                return Some(SkipSegment {
+                    type_,
+                    start_time,
+                    end_time: clamped_end_time,
+                });
+            }
+
+            if end_time - start_time < MIN_SKIP_SEGMENT_DURATION_SECS {
+                return None;
+            }
+
+            Some(SkipSegment {
+                type_,
+                start_time,
+                end_time,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    normalized_segments.sort_by(|left, right| {
+        left.start_time
+            .total_cmp(&right.start_time)
+            .then(left.end_time.total_cmp(&right.end_time))
+            .then_with(|| left.type_.cmp(&right.type_))
+    });
+
+    let mut merged_segments: Vec<SkipSegment> = Vec::with_capacity(normalized_segments.len());
+
+    for mut segment in normalized_segments {
+        if let Some(previous_segment) = merged_segments.last_mut() {
+            if segment.type_ == previous_segment.type_
+                && segment.start_time <= previous_segment.end_time + SKIP_SEGMENT_OVERLAP_EPSILON_SECS
+            {
+                previous_segment.end_time = previous_segment.end_time.max(segment.end_time);
+                continue;
+            }
+
+            segment.start_time = segment.start_time.max(previous_segment.end_time);
+            if segment.end_time - segment.start_time < MIN_SKIP_SEGMENT_DURATION_SECS {
+                continue;
+            }
+        }
+
+        merged_segments.push(segment);
+    }
+
+    merged_segments
 }
 
 pub struct SkipTimesProvider {
@@ -34,7 +132,7 @@ impl SkipTimesProvider {
     pub fn new() -> Self {
         Self {
             client: Client::builder()
-                .user_agent("Streamy/1.0 (+https://github.com/streamy)")
+                .user_agent("Stremera/0.3 (+https://github.com/vamptux/stremera)")
                 .connect_timeout(Duration::from_secs(8))
                 .timeout(Duration::from_secs(15))
                 .pool_idle_timeout(Duration::from_secs(60))
@@ -167,14 +265,17 @@ impl SkipTimesProvider {
             return Vec::new();
         }
 
-        body.results
-            .into_iter()
-            .map(|r| SkipSegment {
-                type_: r.skip_type,
-                start_time: r.interval.start_time,
-                end_time: r.interval.end_time,
-            })
-            .collect()
+        normalize_skip_segments(
+            body.results
+                .into_iter()
+                .map(|r| SkipSegment {
+                    type_: r.skip_type,
+                    start_time: r.interval.start_time,
+                    end_time: r.interval.end_time,
+                })
+                .collect(),
+            Some(episode_length),
+        )
     }
 
     /// Fetch skip/recap/outro segments from the IntroDB API using an IMDb ID, season, and episode.
@@ -245,7 +346,7 @@ impl SkipTimesProvider {
             });
         }
 
-        segments
+        normalize_skip_segments(segments, None)
     }
 }
 
@@ -292,4 +393,87 @@ struct IntroDbSegmentsResponse {
 struct IntroDbSegment {
     start_sec: u32,
     end_sec: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_skip_segments, SkipSegment};
+
+    #[test]
+    fn normalize_skip_segments_clamps_duration_and_merges_adjacent_entries() {
+        let normalized = normalize_skip_segments(
+            vec![
+                SkipSegment {
+                    type_: "opening".to_string(),
+                    start_time: -4.0,
+                    end_time: 15.0,
+                },
+                SkipSegment {
+                    type_: "op".to_string(),
+                    start_time: 14.9,
+                    end_time: 26.0,
+                },
+                SkipSegment {
+                    type_: "ed".to_string(),
+                    start_time: 89.5,
+                    end_time: 120.0,
+                },
+            ],
+            Some(90.0),
+        );
+
+        assert_eq!(
+            normalized,
+            vec![SkipSegment {
+                type_: "op".to_string(),
+                start_time: 0.0,
+                end_time: 26.0,
+            }],
+        );
+    }
+
+    #[test]
+    fn normalize_skip_segments_sorts_and_trims_overlaps_between_types() {
+        let normalized = normalize_skip_segments(
+            vec![
+                SkipSegment {
+                    type_: "recap".to_string(),
+                    start_time: 30.0,
+                    end_time: 60.0,
+                },
+                SkipSegment {
+                    type_: "intro".to_string(),
+                    start_time: 0.0,
+                    end_time: 25.0,
+                },
+                SkipSegment {
+                    type_: "intro".to_string(),
+                    start_time: 24.9,
+                    end_time: 40.0,
+                },
+                SkipSegment {
+                    type_: "outro".to_string(),
+                    start_time: 80.0,
+                    end_time: 79.0,
+                },
+            ],
+            None,
+        );
+
+        assert_eq!(
+            normalized,
+            vec![
+                SkipSegment {
+                    type_: "intro".to_string(),
+                    start_time: 0.0,
+                    end_time: 40.0,
+                },
+                SkipSegment {
+                    type_: "recap".to_string(),
+                    start_time: 40.0,
+                    end_time: 60.0,
+                },
+            ],
+        );
+    }
 }

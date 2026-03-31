@@ -5,6 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 export const APP_UPDATE_STATE_QUERY_KEY = ['app-update-state'] as const;
 export const APP_VERSION_QUERY_KEY = ['appVersion'] as const;
 const APP_UPDATE_STATUS_EVENT = 'app-update-status';
+const LAST_NOTIFIED_VERSION_KEY = 'stremera:last-notified-app-update-version';
 
 export interface AppUpdateHandle {
   version: string;
@@ -33,6 +34,31 @@ export interface AppUpdateState {
 
 let activeInstallPromise: Promise<void> | null = null;
 let activeCheckPromise: Promise<AppUpdateHandle | null> | null = null;
+
+function readLocalStorageValue(key: string): string | null {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalStorageValue(key: string, value: string | null) {
+  if (typeof window === 'undefined') return;
+
+  try {
+    if (value === null) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Ignore storage access failures in restricted/sandboxed contexts.
+  }
+}
 
 function createInitialAppUpdateState(): AppUpdateState {
   const isSupported = isTauriDesktopRuntime();
@@ -72,6 +98,14 @@ export function isTauriDesktopRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
+export function getLastNotifiedAppUpdateVersion(): string | null {
+  return readLocalStorageValue(LAST_NOTIFIED_VERSION_KEY);
+}
+
+export function setLastNotifiedAppUpdateVersion(version: string | null) {
+  writeLocalStorageValue(LAST_NOTIFIED_VERSION_KEY, version);
+}
+
 export async function getCurrentAppVersion(): Promise<string | null> {
   if (!isTauriDesktopRuntime()) return null;
   try {
@@ -85,6 +119,9 @@ export async function checkForAppUpdate(): Promise<AppUpdateHandle | null> {
   if (!isTauriDesktopRuntime()) return null;
 
   const update = await invoke<AppUpdateHandle | null>('check_for_app_update');
+  if (!update) {
+    setLastNotifiedAppUpdateVersion(null);
+  }
   if (!update) return null;
 
   return update;
@@ -151,11 +188,17 @@ export async function installAppUpdate(
   _update: AppUpdateHandle,
   onStatus?: (status: string) => void,
 ): Promise<void> {
+  if (!isTauriDesktopRuntime()) {
+    throw new Error('Application updates are only available inside the packaged desktop app.');
+  }
+
   if (activeInstallPromise) {
     return activeInstallPromise;
   }
 
   activeInstallPromise = (async () => {
+    onStatus?.('Preparing update…');
+
     const unlisten = await listen<{ status?: string }>(APP_UPDATE_STATUS_EVENT, (event) => {
       if (typeof event.payload?.status === 'string' && event.payload.status) {
         onStatus?.(event.payload.status);
@@ -179,6 +222,11 @@ export async function runAppUpdateInstall(
   update?: AppUpdateHandle | null,
   onStatus?: (status: string) => void,
 ): Promise<void> {
+  if (!isTauriDesktopRuntime()) {
+    writeAppUpdateState(queryClient, () => createInitialAppUpdateState());
+    throw new Error('Application updates are only available inside the packaged desktop app.');
+  }
+
   const targetUpdate = update ?? readAppUpdateState(queryClient).update;
 
   if (!targetUpdate) {
@@ -190,6 +238,7 @@ export async function runAppUpdateInstall(
     isSupported: true,
     status: 'installing',
     update: targetUpdate,
+    installStatus: 'Preparing update…',
     errorMessage: null,
   }));
 
@@ -207,13 +256,25 @@ export async function runAppUpdateInstall(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    let recoveredUpdate: AppUpdateHandle | null = null;
+
+    try {
+      recoveredUpdate = await checkForAppUpdate();
+    } catch {
+      recoveredUpdate = null;
+    }
 
     writeAppUpdateState(queryClient, (current) => ({
       ...current,
       isSupported: true,
-      status: current.update ? 'available' : 'error',
+      status: recoveredUpdate ?? current.update ?? targetUpdate ? 'available' : 'error',
+      update: recoveredUpdate ?? current.update ?? targetUpdate,
+      lastCheckedAt: recoveredUpdate ? Date.now() : current.lastCheckedAt,
       installStatus: null,
-      errorMessage: message,
+      errorMessage:
+        recoveredUpdate || current.update
+          ? message
+          : `${message} Run another update check before retrying installation.`,
     }));
 
     throw error;

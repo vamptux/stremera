@@ -139,10 +139,10 @@ export function Downloads() {
   return (
     <div className='min-h-screen pt-16 pb-12 px-4 md:pl-24 md:pr-12 lg:pl-28 space-y-6 animate-in fade-in duration-500'>
       {/* Header */}
-      <div className='flex items-end justify-between border-b border-white/5 pb-4'>
-        <div className='space-y-1'>
+      <div className='flex items-end justify-between pb-4'>
+        <div className='space-y-0.5'>
           <h1 className='text-2xl font-bold tracking-tight text-white'>Downloads</h1>
-          <p className='text-sm text-muted-foreground/80'>
+          <p className='text-[13px] text-zinc-500'>
             Manage your local content and active downloads.
           </p>
         </div>
@@ -185,42 +185,42 @@ export function Downloads() {
       </div>
 
       {/* Stats Cards */}
-      <div className='grid gap-6 md:grid-cols-3'>
-        <Card className='relative overflow-hidden rounded-md border-white/5 bg-zinc-900/40 p-6 backdrop-blur-sm transition-colors hover:bg-zinc-900/60'>
+      <div className='grid gap-4 md:grid-cols-3'>
+        <Card className='relative overflow-hidden rounded-lg border-white/[0.06] bg-white/[0.02] p-5 backdrop-blur-sm transition-colors hover:bg-white/[0.04]'>
           <div className='absolute right-0 top-0 -mt-4 -mr-4 h-24 w-24 rounded-full bg-primary/10 blur-2xl' />
           <div className='flex items-center gap-4 relative'>
-            <div className='flex h-12 w-12 items-center justify-center rounded-md bg-primary/10 text-primary shadow-inner shadow-white/5'>
-              <HardDriveDownload className='h-6 w-6' />
+            <div className='flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary'>
+              <HardDriveDownload className='h-5 w-5' />
             </div>
             <div>
-              <p className='text-sm font-medium text-muted-foreground/80'>Total Storage Used</p>
-              <h2 className='text-2xl font-bold tracking-tight text-white'>
+              <p className='text-xs font-medium text-zinc-500'>Storage Used</p>
+              <h2 className='text-xl font-bold tracking-tight text-white'>
                 {formatBytes(totalUsed)}
               </h2>
             </div>
           </div>
         </Card>
-        <Card className='relative overflow-hidden rounded-md border-white/5 bg-zinc-900/40 p-6 backdrop-blur-sm transition-colors hover:bg-zinc-900/60'>
+        <Card className='relative overflow-hidden rounded-lg border-white/[0.06] bg-white/[0.02] p-5 backdrop-blur-sm transition-colors hover:bg-white/[0.04]'>
           <div className='absolute right-0 top-0 -mt-4 -mr-4 h-24 w-24 rounded-full bg-blue-500/10 blur-2xl' />
           <div className='flex items-center gap-4 relative'>
-            <div className='flex h-12 w-12 items-center justify-center rounded-md bg-blue-500/10 text-blue-500 shadow-inner shadow-white/5'>
-              <Download className='h-6 w-6' />
+            <div className='flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500/10 text-blue-500'>
+              <Download className='h-5 w-5' />
             </div>
             <div>
-              <p className='text-sm font-medium text-muted-foreground/80'>Active Downloads</p>
-              <h2 className='text-2xl font-bold tracking-tight text-white'>{activeCount}</h2>
+              <p className='text-xs font-medium text-zinc-500'>Active</p>
+              <h2 className='text-xl font-bold tracking-tight text-white'>{activeCount}</h2>
             </div>
           </div>
         </Card>
-        <Card className='relative overflow-hidden rounded-md border-white/5 bg-zinc-900/40 p-6 backdrop-blur-sm transition-colors hover:bg-zinc-900/60'>
+        <Card className='relative overflow-hidden rounded-lg border-white/[0.06] bg-white/[0.02] p-5 backdrop-blur-sm transition-colors hover:bg-white/[0.04]'>
           <div className='absolute right-0 top-0 -mt-4 -mr-4 h-24 w-24 rounded-full bg-emerald-500/10 blur-2xl' />
           <div className='flex items-center gap-4 relative'>
-            <div className='flex h-12 w-12 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-500 shadow-inner shadow-white/5'>
-              <CheckCircle2 className='h-6 w-6' />
+            <div className='flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-500'>
+              <CheckCircle2 className='h-5 w-5' />
             </div>
             <div>
-              <p className='text-sm font-medium text-muted-foreground/80'>Completed</p>
-              <h2 className='text-2xl font-bold tracking-tight text-white'>{completedCount}</h2>
+              <p className='text-xs font-medium text-zinc-500'>Completed</p>
+              <h2 className='text-xl font-bold tracking-tight text-white'>{completedCount}</h2>
             </div>
           </div>
         </Card>
@@ -228,28 +228,28 @@ export function Downloads() {
 
       {/* Tabs & List */}
       <Tabs defaultValue='all' value={activeTab} onValueChange={setActiveTab} className='space-y-6'>
-        <TabsList className='bg-zinc-900/50 border border-white/5 p-1'>
+        <TabsList className='bg-white/[0.03] border border-white/[0.06] p-1 rounded-lg'>
           <TabsTrigger
             value='all'
-            className='data-[state=active]:bg-zinc-800 data-[state=active]:text-white'
+            className='rounded-md data-[state=active]:bg-white data-[state=active]:text-black data-[state=active]:shadow-sm'
           >
             All
           </TabsTrigger>
           <TabsTrigger
             value='active'
-            className='data-[state=active]:bg-zinc-800 data-[state=active]:text-white'
+            className='rounded-md data-[state=active]:bg-white data-[state=active]:text-black data-[state=active]:shadow-sm'
           >
             Active
           </TabsTrigger>
           <TabsTrigger
             value='completed'
-            className='data-[state=active]:bg-zinc-800 data-[state=active]:text-white'
+            className='rounded-md data-[state=active]:bg-white data-[state=active]:text-black data-[state=active]:shadow-sm'
           >
             Completed
           </TabsTrigger>
           <TabsTrigger
             value='error'
-            className='data-[state=active]:bg-zinc-800 data-[state=active]:text-white'
+            className='rounded-md data-[state=active]:bg-white data-[state=active]:text-black data-[state=active]:shadow-sm'
           >
             Failed
           </TabsTrigger>
@@ -261,7 +261,7 @@ export function Downloads() {
             {groupedItems.groups.map((group) => (
               <div key={group.id} className='space-y-2'>
                 <div
-                  className='flex items-center gap-2 p-2 rounded-lg bg-zinc-900/40 border border-white/5 cursor-pointer hover:bg-zinc-900/60 transition-colors'
+                  className='flex items-center gap-2 p-2 rounded-lg bg-white/[0.02] border border-white/[0.06] cursor-pointer hover:bg-white/[0.04] transition-colors'
                   onClick={() => setExpandedSeries(expandedSeries === group.id ? null : group.id)}
                 >
                   <Folder className='w-5 h-5 text-blue-400' />
@@ -382,10 +382,10 @@ function DownloadCard({ item }: { item: DownloadItem }) {
 
   return (
     <Card className={cn(
-      'group overflow-hidden rounded-md transition-all duration-200 border hover:border-zinc-700/80',
+      'group overflow-hidden rounded-lg transition-all duration-200 border hover:border-zinc-700/80',
       item.status === 'error'
         ? 'border-red-500/20 bg-red-950/10 hover:bg-red-950/20 hover:border-red-500/30'
-        : 'border-white/[0.04] bg-zinc-900/30 hover:bg-zinc-900/50',
+        : 'border-white/[0.04] bg-white/[0.02] hover:bg-white/[0.04]',
     )}>
       <div className='flex gap-4 p-3'>
         {/* Poster */}
@@ -457,7 +457,7 @@ function DownloadCard({ item }: { item: DownloadItem }) {
               <Button
                 size='icon'
                 variant='ghost'
-                className='h-7 w-7 hover:bg-white/10 rounded-full'
+                className='h-7 w-7 hover:bg-white/10 rounded-md'
                 title='Open file location'
                 onClick={handleOpenFolder}
               >
@@ -470,7 +470,7 @@ function DownloadCard({ item }: { item: DownloadItem }) {
                   <Button
                     size='icon'
                     variant='ghost'
-                    className='h-7 w-7 text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 rounded-full'
+                    className='h-7 w-7 text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 rounded-md'
                     title='Play partially downloaded file'
                     onClick={handlePlay}
                   >
@@ -483,7 +483,7 @@ function DownloadCard({ item }: { item: DownloadItem }) {
                 <Button
                   size='icon'
                   variant='ghost'
-                  className='h-7 w-7 text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10 rounded-full'
+                  className='h-7 w-7 text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10 rounded-md'
                   onClick={handlePlay}
                 >
                   <Play className='h-3.5 w-3.5 fill-current' />
@@ -492,7 +492,7 @@ function DownloadCard({ item }: { item: DownloadItem }) {
                 <Button
                   size='icon'
                   variant='ghost'
-                  className='h-7 w-7 hover:bg-white/10 rounded-full'
+                  className='h-7 w-7 hover:bg-white/10 rounded-md'
                   onClick={() => pauseDownload(item.id)}
                 >
                   <Pause className='h-3.5 w-3.5' />
@@ -502,7 +502,7 @@ function DownloadCard({ item }: { item: DownloadItem }) {
                 <Button
                   size='icon'
                   variant='ghost'
-                  className='h-7 w-7 text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-full'
+                  className='h-7 w-7 text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-md'
                   title='Retry download'
                   onClick={() => resumeDownload(item.id)}
                 >
@@ -512,7 +512,7 @@ function DownloadCard({ item }: { item: DownloadItem }) {
                 <Button
                   size='icon'
                   variant='ghost'
-                  className='h-7 w-7 hover:bg-white/10 rounded-full'
+                  className='h-7 w-7 hover:bg-white/10 rounded-md'
                   title='Resume download'
                   onClick={() => resumeDownload(item.id)}
                 >
@@ -522,7 +522,7 @@ function DownloadCard({ item }: { item: DownloadItem }) {
                 <Button
                   size='icon'
                   variant='ghost'
-                  className='h-7 w-7 text-red-500 hover:bg-red-500/10 rounded-full'
+                  className='h-7 w-7 text-red-500 hover:bg-red-500/10 rounded-md'
                   title={item.error || 'Error'}
                 >
                   <AlertCircle className='h-3.5 w-3.5' />
@@ -534,7 +534,7 @@ function DownloadCard({ item }: { item: DownloadItem }) {
                   <Button
                     size='icon'
                     variant='ghost'
-                    className='h-7 w-7 hover:bg-white/10 rounded-full'
+                    className='h-7 w-7 hover:bg-white/10 rounded-md'
                   >
                     <MoreVertical className='h-3.5 w-3.5' />
                   </Button>

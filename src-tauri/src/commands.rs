@@ -14,52 +14,47 @@ use tauri::{command, AppHandle, Manager, State};
 use tauri_plugin_store::StoreExt;
 
 pub(crate) mod app_update_commands;
-mod history_helpers;
 pub(crate) mod browse_commands;
 pub(crate) mod config_commands;
 mod config_store;
-mod startup_migrations;
 pub(crate) mod download_commands;
-pub(crate) mod library_commands;
-mod list_helpers;
-pub(crate) mod list_commands;
 mod episode_navigation;
+mod history_helpers;
+pub(crate) mod library_commands;
+pub(crate) mod list_commands;
+mod list_helpers;
 pub(crate) mod media_commands;
 pub(crate) mod next_playback_commands;
+pub(crate) mod playback_preferences_commands;
 pub(crate) mod playback_state;
 pub(crate) mod playback_state_commands;
-pub(crate) mod playback_preferences_commands;
-pub(crate) mod stream_commands;
-mod stream_resolver;
-mod stream_fetcher;
-pub(crate) mod watch_history_commands;
-pub(crate) mod watch_status_commands;
+mod resume_store;
+mod startup_migrations;
 mod store_helpers;
+pub(crate) mod stream_commands;
 mod stream_coordinator;
+mod stream_fetcher;
+mod stream_resolver;
 mod streaming_helpers;
 #[cfg(test)]
 mod tests;
+pub(crate) mod watch_history_commands;
+pub(crate) mod watch_status_commands;
 
-use history_helpers::{
-    build_history_key, sanitize_watch_progress,
-};
-pub(crate) use startup_migrations::run_startup_migrations;
+use config_store::get_effective_rd_token;
+use history_helpers::{build_history_key, sanitize_watch_progress};
 use list_helpers::{
     list_item_store_key, list_meta_key, load_lists_order, UserList, UserListWithItems,
     LISTS_ORDER_KEY,
 };
 use playback_state::PlaybackStateService;
-use config_store::{
-    get_effective_rd_token,
-};
+pub(crate) use startup_migrations::run_startup_migrations;
 use store_helpers::{
     library_item_key, load_library_map, load_or_migrate_library_index,
     load_or_migrate_watch_status_index, load_watch_statuses_map, normalize_library_item,
     watch_status_item_key,
 };
-use streaming_helpers::{
-    has_playable_stream_source, is_http_url, is_placeholder_no_stream,
-};
+use streaming_helpers::{has_playable_stream_source, is_http_url, is_placeholder_no_stream};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WatchProgress {
@@ -170,28 +165,6 @@ pub struct PlaybackLanguagePreferences {
     pub preferred_subtitle_language: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct PlaybackSessionTouchRequest {
-    pub id: String,
-    pub type_: String,
-    pub season: Option<u32>,
-    pub episode: Option<u32>,
-    pub absolute_season: Option<u32>,
-    pub absolute_episode: Option<u32>,
-    pub stream_season: Option<u32>,
-    pub stream_episode: Option<u32>,
-    pub aniskip_episode: Option<u32>,
-    pub title: String,
-    pub stream_url: Option<String>,
-    pub stream_format: Option<String>,
-    pub stream_lookup_id: Option<String>,
-    pub stream_key: Option<String>,
-    pub source_name: Option<String>,
-    pub stream_family: Option<String>,
-    pub position: Option<f64>,
-    pub duration: Option<f64>,
-}
-
 #[command]
 pub async fn get_trending_movies(
     provider: State<'_, Cinemeta>,
@@ -259,14 +232,23 @@ pub async fn get_cinemeta_discover(
 pub async fn search_media(
     provider: State<'_, Cinemeta>,
     query: String,
+    media_type: Option<String>,
 ) -> Result<Vec<MediaItem>, String> {
     let Some(query) = normalize_query(&query) else {
         return Ok(Vec::new());
     };
 
-    provider.search(query).await
-}
+    let media_type = match media_type.as_deref() {
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "movie" => Some("movie"),
+            "series" => Some("series"),
+            _ => return Err("Invalid media type for search. Expected movie or series.".to_string()),
+        },
+        None => None,
+    };
 
+    provider.search_with_media_type(&query, media_type).await
+}
 
 #[command]
 pub async fn get_rd_user(
@@ -450,7 +432,10 @@ pub async fn get_data_stats(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
 ) -> Result<DataStats, String> {
-    let history_count = playback_state.load_resume_entries(&app).unwrap_or_default().len();
+    let history_count = playback_state
+        .load_resume_entries(&app)
+        .unwrap_or_default()
+        .len();
 
     let library_store = app.store(LIBRARY_STORE_FILE).map_err(|e| e.to_string())?;
     let library_count = load_library_map(&library_store)?.len();
@@ -821,10 +806,7 @@ pub fn open_folder(app: AppHandle, path: String) -> Result<(), String> {
 
         let explorer_result = if canonical_target.is_file() {
             std::process::Command::new("explorer.exe")
-                .arg(format!(
-                    "/select,{}",
-                    canonical_target.to_string_lossy()
-                ))
+                .arg(format!("/select,{}", canonical_target.to_string_lossy()))
                 .spawn()
         } else {
             std::process::Command::new("explorer.exe")

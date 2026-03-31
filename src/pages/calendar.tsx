@@ -258,22 +258,22 @@ export function Calendar() {
   }
 
   return (
-    <div className="min-h-screen pt-24 pb-20 px-4 md:px-8 container mx-auto animate-in fade-in duration-500">
-      <div className="flex flex-col md:flex-row items-center justify-between mb-8 gap-4">
+    <div className="min-h-screen pt-20 pb-20 px-4 md:px-8 md:pl-24 lg:pl-28 container mx-auto animate-in fade-in duration-500">
+      <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-6 gap-3">
         <div>
-          <h1 className="text-4xl font-black text-white tracking-tighter drop-shadow-lg">Release Schedule</h1>
-          <p className="text-zinc-400 text-base mt-1 font-light">Track new episodes from your library</p>
+          <h1 className="text-2xl font-bold text-white tracking-tight">Release Schedule</h1>
+          <p className="text-zinc-500 text-[13px] mt-0.5">Track new episodes from your library</p>
         </div>
 
-        <div className="flex items-center gap-2 bg-white/[0.04] p-1.5 rounded-xl border border-white/[0.08] backdrop-blur-md shadow-lg">
-          <Button variant="ghost" size="icon" onClick={handlePrevMonth} className="hover:bg-white/10 rounded-lg">
-            <ChevronLeft className="w-4 h-4" />
+        <div className="flex items-center gap-1 bg-white/[0.03] p-0.5 rounded-lg border border-white/[0.06]">
+          <Button variant="ghost" size="icon" onClick={handlePrevMonth} className="h-7 w-7 hover:bg-white/[0.06] rounded-md">
+            <ChevronLeft className="w-3.5 h-3.5" />
           </Button>
-          <div className="px-4 font-bold text-sm min-w-[140px] text-center">
+          <div className="px-3 font-semibold text-[13px] min-w-[130px] text-center text-zinc-200">
             {format(currentMonth, 'MMMM yyyy')}
           </div>
-          <Button variant="ghost" size="icon" onClick={handleNextMonth} className="hover:bg-white/10 rounded-lg">
-            <ChevronRight className="w-4 h-4" />
+          <Button variant="ghost" size="icon" onClick={handleNextMonth} className="h-7 w-7 hover:bg-white/[0.06] rounded-md">
+            <ChevronRight className="w-3.5 h-3.5" />
           </Button>
           <Button
             variant="ghost"
@@ -281,10 +281,10 @@ export function Calendar() {
             onClick={handleToday}
             disabled={isCurrentMonthView}
             className={cn(
-              "ml-2 text-xs font-bold rounded-lg",
+              "ml-0.5 text-[11px] font-semibold rounded-md h-7 px-2.5",
               isCurrentMonthView
-                ? "bg-white/10 text-white border border-white/15 cursor-default"
-                : "bg-white/5 hover:bg-white/10"
+                ? "bg-white/[0.06] text-zinc-400 cursor-default"
+                : "text-zinc-400 hover:text-white hover:bg-white/[0.06]"
             )}
           >
             Today
@@ -293,11 +293,11 @@ export function Calendar() {
       </div>
 
       {schedulableItems.length === 0 && (
-        <div className="mb-8 rounded-2xl border border-white/5 bg-zinc-900/40 p-6 text-center">
-          <h2 className="text-lg font-semibold text-white">Your schedule is empty</h2>
-          <p className="text-sm text-zinc-400 mt-1">Add shows to your library to track upcoming episodes.</p>
+        <div className="mb-6 rounded-xl border border-white/[0.05] bg-white/[0.02] p-5 text-center">
+          <h2 className="text-[15px] font-semibold text-white">Your schedule is empty</h2>
+          <p className="text-[13px] text-zinc-500 mt-1">Add shows to your library to track upcoming episodes.</p>
           <Link to="/profile" className="inline-flex">
-            <Button size="sm" className="mt-4">Go to Library</Button>
+            <Button size="sm" className="mt-3 h-8 text-[12px]">Go to Library</Button>
           </Link>
         </div>
       )}
@@ -309,38 +309,35 @@ export function Calendar() {
         </div>
       )}
 
-      <div className="mb-8 rounded-3xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-sm p-4 md:p-6 shadow-xl">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-xl font-bold text-white tracking-tight">Upcoming</h2>
-            <p className="text-xs text-zinc-400 font-medium uppercase tracking-wider mt-0.5">Next 14 days</p>
+      <div className="mb-6 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 md:p-5">
+        <div className="flex items-center justify-between mb-3">
+          <div className='flex items-center gap-2.5'>
+            <h2 className="text-[15px] font-semibold text-white tracking-tight">Upcoming</h2>
+            <span className='text-[11px] text-zinc-600 font-medium'>Next 14 days</span>
           </div>
         </div>
         {upcomingEvents.length === 0 ? (
-          <div className="text-sm text-zinc-500 py-4">No upcoming episodes in the next two weeks.</div>
+          <div className="text-[13px] text-zinc-600 py-3">No upcoming episodes in the next two weeks.</div>
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             {upcomingEvents.map(event => (
               <Link
                 key={`${event.mediaId}-${event.id}`}
                 to={`/details/${event.type === 'movie' ? 'movie' : 'series'}/${event.mediaId}`}
                 state={event.type === 'episode' ? { from, season: event.season, episode: event.episode } : { from }}
-                className="group rounded-xl border border-white/[0.08] bg-white/[0.04] p-3 hover:bg-white/[0.08] hover:border-white/[0.14] transition-all duration-300 hover:scale-[1.02] shadow-sm hover:shadow-lg"
+                className="group rounded-lg border border-white/[0.06] bg-white/[0.02] p-2.5 hover:bg-white/[0.05] hover:border-white/[0.1] transition-all duration-200"
               >
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-14 rounded-md overflow-hidden bg-black/40 shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-12 rounded-md overflow-hidden bg-black/30 shrink-0">
                     {event.poster && <img src={event.poster} className="w-full h-full object-cover" />}
                   </div>
                   <div className="min-w-0">
-                    <div className="text-xs text-zinc-400">{format(event.date, 'MMM d')}</div>
-                    <div className="text-sm font-semibold text-white truncate">{event.seriesTitle}</div>
+                    <div className="text-[10px] text-zinc-500">{format(event.date, 'MMM d')}</div>
+                    <div className="text-[12px] font-semibold text-white truncate">{event.seriesTitle}</div>
                     {event.type === 'episode' ? (
-                      <>
-                        <div className="text-xs text-primary">S{event.season} E{event.episode}</div>
-                        <div className="text-xs text-zinc-500 truncate">{event.title}</div>
-                      </>
+                      <div className="text-[10px] text-zinc-400">S{event.season} E{event.episode}</div>
                     ) : (
-                      <div className="text-xs text-amber-400 font-medium">Movie</div>
+                      <div className="text-[10px] text-amber-400/80 font-medium">Movie</div>
                     )}
                   </div>
                 </div>
@@ -350,12 +347,11 @@ export function Calendar() {
         )}
       </div>
 
-      {/* Calendar Grid */}
-      <div className="bg-white/[0.03] backdrop-blur-md rounded-3xl border border-white/[0.08] overflow-hidden shadow-2xl">
+      <div className="bg-white/[0.02] rounded-xl border border-white/[0.06] overflow-hidden">
           {/* Days Header */}
-          <div className="grid grid-cols-7 border-b border-white/[0.07] bg-white/[0.04]">
+          <div className="grid grid-cols-7 border-b border-white/[0.05] bg-white/[0.02]">
               {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => (
-                  <div key={day} className="py-4 text-center text-[10px] font-bold text-zinc-500 uppercase tracking-widest">
+                  <div key={day} className="py-2.5 text-center text-[10px] font-semibold text-zinc-600 uppercase tracking-widest">
                       {day}
                   </div>
               ))}
@@ -369,54 +365,54 @@ export function Calendar() {
                   const isCurrentMonth = isSameMonth(day, currentMonth);
 
                   return (
-                      <div 
-                          key={day.toString()} 
+                      <div
+                          key={day.toString()}
                           className={cn(
-                              "min-h-[120px] p-2 border-b border-r border-white/5 relative group transition-colors hover:bg-white/[0.03]",
-                              !isCurrentMonth && "bg-black/20 opacity-30",
-                              dayIdx % 7 === 6 && "border-r-0" // Remove right border for last column
+                              "min-h-[100px] p-1.5 border-b border-r border-white/[0.04] relative group transition-colors hover:bg-white/[0.02]",
+                              !isCurrentMonth && "bg-black/10 opacity-25",
+                              dayIdx % 7 === 6 && "border-r-0"
                           )}
                       >
                           <div className={cn(
-                              "text-xs font-medium mb-2 w-7 h-7 flex items-center justify-center rounded-full transition-all duration-300",
-                              isToday ? "bg-primary text-primary-foreground font-bold shadow-[0_0_15px_rgba(var(--primary),0.5)] scale-110" : "text-zinc-500 group-hover:text-zinc-300"
+                              "text-[11px] font-medium mb-1.5 w-6 h-6 flex items-center justify-center rounded-md transition-colors",
+                              isToday ? "bg-white text-black font-bold" : "text-zinc-600 group-hover:text-zinc-400"
                           )}>
                               {format(day, 'd')}
                           </div>
 
-                          <div className="space-y-1.5">
+                          <div className="space-y-1">
                                 {dayEvents.map(event => (
                                   <Popover key={`${event.mediaId}-${event.id}-${event.season ?? 0}-${event.episode ?? 0}`}>
                                       <PopoverTrigger asChild>
-                                          <div className="cursor-pointer text-[10px] bg-white/[0.06] hover:bg-white/[0.1] border border-white/[0.08] hover:border-white/[0.15] rounded-md px-1.5 py-1 truncate transition-all duration-200 flex items-center gap-1.5 hover:shadow-md">
+                                          <div className="cursor-pointer text-[9px] bg-white/[0.04] hover:bg-white/[0.07] border border-white/[0.06] hover:border-white/[0.1] rounded-md px-1.5 py-0.5 truncate transition-colors duration-150 flex items-center gap-1">
                                               {event.poster && (
-                                                  <div className="w-3 h-4 bg-zinc-900 rounded-[2px] overflow-hidden shrink-0">
-                                                      <img src={event.poster} className="w-full h-full object-cover opacity-80" />
+                                                  <div className="w-2.5 h-3.5 bg-zinc-900 rounded-[2px] overflow-hidden shrink-0">
+                                                      <img src={event.poster} className="w-full h-full object-cover opacity-70" />
                                                   </div>
                                               )}
-                                              <span className="truncate text-zinc-400 group-hover:text-zinc-200 font-medium">{event.seriesTitle}</span>
+                                              <span className="truncate text-zinc-500 font-medium">{event.seriesTitle}</span>
                                           </div>
                                       </PopoverTrigger>
-                                      <PopoverContent className="w-80 p-0 bg-zinc-950/90 backdrop-blur-xl border-white/10 text-white shadow-2xl" align="start">
-                                          <div className="flex gap-3 p-3">
-                                              <div className="w-20 shrink-0 aspect-[2/3] bg-black/50 rounded-md overflow-hidden shadow-inner">
+                                      <PopoverContent className="w-72 p-0 bg-zinc-950/95 backdrop-blur-xl border-white/[0.08] text-white shadow-xl rounded-lg" align="start">
+                                          <div className="flex gap-2.5 p-2.5">
+                                              <div className="w-16 shrink-0 aspect-[2/3] bg-black/30 rounded-md overflow-hidden">
                                                   {event.poster && <img src={event.poster} className="w-full h-full object-cover" />}
                                               </div>
                                               <div className="flex-1 min-w-0">
-                                                  <h4 className="font-bold text-sm leading-tight mb-1">{event.seriesTitle}</h4>
+                                                  <h4 className="font-semibold text-[13px] leading-tight mb-1">{event.seriesTitle}</h4>
                                                   {event.type === 'episode' ? (
                                                     <>
-                                                      <p className="text-xs text-primary font-medium mb-1">S{event.season} E{event.episode}</p>
-                                                      <p className="text-xs text-zinc-400 line-clamp-2 mb-2">{event.title}</p>
+                                                      <p className="text-[11px] text-zinc-400 font-medium mb-0.5">S{event.season} E{event.episode}</p>
+                                                      <p className="text-[11px] text-zinc-500 line-clamp-2 mb-2">{event.title}</p>
                                                     </>
                                                   ) : (
-                                                    <p className="text-xs text-amber-400 font-medium mb-2">Upcoming Movie</p>
+                                                    <p className="text-[11px] text-amber-400/80 font-medium mb-2">Upcoming Movie</p>
                                                   )}
-                                                  <Link 
-                                                      to={`/details/${event.type === 'movie' ? 'movie' : 'series'}/${event.mediaId}`} 
+                                                  <Link
+                                                      to={`/details/${event.type === 'movie' ? 'movie' : 'series'}/${event.mediaId}`}
                                                       state={event.type === 'episode' ? { from, season: event.season, episode: event.episode } : { from }}
                                                   >
-                                                      <Button size="sm" variant="secondary" className="w-full h-7 text-xs">View Details</Button>
+                                                      <Button size="sm" variant="secondary" className="w-full h-6 text-[11px] rounded-md">View Details</Button>
                                                   </Link>
                                               </div>
                                           </div>

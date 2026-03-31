@@ -1,7 +1,7 @@
 use super::{
-    AnimeCharacterProfile, AnimeProductionCompanyProfile, AnimeStaffProfile,
-    AnimeStreamingPlatformProfile, AnimeSupplementalMetadata, Episode, MediaDetails, MediaItem,
-    Trailer, build_provider_http_client,
+    build_provider_http_client, AnimeCharacterProfile, AnimeProductionCompanyProfile,
+    AnimeStaffProfile, AnimeStreamingPlatformProfile, AnimeSupplementalMetadata, Episode,
+    MediaDetails, MediaItem, Trailer,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

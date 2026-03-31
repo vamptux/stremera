@@ -120,7 +120,7 @@ pub mod kitsu;
 pub mod netflix;
 pub mod realdebrid;
 pub mod skip_times;
-pub mod stremio_addon;
+pub mod addons;
 
 pub(crate) fn build_provider_http_client(max_idle_per_host: Option<usize>) -> Client {
     let mut builder = Client::builder()

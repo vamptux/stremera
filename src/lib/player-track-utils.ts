@@ -194,6 +194,28 @@ export function normalizeTrackList(rawTracks: unknown): Track[] {
   });
 }
 
+export function areTrackListsEqual(left: readonly Track[], right: readonly Track[]): boolean {
+  if (left.length !== right.length) return false;
+
+  for (let index = 0; index < left.length; index += 1) {
+    const leftTrack = left[index];
+    const rightTrack = right[index];
+
+    if (
+      leftTrack.id !== rightTrack.id ||
+      leftTrack.type !== rightTrack.type ||
+      leftTrack.lang !== rightTrack.lang ||
+      leftTrack.title !== rightTrack.title ||
+      !!leftTrack.selected !== !!rightTrack.selected ||
+      !!leftTrack.external !== !!rightTrack.external
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 export function doesTrackSelectionMatch(
   tracks: Track[],
   type: 'audio' | 'sub',

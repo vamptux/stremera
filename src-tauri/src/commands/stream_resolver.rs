@@ -57,16 +57,12 @@ async fn resolve_final_direct_url(direct_url: &str) -> Result<String, String> {
         {
             Ok(resp.url().to_string())
         }
-        Ok(resp) => {
-            Err(format!(
-                "{}; range probe returned HTTP {}",
-                head_error,
-                resp.status().as_u16()
-            ))
-        }
-        Err(error) => {
-            Err(format!("{}; range probe failed: {}", head_error, error))
-        }
+        Ok(resp) => Err(format!(
+            "{}; range probe returned HTTP {}",
+            head_error,
+            resp.status().as_u16()
+        )),
+        Err(error) => Err(format!("{}; range probe failed: {}", head_error, error)),
     }
 }
 
@@ -257,7 +253,10 @@ pub(crate) async fn resolve_stream_inner(
     .await
     .map_err(|error| {
         if is_auth_error(&error) {
-            format!("Real-Debrid Auth Error while fetching torrent info: {}", error)
+            format!(
+                "Real-Debrid Auth Error while fetching torrent info: {}",
+                error
+            )
         } else if is_transient_rd_error(&error) {
             "Temporary Real-Debrid error while loading torrent info. Please retry.".to_string()
         } else {
@@ -350,7 +349,10 @@ pub(crate) async fn resolve_stream_inner(
                     );
                 }
 
-                return Err(format!("Failed while waiting for Real-Debrid links: {}", error));
+                return Err(format!(
+                    "Failed while waiting for Real-Debrid links: {}",
+                    error
+                ));
             }
         };
 

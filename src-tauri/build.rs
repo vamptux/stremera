@@ -1,5 +1,7 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=tauri.conf.json");
+    println!("cargo:rerun-if-changed=icons");
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     if target_os == "windows" {

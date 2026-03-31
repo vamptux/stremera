@@ -79,13 +79,18 @@ pub async fn install_app_update(
     let progress_app = app.clone();
     let finish_app = app.clone();
     let mut started = false;
+    let mut downloaded_bytes = 0_u64;
+    let mut last_reported_bucket = None::<u64>;
 
     update
         .download_and_install(
             move |chunk_length, content_length| {
+                downloaded_bytes = downloaded_bytes.saturating_add(chunk_length as u64);
+
                 if !started {
                     started = true;
                     let started_message = content_length
+                        .filter(|length| *length > 0)
                         .map(|length| {
                             format!(
                                 "Downloading update ({} MB)…",
@@ -94,8 +99,25 @@ pub async fn install_app_update(
                         })
                         .unwrap_or_else(|| "Downloading update…".to_string());
                     emit_status(&progress_app, started_message);
-                } else if chunk_length > 0 {
-                    emit_status(&progress_app, "Downloading update…");
+                }
+
+                if let Some(total_length) = content_length.filter(|length| *length > 0) {
+                    let clamped_downloaded = downloaded_bytes.min(total_length);
+                    let percent = clamped_downloaded.saturating_mul(100) / total_length;
+                    let bucket = percent / 5;
+
+                    if last_reported_bucket != Some(bucket) {
+                        last_reported_bucket = Some(bucket);
+                        emit_status(
+                            &progress_app,
+                            format!(
+                                "Downloading update… {}% ({:.1}/{:.1} MB)",
+                                percent,
+                                clamped_downloaded as f64 / 1024.0 / 1024.0,
+                                total_length as f64 / 1024.0 / 1024.0
+                            ),
+                        );
+                    }
                 }
             },
             move || {

@@ -42,7 +42,10 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { buildHistoryPlaybackPlan } from '@/lib/history-playback';
+import {
+  buildHistoryPlaybackPlan,
+  getHistoryPlaybackFallbackNotice,
+} from '@/lib/history-playback';
 
 const ACCENT_PRESETS = [
   { color: '#ffffff', label: 'White' },
@@ -195,11 +198,11 @@ export function Profile() {
         />
       </div>
 
-      <div className='container max-w-7xl mx-auto pt-20 pb-12 px-4 sm:px-6 lg:px-8 space-y-8 relative z-10'>
+        <div className='container max-w-7xl mx-auto pt-20 pb-12 px-4 sm:px-6 md:pl-24 lg:px-8 lg:pl-28 space-y-8 relative z-10'>
         {/* Header */}
         <div className='animate-in fade-in slide-in-from-bottom-2 duration-300'>
           {/* Glass header card */}
-          <div className='relative rounded-2xl border border-white/[0.07] bg-white/[0.025] backdrop-blur-sm overflow-hidden px-6 py-5'>
+          <div className='relative rounded-2xl border border-white/[0.06] bg-white/[0.02] backdrop-blur-sm overflow-hidden px-6 py-6'>
             {/* Subtle top accent line */}
             <div
               className='absolute inset-x-0 top-0 h-px pointer-events-none transition-colors duration-700'
@@ -212,7 +215,7 @@ export function Profile() {
               {/* Avatar + Identity */}
               <div className='flex items-center gap-5'>
                 <div className='relative flex-shrink-0'>
-                  <Avatar className='h-20 w-20 rounded-full border-2 border-white/10 ring-1 ring-white/10 shadow-xl relative'>
+                  <Avatar className='h-20 w-20 rounded-full border border-white/[0.08] ring-1 ring-white/[0.06] shadow-xl relative'>
                     <AvatarFallback
                       className='text-2xl font-black transition-colors duration-300'
                       style={{ backgroundColor: `${accentColor}22`, color: accentColor }}
@@ -266,7 +269,7 @@ export function Profile() {
         {/* Tabs */}
         <Tabs value={activeTab} onValueChange={setActiveTab} className='space-y-6'>
           <div className='flex items-center gap-3 flex-wrap'>
-            <TabsList className='bg-zinc-900/60 border border-white/5 p-1 rounded-xl h-auto inline-flex gap-0.5'>
+            <TabsList className='bg-white/[0.03] border border-white/[0.06] p-1 rounded-xl h-auto inline-flex gap-0.5'>
               {['library', 'lists', 'history', 'continue-watching'].map((tab) => {
                 const icons: Record<string, React.ReactNode> = {
                   library: <Library className='w-3 h-3' />,
@@ -285,7 +288,7 @@ export function Profile() {
                   <TabsTrigger
                     key={tab}
                     value={tab}
-                    className='px-3.5 py-1.5 rounded-lg text-xs font-semibold data-[state=active]:bg-white/10 data-[state=active]:text-white text-zinc-500 transition-all data-[state=active]:shadow-none flex items-center gap-1.5 hover:text-zinc-300'
+                    className='px-3.5 py-1.5 rounded-lg text-xs font-semibold data-[state=active]:bg-white data-[state=active]:text-black data-[state=active]:shadow-sm text-zinc-500 transition-all data-[state=active]:shadow-none flex items-center gap-1.5 hover:text-zinc-300'
                   >
                     {icons[tab]}
                     <span>{labels[tab]}</span>
@@ -774,9 +777,8 @@ function HistoryListRow({ item }: { item: WatchProgress }) {
     try {
       const plan = await buildHistoryPlaybackPlan(item, from);
       if (plan.kind === 'details') {
-        toast.info('Episode context missing', {
-          description: 'Opening details so you can select the episode to continue.',
-        });
+        const notice = getHistoryPlaybackFallbackNotice(plan.reason, 'open-details');
+        toast.info(notice.title, { description: notice.description });
         navigate(plan.target, { state: plan.state });
         return;
       }
@@ -1162,9 +1164,8 @@ function HistoryItem({
     try {
       const plan = await buildHistoryPlaybackPlan(item, from);
       if (plan.kind === 'details') {
-        toast.info('Episode context missing', {
-          description: 'Opening details so you can select the episode to continue.',
-        });
+        const notice = getHistoryPlaybackFallbackNotice(plan.reason, 'open-details');
+        toast.info(notice.title, { description: notice.description });
         navigate(plan.target, { state: plan.state });
         return;
       }

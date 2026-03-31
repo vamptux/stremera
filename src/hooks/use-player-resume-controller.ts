@@ -5,6 +5,18 @@ import { api } from '@/lib/api';
 const RESUME_SEEK_MAX_ATTEMPTS = 6;
 const RESUME_SEEK_RETRY_DELAY_MS = 220;
 const RESUME_SEEK_SETTLE_TOLERANCE_SECS = 2;
+const RESUME_FETCH_UPGRADE_MIN_DELTA_SECS = 8;
+
+function normalizeResumeTime(value?: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function hasResumeReadinessSignal(currentTime: number, duration: number): boolean {
+  return (
+    (Number.isFinite(duration) && duration > 0) ||
+    (Number.isFinite(currentTime) && currentTime > 0)
+  );
+}
 
 function formatResumeTime(seconds: number) {
   const whole = Math.max(0, Math.floor(seconds));
@@ -12,9 +24,10 @@ function formatResumeTime(seconds: number) {
   const minutes = Math.floor((whole % 3600) / 60);
   const remainingSeconds = Math.floor(whole % 60);
 
-  return `${hours.toString().padStart(2, '0')}:${minutes
-    .toString()
-    .padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
+  }
+  return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
 }
 
 interface UsePlayerResumeControllerArgs {
@@ -111,6 +124,8 @@ export function usePlayerResumeController({
 
   const applyResumeIfReady = useCallback(async () => {
     const resumeTime = resumeTimeRef.current || initialTimeRef.current;
+    const currentTime = currentTimeRef.current;
+    const durationValue = durationRef.current;
 
     if (resumeAppliedRef.current) {
       await releaseResumePause();
@@ -123,14 +138,18 @@ export function usePlayerResumeController({
       return;
     }
 
-    const durationValue = durationRef.current;
     if (durationValue > 0 && resumeTime >= Math.max(5, durationValue - 5)) {
       await finalizeResume(resumeTime, false);
       return;
     }
 
+    if (!hasResumeReadinessSignal(currentTime, durationValue)) {
+      scheduleResumeRetry();
+      return;
+    }
+
     const satisfiedResumeTime = Math.max(0, resumeTime - RESUME_SEEK_SETTLE_TOLERANCE_SECS);
-    if (currentTimeRef.current >= satisfiedResumeTime) {
+    if (currentTime >= satisfiedResumeTime) {
       await finalizeResume(resumeTime, true);
       return;
     }
@@ -176,28 +195,25 @@ export function usePlayerResumeController({
   }, [applyResumeIfReady]);
 
   useEffect(() => {
+    const normalizedStartTime = normalizeResumeTime(startTime);
+
+    resumeTimeRef.current = normalizedStartTime;
+    initialTimeRef.current = normalizedStartTime;
     resumeAppliedRef.current = false;
     resumeSeekAttemptsRef.current = 0;
     resumeSeekInFlightRef.current = false;
     resumePausePendingRef.current = false;
     resumeOsdShownRef.current = false;
     clearResumeRetryTimer();
-  }, [activeStreamUrl, clearResumeRetryTimer]);
 
-  useEffect(() => {
-    if (typeof startTime !== 'number' || startTime <= 0) {
-      return;
-    }
-
-    resumeTimeRef.current = startTime;
-    initialTimeRef.current = startTime;
-    resumeAppliedRef.current = false;
-    resumeOsdShownRef.current = false;
-
-    if (activeStreamUrl && (durationRef.current > 0 || currentTimeRef.current > 0)) {
+    if (
+      normalizedStartTime > 5 &&
+      activeStreamUrl &&
+      hasResumeReadinessSignal(currentTimeRef.current, durationRef.current)
+    ) {
       void applyResumeIfReadyRef.current();
     }
-  }, [activeStreamUrl, currentTimeRef, durationRef, startTime]);
+  }, [activeStreamUrl, clearResumeRetryTimer, currentTimeRef, durationRef, startTime]);
 
   useEffect(() => {
     if (!mediaType || !mediaId || mediaId === 'local') {
@@ -214,7 +230,11 @@ export function usePlayerResumeController({
         }
 
         const candidate = progress.position;
-        if (candidate > (resumeTimeRef.current || 0)) {
+        const currentResume = resumeTimeRef.current || 0;
+        const shouldUpgradeResume =
+          currentResume <= 0 || candidate >= currentResume + RESUME_FETCH_UPGRADE_MIN_DELTA_SECS;
+
+        if (shouldUpgradeResume) {
           resumeTimeRef.current = candidate;
           resumeAppliedRef.current = false;
           resumeOsdShownRef.current = false;
@@ -224,13 +244,22 @@ export function usePlayerResumeController({
           }
         }
 
-        initialTimeRef.current = resumeTimeRef.current;
+        initialTimeRef.current = Math.max(initialTimeRef.current, resumeTimeRef.current);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [activeStreamUrl, absoluteEpisode, absoluteSeason, currentTimeRef, durationRef, mediaId, mediaType]);
+  }, [
+    activeStreamUrl,
+    absoluteEpisode,
+    absoluteSeason,
+    currentTimeRef,
+    durationRef,
+    mediaId,
+    mediaType,
+    startTime,
+  ]);
 
   return {
     applyResumeIfReady,

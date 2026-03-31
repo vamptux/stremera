@@ -203,6 +203,33 @@ fn retry_delay(attempt: u32) -> Duration {
     Duration::from_millis(INITIAL_DOWNLOAD_RETRY_DELAY_MS.saturating_mul(1u64 << exponent))
 }
 
+fn normalize_global_bandwidth_limit(limit: Option<u64>) -> Option<u64> {
+    limit.filter(|value| *value > 0)
+}
+
+fn reserve_bandwidth_slot(
+    next_available_at: &mut Instant,
+    bytes: u64,
+    bytes_per_second: u64,
+) -> Duration {
+    if bytes == 0 || bytes_per_second == 0 {
+        return Duration::ZERO;
+    }
+
+    let now = Instant::now();
+    if *next_available_at < now {
+        *next_available_at = now;
+    }
+
+    let scheduled_start = *next_available_at;
+    let reservation = Duration::from_secs_f64(bytes as f64 / bytes_per_second as f64);
+    *next_available_at += reservation;
+
+    scheduled_start
+        .checked_duration_since(now)
+        .unwrap_or(Duration::ZERO)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum DownloadStatus {
@@ -248,10 +275,33 @@ pub struct DownloadProgressEvent {
     pub status: DownloadStatus,
 }
 
+struct SharedBandwidthLimiter {
+    next_available_at: Mutex<Instant>,
+}
+
+impl SharedBandwidthLimiter {
+    fn new() -> Self {
+        Self {
+            next_available_at: Mutex::new(Instant::now()),
+        }
+    }
+
+    async fn reserve(&self, bytes: u64, bytes_per_second: u64) -> Duration {
+        let mut next_available_at = self.next_available_at.lock().await;
+        reserve_bandwidth_slot(&mut next_available_at, bytes, bytes_per_second)
+    }
+
+    async fn reset(&self) {
+        let mut next_available_at = self.next_available_at.lock().await;
+        *next_available_at = Instant::now();
+    }
+}
+
 pub struct DownloadManager {
     downloads: Arc<Mutex<HashMap<String, DownloadItem>>>,
     abort_handles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     bandwidth_limit: Arc<Mutex<Option<u64>>>, // bytes per second, global limit
+    global_bandwidth_limiter: Arc<SharedBandwidthLimiter>,
     /// Serialises concurrent disk writes so a slow save from task A can never
     /// be overwritten by a stale snapshot from task B that serialised earlier.
     save_lock: Arc<Mutex<()>>,
@@ -270,6 +320,16 @@ struct DownloadStateUpdate {
     total_size: Option<u64>,
     speed: Option<u64>,
     progress: Option<f64>,
+}
+
+struct DownloadTaskContext {
+    downloads: Arc<Mutex<HashMap<String, DownloadItem>>>,
+    save_lock: Arc<Mutex<()>>,
+    last_saved_snapshot: Arc<Mutex<Option<String>>>,
+    bandwidth_limit: Arc<Mutex<Option<u64>>>,
+    global_bandwidth_limiter: Arc<SharedBandwidthLimiter>,
+    app_handle: AppHandle,
+    client: reqwest::Client,
 }
 
 fn compute_download_progress(
@@ -430,15 +490,17 @@ async fn save_to_disk_if_changed(
     }
 }
 
-async fn run_download_task(
-    downloads: Arc<Mutex<HashMap<String, DownloadItem>>>,
-    save_lock: Arc<Mutex<()>>,
-    last_saved_snapshot: Arc<Mutex<Option<String>>>,
-    bandwidth_limit: Arc<Mutex<Option<u64>>>,
-    app_handle: AppHandle,
-    client: reqwest::Client,
-    id: String,
-) {
+async fn run_download_task(context: DownloadTaskContext, id: String) {
+    let DownloadTaskContext {
+        downloads,
+        save_lock,
+        last_saved_snapshot,
+        bandwidth_limit,
+        global_bandwidth_limiter,
+        app_handle,
+        client,
+    } = context;
+
     let (url, file_path, file_name, mut downloaded_size, mut item_bandwidth_limit, start_event) = {
         let mut guard = downloads.lock().await;
         let Some(item) = guard.get_mut(&id) else {
@@ -863,9 +925,9 @@ async fn run_download_task(
         let mut stream = response.bytes_stream();
         let mut last_emit = Instant::now();
         let mut bytes_since_last_emit = 0u64;
-        let mut throttle_window_start = Instant::now();
-        let mut throttle_bytes: u64 = 0;
-        let mut cached_global_limit: Option<u64> = *bandwidth_limit.lock().await;
+        let mut item_next_available_at = Instant::now();
+        let mut cached_global_limit =
+            normalize_global_bandwidth_limit(*bandwidth_limit.lock().await);
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = match chunk_result {
@@ -902,30 +964,29 @@ async fn run_download_task(
                 }
             };
 
-            let limit = match (cached_global_limit, item_bandwidth_limit) {
-                (Some(global), Some(item)) => Some(std::cmp::min(global, item)),
-                (Some(global), None) => Some(global),
-                (None, Some(item)) => Some(item),
-                (None, None) => None,
+            let chunk_len = chunk.len() as u64;
+            let bypass_global_limit = matches!(item_bandwidth_limit, Some(0));
+            let global_delay = if bypass_global_limit {
+                Duration::ZERO
+            } else if let Some(global_limit) = cached_global_limit {
+                global_bandwidth_limiter
+                    .reserve(chunk_len, global_limit)
+                    .await
+            } else {
+                Duration::ZERO
             };
 
-            if let Some(bytes_per_second) = limit {
-                if bytes_per_second > 0 {
-                    throttle_bytes += chunk.len() as u64;
-                    let expected_elapsed =
-                        Duration::from_secs_f64(throttle_bytes as f64 / bytes_per_second as f64);
-                    let actual_elapsed = throttle_window_start.elapsed();
-                    if expected_elapsed > actual_elapsed {
-                        sleep(expected_elapsed - actual_elapsed).await;
-                    }
-                    if throttle_window_start.elapsed() >= Duration::from_secs(1) {
-                        throttle_window_start = Instant::now();
-                        throttle_bytes = 0;
-                    }
-                }
-            } else {
-                throttle_window_start = Instant::now();
-                throttle_bytes = 0;
+            let item_delay =
+                if let Some(item_limit) = item_bandwidth_limit.filter(|limit| *limit > 0) {
+                    reserve_bandwidth_slot(&mut item_next_available_at, chunk_len, item_limit)
+                } else {
+                    item_next_available_at = Instant::now();
+                    Duration::ZERO
+                };
+
+            let throttle_delay = global_delay.max(item_delay);
+            if !throttle_delay.is_zero() {
+                sleep(throttle_delay).await;
             }
 
             if let Err(error) = file.write_all(&chunk).await {
@@ -976,7 +1037,8 @@ async fn run_download_task(
                     let _ = app_handle.emit("download://progress", event);
                 }
 
-                cached_global_limit = *bandwidth_limit.lock().await;
+                cached_global_limit =
+                    normalize_global_bandwidth_limit(*bandwidth_limit.lock().await);
                 last_emit = Instant::now();
                 bytes_since_last_emit = 0;
             }
@@ -1043,6 +1105,7 @@ impl DownloadManager {
             downloads: Arc::new(Mutex::new(HashMap::new())),
             abort_handles: Arc::new(Mutex::new(HashMap::new())),
             bandwidth_limit: Arc::new(Mutex::new(None)), // No limit by default
+            global_bandwidth_limiter: Arc::new(SharedBandwidthLimiter::new()),
             save_lock: Arc::new(Mutex::new(())),
             last_saved_snapshot: Arc::new(Mutex::new(None)),
             http_client,
@@ -1293,27 +1356,21 @@ impl DownloadManager {
             return Err(ACTIVE_DOWNLOAD_TASK_ERROR.to_string());
         }
 
-        let downloads = self.downloads.clone();
-        let save_lock = self.save_lock.clone();
-        let last_saved_snapshot = self.last_saved_snapshot.clone();
-        let bandwidth_limit = self.bandwidth_limit.clone();
-        let app_handle = self.app_handle.clone();
-        let client = self.http_client.clone();
+        let context = DownloadTaskContext {
+            downloads: self.downloads.clone(),
+            save_lock: self.save_lock.clone(),
+            last_saved_snapshot: self.last_saved_snapshot.clone(),
+            bandwidth_limit: self.bandwidth_limit.clone(),
+            global_bandwidth_limiter: self.global_bandwidth_limiter.clone(),
+            app_handle: self.app_handle.clone(),
+            client: self.http_client.clone(),
+        };
         let cleanup_handles = self.abort_handles.clone();
         let cleanup_id = id.clone();
         let task_id = id.clone();
 
         let task = tokio::spawn(async move {
-            run_download_task(
-                downloads,
-                save_lock,
-                last_saved_snapshot,
-                bandwidth_limit,
-                app_handle,
-                client,
-                task_id,
-            )
-            .await;
+            run_download_task(context, task_id).await;
 
             let mut handles = cleanup_handles.lock().await;
             handles.remove(&cleanup_id);
@@ -1414,11 +1471,8 @@ impl DownloadManager {
                 item.error = None;
                 item.speed = 0;
                 item.updated_at = unix_timestamp_secs();
-                item.progress = compute_download_progress(
-                    item.downloaded_size,
-                    item.total_size,
-                    &item.status,
-                );
+                item.progress =
+                    compute_download_progress(item.downloaded_size, item.total_size, &item.status);
                 events.push(build_progress_event(item));
             }
 
@@ -1638,7 +1692,9 @@ impl DownloadManager {
 
     pub async fn set_bandwidth_limit(&self, limit: Option<u64>) {
         let mut lock = self.bandwidth_limit.lock().await;
-        *lock = limit;
+        *lock = normalize_global_bandwidth_limit(limit);
+        drop(lock);
+        self.global_bandwidth_limiter.reset().await;
     }
 }
 
@@ -1679,5 +1735,22 @@ mod tests {
         assert!(should_retry_http_status(reqwest::StatusCode::BAD_GATEWAY));
         assert!(!should_retry_http_status(reqwest::StatusCode::NOT_FOUND));
         assert!(!should_retry_http_status(reqwest::StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn zero_global_bandwidth_limit_is_treated_as_unlimited() {
+        assert_eq!(normalize_global_bandwidth_limit(Some(0)), None);
+        assert_eq!(normalize_global_bandwidth_limit(Some(1024)), Some(1024));
+    }
+
+    #[test]
+    fn bandwidth_reservations_queue_future_chunks() {
+        let mut next_available_at = Instant::now();
+
+        let first_delay = reserve_bandwidth_slot(&mut next_available_at, 512, 1024);
+        let second_delay = reserve_bandwidth_slot(&mut next_available_at, 512, 1024);
+
+        assert_eq!(first_delay, Duration::ZERO);
+        assert!(second_delay >= Duration::from_millis(200));
     }
 }

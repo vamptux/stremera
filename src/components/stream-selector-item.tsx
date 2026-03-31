@@ -1,7 +1,7 @@
 import { type TorrentioStream } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { Download } from 'lucide-react';
+import { Download, ArrowUp } from 'lucide-react';
 import { getAddonSourceName, getStreamPresentation } from '@/lib/stream-selector-utils';
 
 export function StreamItem({
@@ -134,7 +134,10 @@ export function StreamItem({
             {typeof stream.seeders === 'number' && stream.seeders > 0 && (
               <>
                 <span className='text-zinc-700/60 text-[9px]'>·</span>
-                <span className='text-[9px] text-emerald-400/80 font-medium'>🌱 {stream.seeders}</span>
+                <span className='text-[9px] text-emerald-400/80 font-medium inline-flex items-center gap-[3px]'>
+                  <ArrowUp className='w-[8px] h-[8px]' strokeWidth={3} />
+                  {stream.seeders}
+                </span>
               </>
             )}
           </div>
@@ -144,7 +147,7 @@ export function StreamItem({
               {recommendationReasons.map((reason) => (
                 <span
                   key={reason}
-                  className='rounded-[4px] border border-sky-500/15 bg-sky-500/8 px-1.5 py-[2px] text-[9px] font-medium leading-none text-sky-200/80'
+                  className='rounded-[4px] border border-sky-400/25 bg-sky-400/15 px-1.5 py-[2px] text-[9px] font-semibold leading-none text-sky-100'
                 >
                   {reason}
                 </span>

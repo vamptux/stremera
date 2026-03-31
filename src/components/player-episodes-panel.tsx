@@ -1,5 +1,5 @@
 import { ChevronDown, List, X } from 'lucide-react';
-import { useMemo } from 'react';
+import { type Ref, useMemo } from 'react';
 import { type Episode } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import {
@@ -21,12 +21,11 @@ export function PlayerEpisodesToggleButton({
   onToggle,
 }: PlayerEpisodesToggleButtonProps) {
   return (
-    <Button
-      variant='ghost'
-      size='icon'
+    <button
+      type='button'
       className={cn(
-        'text-white hover:bg-white/20 transition-all duration-300 h-10 w-10',
-        open && 'bg-white/20 text-primary scale-105',
+        'flex h-9 w-9 items-center justify-center rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors duration-150',
+        open && 'bg-white/15 text-white',
       )}
       title='Episodes'
       onClick={(e) => {
@@ -34,12 +33,13 @@ export function PlayerEpisodesToggleButton({
         onToggle();
       }}
     >
-      <List className='w-6 h-6' strokeWidth={2.5} />
-    </Button>
+      <List className='w-5 h-5' strokeWidth={2.5} />
+    </button>
   );
 }
 
 interface PlayerEpisodesPanelProps {
+  panelRef?: Ref<HTMLDivElement>;
   open: boolean;
   seasons: number[];
   selectedSeason: number;
@@ -53,6 +53,7 @@ interface PlayerEpisodesPanelProps {
 }
 
 export function PlayerEpisodesPanel({
+  panelRef,
   open,
   seasons,
   selectedSeason,
@@ -71,6 +72,7 @@ export function PlayerEpisodesPanel({
 
   return (
     <div
+      ref={panelRef}
       className={cn(
         'absolute top-0 right-0 bottom-0 w-[400px] bg-zinc-950 border-l border-white/[0.07] z-[60] flex flex-col',
         'shadow-[-20px_0_60px_rgba(0,0,0,0.85)]',

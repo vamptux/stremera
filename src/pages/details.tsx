@@ -1,9 +1,10 @@
 import { useParams, useLocation, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Play, Plus, Youtube, Check, Loader2, Star, ArrowLeft, Search, X } from 'lucide-react';
-import { useState, useMemo, useEffect, useEffectEvent, useCallback, useRef } from 'react';
+import { Play, Plus, Youtube, Check, Loader2, Star, Search, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { api, Episode, MediaItem, WatchProgress } from '@/lib/api';
+import { openUrl as openExternal } from '@tauri-apps/plugin-opener';
+import { api, Episode, MediaItem, WatchProgress, getErrorMessage } from '@/lib/api';
 import { DetailsAnimeMetadataSection } from '@/components/details-anime-metadata-section';
 import { SeasonSwitcher } from '@/components/details-season-switcher';
 import { Button } from '@/components/ui/button';
@@ -13,14 +14,22 @@ import { StreamSelector } from '@/components/stream-selector';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { MediaCard } from '@/components/media-card';
-import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { useSpoilerProtection } from '@/hooks/use-spoiler-protection';
-import { buildHistoryPlaybackPlan } from '@/lib/history-playback';
+import {
+  buildHistoryPlaybackPlan,
+  getHistoryPlaybackFallbackNotice,
+  getLatestEpisodeResumeStartTime,
+  getPlayableResumeStartTime,
+  type DetailsHistoryRouteState,
+} from '@/lib/history-playback';
+import { useDetailsEpisodePane } from '@/hooks/use-details-episode-pane';
 import { resolveEpisodeStreamTarget } from '@/lib/episode-stream-target';
+import { resolveTrailerEmbedUrl } from '@/lib/trailer-utils';
 
-const EPISODES_PAGE_SIZE = 50;
+const EPISODE_FETCH_PAGE_SIZE = 50;
+const EPISODE_DISPLAY_PAGE_SIZE = 4;
 
 function parseYearFromText(value?: string | null): number | null {
   if (!value) return null;
@@ -188,15 +197,6 @@ function formatSeasonInfoLabel(seasonInfo: { season: number; part?: number }): s
   return `Season ${seasonInfo.season}${seasonInfo.part ? ` Part ${seasonInfo.part}` : ''}`;
 }
 
-function formatRelatedSeasonCandidateLabel(candidate: Pick<RelatedSeasonCandidate, 'seasonNumber' | 'part' | 'year'>): string {
-  const seasonLabel = formatSeasonInfoLabel({
-    season: candidate.seasonNumber,
-    part: candidate.part,
-  });
-
-  return candidate.year ? `${seasonLabel} • ${candidate.year}` : seasonLabel;
-}
-
 function buildRelationContextLabel(relation: MediaItem): string | null {
   const seasonInfo = extractSeasonInfoFromTitle(relation.title || '');
   const year = parseYearFromText(relation.year);
@@ -208,26 +208,25 @@ function buildRelationContextLabel(relation: MediaItem): string | null {
   return year !== null ? `${seasonLabel} • ${year}` : seasonLabel;
 }
 
-interface RelatedSeasonCandidate {
-  id: string;
-  title: string;
-  seasonNumber: number;
-  part?: number;
-  year: number | null;
-  similarity: number;
-  routeType: string;
-  /** Unique key: `"${seasonNumber}-${part ?? 0}"` */
-  itemKey: string;
-}
-
 type DetailsTab = 'episodes' | 'relations' | 'anime-metadata';
 
-function isLikelyStandaloneAnimeEntry(title: string): boolean {
-  const normalized = title.toLowerCase();
-  return (
-    /\b(movie|film|ova|ona|special|specials|recap|compilation|prologue|epilogue|theatrical|uncut)\b/.test(normalized) ||
-    /spin[\s-]?off/i.test(title)
-  );
+function isSeriesLikeHistoryEntryType(value?: string | null): boolean {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === 'series' || normalized === 'anime';
+}
+
+function getRelationRoleBadgeClass(role?: string | null): string {
+  const normalizedRole = (role ?? '').trim().toLowerCase();
+
+  if (normalizedRole === 'sequel') {
+    return 'border-indigo-500/30 bg-indigo-500/15 text-indigo-300';
+  }
+
+  if (normalizedRole === 'prequel') {
+    return 'border-amber-500/30 bg-amber-500/15 text-amber-300';
+  }
+
+  return 'border-white/[0.08] bg-white/[0.04] text-zinc-400';
 }
 
 // Wrapper component to remount Details on id change
@@ -240,9 +239,9 @@ export function Details() {
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 4 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.18, ease: [0.25, 0.46, 0.45, 0.94] }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.12, ease: 'easeOut' }}
       className='min-h-screen bg-background selection:bg-white/20'
     >
       <DetailsContent key={`${type}-${id}`} />
@@ -259,7 +258,6 @@ function DetailsContent() {
     type: string;
     id: string;
     originKey: string;
-    originTitle: string;
   } | null>(null);
   const scopedInlineTarget = inlineTarget?.originKey === baseRouteKey ? inlineTarget : null;
   const effectiveRouteType = scopedInlineTarget?.type || baseRouteType;
@@ -349,146 +347,46 @@ function DetailsContent() {
   });
 
   const locationSeason = location.state?.season ? Number(location.state.season) : null;
-  const [userSelectedSeason, setUserSelectedSeason] = useState<number | null>(null);
-  // Controlled by the episode search input; reset when season changes.
-  const [episodeSearch, setEpisodeSearch] = useState('');
-
-  const shouldUsePagedEpisodes = !!(item?.id?.startsWith('kitsu:') && item?.type === 'series');
 
   // Trailer State
   const [trailerOpen, setTrailerOpen] = useState(false);
   const [trailerUrl, setTrailerUrl] = useState<string | null>(null);
 
-  const [episodePagination, setEpisodePagination] = useState<
-    Record<string, { count: number; pageIndex: number }>
-  >({});
-  // Snapshot of base-item seasons kept while an inline (related) entry is active
-  const [baseSeasonsSnapshot, setBaseSeasonsSnapshot] = useState<number[]>([]);
-  // itemKey of the related-season candidate currently viewed inline (null = base item)
-  const [activeRelatedCandidateKey, setActiveRelatedCandidateKey] = useState<string | null>(null);
-  // Stable label for the active related candidate — persists even after relatedSeasonCandidates recomputes
-  const [activeCandidateLabel, setActiveCandidateLabel] = useState<string>('');
-  const resumeSeasonFromHistory = watchHistory?.find(
-    (w) => w.id === item?.id && w.type_ === 'series',
-  )?.season;
-  const normalizedLocationSeason =
-    locationSeason !== null && Number.isFinite(locationSeason) ? locationSeason : null;
-  const selectedSeasonHint =
-    userSelectedSeason ?? normalizedLocationSeason ?? (typeof resumeSeasonFromHistory === 'number' ? resumeSeasonFromHistory : null);
-
-  const currentEpisodeSeasonKey = `${item?.id || 'unknown'}:${selectedSeasonHint ?? 'none'}`;
-  const seasonPagination = episodePagination[currentEpisodeSeasonKey];
-  const requestEpisodePageIndex = shouldUsePagedEpisodes ? (seasonPagination?.pageIndex ?? 0) : 0;
-  const requestSeasonHint = selectedSeasonHint ?? undefined;
-
-  const { data: pagedEpisodesData } = useQuery({
-    queryKey: ['media-episodes', type, item?.id, requestSeasonHint, requestEpisodePageIndex, EPISODES_PAGE_SIZE],
-    queryFn: () =>
-      api.getMediaEpisodes(
-        type || 'anime',
-        item!.id,
-        requestSeasonHint,
-        requestEpisodePageIndex,
-        EPISODES_PAGE_SIZE,
-      ),
-    enabled: shouldUsePagedEpisodes && !!item?.id,
-    staleTime: 1000 * 60 * 5,
+  const {
+    shouldUsePagedEpisodes,
+    seasons,
+    seasonCount,
+    selectedSeason,
+    localSeasonEntries,
+    seasonEpisodes,
+    visibleEpisodes,
+    episodeSearch,
+    setEpisodeSearch,
+    clearEpisodeSearch,
+    selectSeason,
+    resetEpisodePane,
+    hasEpisodesForSelectedSeason,
+    shouldShowEpisodeSearch,
+    episodeRangeLabel,
+    totalEpisodeCount,
+    totalEpisodePages,
+    activeEpisodePageIndex,
+    visibleEpisodeStart,
+    hasPreviousEpisodes,
+    hasMoreEpisodes,
+    changeEpisodePage,
+    shouldShowEpisodeProgressSkeleton,
+  } = useDetailsEpisodePane({
+    item,
+    effectiveRouteType,
+    effectiveRouteId,
+    locationSeason,
+    watchHistory,
+    isLoadingWatchHistory: isLoadingWatchHistoryForItem,
   });
-
-  const seasons = useMemo(() => {
-    if (shouldUsePagedEpisodes) {
-      return (pagedEpisodesData?.seasons ?? []).slice().sort((a, b) => a - b);
-    }
-    if (!item?.episodes) return [];
-    return Array.from(new Set(item.episodes.map((e) => e.season))).sort((a, b) => a - b);
-  }, [item, pagedEpisodesData?.seasons, shouldUsePagedEpisodes]);
-
-  const selectedSeason = useMemo(() => {
-    if (selectedSeasonHint !== null && seasons.includes(selectedSeasonHint)) return selectedSeasonHint;
-    if (seasons.length === 0) return null;
-    return seasons.includes(1) ? 1 : seasons[0];
-  }, [selectedSeasonHint, seasons]);
-
-  const syncPagedSeasonSelection = useEffectEvent((nextSeason: number) => {
-    setUserSelectedSeason((prev) => (prev === nextSeason ? prev : nextSeason));
-  });
-
-  const syncBaseSeasonsSnapshot = useEffectEvent((nextSeasons: number[]) => {
-    setBaseSeasonsSnapshot((prev) => {
-      if (prev.length === nextSeasons.length && prev.every((seasonNumber, index) => seasonNumber === nextSeasons[index])) {
-        return prev;
-      }
-
-      return nextSeasons;
-    });
-  });
-
-  useEffect(() => {
-    if (!shouldUsePagedEpisodes) return;
-    if (seasons.length === 0) return;
-
-    if (selectedSeasonHint !== null && seasons.includes(selectedSeasonHint)) return;
-
-    const nextSeason = seasons.includes(1) ? 1 : seasons[0];
-    syncPagedSeasonSelection(nextSeason);
-  }, [shouldUsePagedEpisodes, selectedSeasonHint, seasons]);
-
-  // Keep a snapshot of the base item's seasons so the dropdown can show them
-  // even while a related (inline) entry has been loaded.
-  useEffect(() => {
-    if (scopedInlineTarget) return;
-    if (seasons.length === 0) return;
-
-    syncBaseSeasonsSnapshot(seasons);
-  }, [seasons, scopedInlineTarget]);
-
-  const seasonYearLabelMap = useMemo(() => {
-    const map = new Map<number, string>();
-
-    Object.entries(pagedEpisodesData?.seasonYears ?? {}).forEach(([seasonKey, label]) => {
-      const seasonNumber = Number(seasonKey);
-      if (Number.isFinite(seasonNumber) && typeof label === 'string' && label.trim().length > 0) {
-        map.set(seasonNumber, label.trim());
-      }
-    });
-
-    const episodesForYearInference = shouldUsePagedEpisodes
-      ? (pagedEpisodesData?.episodes ?? [])
-      : (item?.episodes ?? []);
-
-    const yearsBySeason = new Map<number, Set<number>>();
-    episodesForYearInference.forEach((ep) => {
-      const year = parseYearFromText(ep.released);
-      if (!year) return;
-      const existing = yearsBySeason.get(ep.season) ?? new Set<number>();
-      existing.add(year);
-      yearsBySeason.set(ep.season, existing);
-    });
-
-    yearsBySeason.forEach((years, seasonNumber) => {
-      if (map.has(seasonNumber) || years.size === 0) return;
-      const sorted = Array.from(years).sort((a, b) => a - b);
-      const label =
-        sorted.length > 1 && sorted[0] !== sorted[sorted.length - 1]
-          ? `${sorted[0]}-${sorted[sorted.length - 1]}`
-          : `${sorted[0]}`;
-      map.set(seasonNumber, label);
-    });
-
-    return map;
-  }, [pagedEpisodesData?.seasonYears, pagedEpisodesData?.episodes, shouldUsePagedEpisodes, item?.episodes]);
 
   const isAnimeLike = !!(isKitsuRoute || effectiveRouteType === 'anime' || item?.id?.startsWith('kitsu:'));
   const [activeTab, setActiveTab] = useState<DetailsTab>('episodes');
-
-  const formatSeasonLabel = useCallback(
-    (seasonNumber: number) => {
-      const yearLabel = seasonYearLabelMap.get(seasonNumber);
-      if (!yearLabel) return `Season ${seasonNumber}`;
-      return `Season ${seasonNumber} • ${yearLabel}`;
-    },
-    [seasonYearLabelMap],
-  );
 
   const prefetchInlineDetailsTarget = useCallback(
     (nextType: string, nextId: string, preferredSeason?: number | null) => {
@@ -515,8 +413,8 @@ function DetailsContent() {
         preferredSeason > 0
       ) {
         void queryClient.prefetchQuery({
-          queryKey: ['media-episodes', targetType, normalizedId, preferredSeason, 0, EPISODES_PAGE_SIZE],
-          queryFn: () => api.getMediaEpisodes(targetType, normalizedId, preferredSeason, 0, EPISODES_PAGE_SIZE),
+          queryKey: ['media-episodes', targetType, normalizedId, preferredSeason, 0, EPISODE_FETCH_PAGE_SIZE],
+          queryFn: () => api.getMediaEpisodes(targetType, normalizedId, preferredSeason, 0, EPISODE_FETCH_PAGE_SIZE),
           staleTime: 1000 * 60 * 5,
         });
       }
@@ -529,8 +427,6 @@ function DetailsContent() {
       nextType: string,
       nextId: string,
       preferredSeason?: number | null,
-      candidateItemKey?: string,
-      candidateLabel?: string,
     ) => {
       const normalizedType = nextType.trim();
       const normalizedId = nextId.trim();
@@ -539,7 +435,7 @@ function DetailsContent() {
       if (normalizedType === effectiveRouteType && normalizedId === effectiveRouteId) {
         setActiveTab('episodes');
         if (typeof preferredSeason === 'number' && Number.isFinite(preferredSeason) && preferredSeason > 0) {
-          setUserSelectedSeason(preferredSeason);
+          selectSeason(preferredSeason);
         }
         return;
       }
@@ -548,20 +444,11 @@ function DetailsContent() {
         type: normalizedType,
         id: normalizedId,
         originKey: baseRouteKey,
-        originTitle: item?.title || baseRouteId,
       });
-      setActiveRelatedCandidateKey(candidateItemKey ?? null);
-      setActiveCandidateLabel(candidateLabel ?? '');
       setActiveTab('episodes');
-      setEpisodePagination({});
-      setEpisodeSearch('');
-      if (typeof preferredSeason === 'number' && Number.isFinite(preferredSeason) && preferredSeason > 0) {
-        setUserSelectedSeason(preferredSeason);
-      } else {
-        setUserSelectedSeason(null);
-      }
+      resetEpisodePane(preferredSeason);
     },
-    [effectiveRouteId, effectiveRouteType, baseRouteKey, baseRouteId, item?.title],
+    [baseRouteKey, effectiveRouteId, effectiveRouteType, resetEpisodePane, selectSeason],
   );
 
   const intelligentRelations = useMemo(() => {
@@ -590,7 +477,11 @@ function DetailsContent() {
     });
 
     const strictAnimeMatches = isAnimeLike
-      ? scored.filter((entry) => entry.score >= 0.34)
+      ? scored.filter((entry) => {
+          const seasonInfo = extractSeasonInfoFromTitle(entry.relation.title || '');
+          const minimumScore = seasonInfo?.part ? 0.22 : 0.34;
+          return entry.score >= minimumScore;
+        })
       : scored;
     const effective = strictAnimeMatches.length > 0 ? strictAnimeMatches : scored;
 
@@ -605,86 +496,6 @@ function DetailsContent() {
 
     return effective.map((entry) => entry.relation);
   }, [item, isAnimeLike]);
-
-  const relatedSeasonCandidates = useMemo((): RelatedSeasonCandidate[] => {
-    if (!item || !isAnimeLike || intelligentRelations.length === 0) return [];
-
-    const baseTokens = normalizeFranchiseTokens(item.title || '');
-    const existingSeasons = new Set(seasons);
-
-    const candidates = intelligentRelations
-      .map((relation): RelatedSeasonCandidate | null => {
-        const seasonInfo = extractSeasonInfoFromTitle(relation.title || '');
-        if (!seasonInfo) return null;
-        const { season: seasonNumber, part } = seasonInfo;
-
-        // Skip only when the season matches a local season AND there is no part suffix
-        // ("Season 3 Part 1" and "Season 3 Part 2" must both be kept even when season 3 exists).
-        if (!part && existingSeasons.has(seasonNumber)) return null;
-
-        const similarity = animeRelationScore(baseTokens, relation.title || '');
-        if (similarity < 0.45) return null;
-        if (isLikelyStandaloneAnimeEntry(relation.title || '')) return null;
-
-        return {
-          id: relation.id,
-          title: relation.title,
-          seasonNumber,
-          part,
-          year: parseYearFromText(relation.year),
-          similarity,
-          routeType: relation.id.startsWith('kitsu:') ? 'anime' : relation.type,
-          itemKey: `${seasonNumber}-${part ?? 0}`,
-        };
-      })
-      .filter((entry): entry is RelatedSeasonCandidate => entry !== null);
-
-    const dedupedBySeason = new Map<string, RelatedSeasonCandidate>();
-    for (const candidate of candidates) {
-      const existing = dedupedBySeason.get(candidate.itemKey);
-      if (!existing || candidate.similarity > existing.similarity) {
-        dedupedBySeason.set(candidate.itemKey, candidate);
-      }
-    }
-
-    return Array.from(dedupedBySeason.values()).sort((a, b) => {
-      if (a.seasonNumber !== b.seasonNumber) return a.seasonNumber - b.seasonNumber;
-      if ((a.part ?? 0) !== (b.part ?? 0)) return (a.part ?? 0) - (b.part ?? 0);
-      if (a.year !== null && b.year !== null && a.year !== b.year) return a.year - b.year;
-      if (a.year === null && b.year !== null) return 1;
-      if (a.year !== null && b.year === null) return -1;
-      return a.title.localeCompare(b.title);
-    });
-  }, [item, isAnimeLike, intelligentRelations, seasons]);
-
-  const localSeasonEntries = useMemo(
-    () =>
-      (scopedInlineTarget ? baseSeasonsSnapshot : seasons).map((seasonNumber) => ({
-        number: seasonNumber,
-        label: formatSeasonLabel(seasonNumber),
-      })),
-    [baseSeasonsSnapshot, formatSeasonLabel, scopedInlineTarget, seasons],
-  );
-
-  const relatedSeasonEntries = useMemo(
-    () =>
-      relatedSeasonCandidates.map((candidate) => ({
-        itemKey: candidate.itemKey,
-        label: formatRelatedSeasonCandidateLabel(candidate),
-        routeType: candidate.routeType,
-        id: candidate.id,
-        seasonNumber: candidate.seasonNumber,
-      })),
-    [relatedSeasonCandidates],
-  );
-
-  useEffect(() => {
-    if (relatedSeasonCandidates.length === 0) return;
-
-    for (const candidate of relatedSeasonCandidates.slice(0, 3)) {
-      prefetchInlineDetailsTarget(candidate.routeType, candidate.id, candidate.seasonNumber);
-    }
-  }, [prefetchInlineDetailsTarget, relatedSeasonCandidates]);
 
   const hasEpisodesTab =
     item?.type === 'series' &&
@@ -702,101 +513,7 @@ function DetailsContent() {
     ? activeTab
     : (availableTabs[0] ?? 'episodes');
 
-  const filteredEpisodes = useMemo(() => {
-    if (selectedSeason === null) return [];
-    if (shouldUsePagedEpisodes) {
-      return (pagedEpisodesData?.episodes ?? []).slice().sort((a, b) => a.episode - b.episode);
-    }
-    if (!item?.episodes) return [];
-    return item.episodes
-      .filter((e) => e.season === selectedSeason)
-      .sort((a, b) => a.episode - b.episode);
-  }, [item, pagedEpisodesData?.episodes, selectedSeason, shouldUsePagedEpisodes]);
-
-  // Search-filtered episodes — subset of filteredEpisodes matching the episode search query.
-  const searchFilteredEpisodes = useMemo(() => {
-    if (!episodeSearch.trim()) return filteredEpisodes;
-    const q = episodeSearch.toLowerCase().trim();
-    return filteredEpisodes.filter((ep) => {
-      if (String(ep.episode).includes(q)) return true;
-      if (ep.title?.toLowerCase().includes(q)) return true;
-      if (ep.overview?.toLowerCase().includes(q)) return true;
-      return false;
-    });
-  }, [filteredEpisodes, episodeSearch]);
-
   const resumeEpisodeRef = useRef<HTMLButtonElement | null>(null);
-
-  const resumeEpisodeForSelectedSeason = useMemo(() => {
-    if (!watchHistory || !item || item.type !== 'series' || selectedSeason === null) return null;
-    const entry = watchHistory.find((w) => w.id === item.id && w.type_ === 'series');
-    if (!entry || entry.season !== selectedSeason || entry.episode === undefined) return null;
-    return entry.episode;
-  }, [watchHistory, item, selectedSeason]);
-  const resumeEpisodeIndexForDefaults = useMemo(() => {
-    if (resumeEpisodeForSelectedSeason === null) return -1;
-    return filteredEpisodes.findIndex((ep) => ep.episode === resumeEpisodeForSelectedSeason);
-  }, [filteredEpisodes, resumeEpisodeForSelectedSeason]);
-  const totalEpisodesForSeason = shouldUsePagedEpisodes
-    ? (pagedEpisodesData?.totalInSeason ?? 0)
-    : filteredEpisodes.length;
-  const shouldUseLongSeasonPaging = totalEpisodesForSeason > 100;
-  const totalEpisodePages = Math.max(1, Math.ceil(totalEpisodesForSeason / EPISODES_PAGE_SIZE));
-  const defaultEpisodePageIndex =
-    !shouldUsePagedEpisodes && shouldUseLongSeasonPaging && resumeEpisodeIndexForDefaults >= 0
-      ? Math.floor(resumeEpisodeIndexForDefaults / EPISODES_PAGE_SIZE)
-      : 0;
-  const defaultEpisodeVisibleCount =
-    !shouldUseLongSeasonPaging && resumeEpisodeIndexForDefaults >= 0
-      ? Math.max(EPISODES_PAGE_SIZE, resumeEpisodeIndexForDefaults + 1)
-      : EPISODES_PAGE_SIZE;
-  const activeEpisodePageIndex =
-    shouldUseLongSeasonPaging
-      ? Math.min(seasonPagination?.pageIndex ?? defaultEpisodePageIndex, totalEpisodePages - 1)
-      : 0;
-
-  const episodeVisibleCount = shouldUseLongSeasonPaging
-    ? EPISODES_PAGE_SIZE
-    : seasonPagination?.count ?? defaultEpisodeVisibleCount;
-
-  const visibleEpisodes = useMemo(
-    () => {
-      // When a search query is active, show all matching episodes without pagination.
-      if (episodeSearch.trim()) return searchFilteredEpisodes;
-      if (shouldUsePagedEpisodes) return filteredEpisodes;
-      if (shouldUseLongSeasonPaging) {
-        const start = activeEpisodePageIndex * EPISODES_PAGE_SIZE;
-        return filteredEpisodes.slice(start, start + EPISODES_PAGE_SIZE);
-      }
-      return filteredEpisodes.slice(0, episodeVisibleCount);
-    },
-    [
-      filteredEpisodes,
-      searchFilteredEpisodes,
-      episodeSearch,
-      episodeVisibleCount,
-      shouldUseLongSeasonPaging,
-      activeEpisodePageIndex,
-      shouldUsePagedEpisodes,
-    ],
-  );
-
-  const hasMoreEpisodes =
-    !episodeSearch.trim() &&
-    !shouldUsePagedEpisodes && !shouldUseLongSeasonPaging && visibleEpisodes.length < filteredEpisodes.length;
-  const remainingEpisodes = Math.max(0, totalEpisodesForSeason - visibleEpisodes.length);
-  const visibleEpisodeStart =
-    totalEpisodesForSeason === 0
-      ? 0
-      : shouldUseLongSeasonPaging
-        ? activeEpisodePageIndex * EPISODES_PAGE_SIZE + 1
-        : 1;
-  const visibleEpisodeEnd = shouldUseLongSeasonPaging
-    ? Math.min((activeEpisodePageIndex + 1) * EPISODES_PAGE_SIZE, totalEpisodesForSeason)
-    : visibleEpisodes.length;
-  const shouldShowEpisodeProgressSkeleton =
-    item?.type === 'series' && isLoadingWatchHistoryForItem;
-
   // Stream Selector State
   type StreamParams = {
     id: string;
@@ -816,7 +533,7 @@ function DetailsContent() {
 
   const preferredStreamId = useMemo(() => {
     if (!item) return undefined;
-    // Stremio-style stream addons key primarily on IMDb IDs; fall back to source ID.
+    // Most addon feeds key streams by IMDb IDs; fall back to the source ID when needed.
     return item.imdbId || item.id;
   }, [item]);
   const [reopenSelectorConsumed, setReopenSelectorConsumed] = useState(false);
@@ -833,7 +550,7 @@ function DetailsContent() {
     if (!spoilerProtection || selectedSeason === null || !item) return null;
     let max: number | null = null;
 
-    for (const ep of filteredEpisodes) {
+    for (const ep of seasonEpisodes) {
       const prog = episodeProgressMap.get(`${item.id}:${ep.season}:${ep.episode}`);
       if (prog && prog.duration > 0 && prog.position / prog.duration > 0.05) {
         if (max === null || ep.episode > max) max = ep.episode;
@@ -842,7 +559,10 @@ function DetailsContent() {
 
     // Fallback to series-level progress entry when episode-scoped rows are sparse.
     const seriesResumeEpisode = watchHistory?.find(
-      (w) => w.id === item.id && w.type_ === 'series' && w.season === selectedSeason,
+      (w) =>
+        w.id === item.id &&
+        isSeriesLikeHistoryEntryType(w.type_) &&
+        w.season === selectedSeason,
     )?.episode;
     if (typeof seriesResumeEpisode === 'number') {
       if (max === null || seriesResumeEpisode > max) {
@@ -855,7 +575,7 @@ function DetailsContent() {
     spoilerProtection,
     selectedSeason,
     item,
-    filteredEpisodes,
+    seasonEpisodes,
     episodeProgressMap,
     watchHistory,
   ]);
@@ -871,27 +591,29 @@ function DetailsContent() {
     [spoilerProtection, maxWatchedEpisodeInSeason, episodeProgressMap, item],
   );
 
-  const handleWatchMovie = () => {
+  const handleWatchMovie = useCallback((startTime?: number) => {
     if (!item || !preferredStreamId) return;
     setStreamParams({
       id: item.id,
       streamId: preferredStreamId,
       title: item.title,
       overview: item.description,
+      startTime,
     });
     setStreamSelectorOpen(true);
-  };
+  }, [item, preferredStreamId]);
 
   const openEpisodeStreamSelector = useCallback(
     async (
       episodeInput: Pick<Episode, 'season' | 'episode' | 'imdbId' | 'imdbSeason' | 'imdbEpisode'>,
       options?: {
         overview?: string;
+        isCancelled?: () => boolean;
         startTime?: number;
         title?: string;
       },
     ) => {
-      if (!item || !preferredStreamId) return;
+      if (!item || !preferredStreamId) return false;
 
       const target = await resolveEpisodeStreamTarget(
         streamSelectorType,
@@ -899,6 +621,10 @@ function DetailsContent() {
         preferredStreamId,
         episodeInput,
       );
+
+      if (options?.isCancelled?.()) {
+        return false;
+      }
 
       setStreamParams({
         id: item.id,
@@ -914,86 +640,53 @@ function DetailsContent() {
         startTime: options?.startTime,
       });
       setStreamSelectorOpen(true);
+      return true;
     },
     [item, preferredStreamId, streamSelectorType],
   );
 
-  const handleWatchEpisode = (ep: Episode) => {
-    void openEpisodeStreamSelector(ep, {
-      overview: ep.overview || item?.description,
-    });
-  };
-
-  const handleBack = () => {
-    const from = location.state?.from;
-    if (
-      typeof from === 'string' &&
-      from.length > 0 &&
-      from.startsWith('/') &&
-      !from.startsWith('/player')
-    ) {
-      navigate(from, { replace: true });
-      return;
-    }
-    navigate('/', { replace: true });
-  };
-
-  useEffect(() => {
-    if (reopenSelectorConsumed || !item || !preferredStreamId || streamParams || streamSelectorOpen) {
-      return;
-    }
-
-    const navState = location.state as
-      | {
-          reopenStreamSelector?: boolean;
-          reopenStreamSeason?: number;
-          reopenStreamEpisode?: number;
-          reopenStartTime?: number;
-        }
-      | undefined;
-
-    if (!navState?.reopenStreamSelector) return;
-
-    const startTime =
-      typeof navState.reopenStartTime === 'number' && navState.reopenStartTime > 0
-        ? navState.reopenStartTime
-        : undefined;
-
-    const reopenSeason =
-      typeof navState.reopenStreamSeason === 'number' ? navState.reopenStreamSeason : undefined;
-    const reopenEpisode =
-      typeof navState.reopenStreamEpisode === 'number' ? navState.reopenStreamEpisode : undefined;
-    let cancelled = false;
-
-    void (async () => {
-      if (item.type === 'movie') {
-        if (cancelled) {
-          return;
-        }
-
-        setStreamParams({
-          id: item.id,
-          streamId: preferredStreamId,
-          title: item.title,
-          overview: item.description,
-          startTime,
-        });
-        setStreamSelectorOpen(true);
-        setReopenSelectorConsumed(true);
-        return;
+  const openDetailsReopenSelector = useCallback(
+    async (
+      state?: Pick<
+        DetailsHistoryRouteState,
+        'reopenStreamSelector' | 'reopenStreamSeason' | 'reopenStreamEpisode' | 'reopenStartTime'
+      >,
+      options?: {
+        isCancelled?: () => boolean;
+      },
+    ) => {
+      if (!state?.reopenStreamSelector || !item || !preferredStreamId) {
+        return false;
       }
 
+      const startTime =
+        typeof state.reopenStartTime === 'number' && state.reopenStartTime > 0
+          ? state.reopenStartTime
+          : undefined;
+
+      if (item.type === 'movie') {
+        if (options?.isCancelled?.()) {
+          return false;
+        }
+
+        handleWatchMovie(startTime);
+        return true;
+      }
+
+      const reopenSeason =
+        typeof state.reopenStreamSeason === 'number' ? state.reopenStreamSeason : undefined;
+      const reopenEpisode =
+        typeof state.reopenStreamEpisode === 'number' ? state.reopenStreamEpisode : undefined;
+
       if (reopenSeason === undefined || reopenEpisode === undefined) {
-        return;
+        return false;
       }
 
       const targetEpisode = item.episodes?.find(
         (ep) => ep.season === reopenSeason && ep.episode === reopenEpisode,
       );
-      const target = await resolveEpisodeStreamTarget(
-        streamSelectorType,
-        item.id,
-        preferredStreamId,
+
+      return openEpisodeStreamSelector(
         {
           season: reopenSeason,
           episode: reopenEpisode,
@@ -1001,26 +694,48 @@ function DetailsContent() {
           imdbSeason: targetEpisode?.imdbSeason,
           imdbEpisode: targetEpisode?.imdbEpisode,
         },
+        {
+          overview: targetEpisode?.overview || item.description,
+          isCancelled: options?.isCancelled,
+          startTime,
+          title: `${item.title} S${reopenSeason}E${reopenEpisode}`,
+        },
       );
+    },
+    [handleWatchMovie, item, openEpisodeStreamSelector, preferredStreamId],
+  );
 
-      if (cancelled) {
-        return;
-      }
+  const handleWatchEpisode = (ep: Episode) => {
+    if (!item) return;
 
-      setStreamParams({
-        id: item.id,
-        streamId: target.streamId,
-        season: target.season,
-        episode: target.episode,
-        absoluteSeason: target.absoluteSeason,
-        absoluteEpisode: target.absoluteEpisode,
-        aniskipEpisode: target.aniskipEpisode,
-        title: `${item.title} S${reopenSeason}E${reopenEpisode}`,
-        overview: targetEpisode?.overview || item.description,
-        startTime,
+    void getLatestEpisodeResumeStartTime(item.id, item.type, ep.season, ep.episode).then(
+      (startTime) => {
+        void openEpisodeStreamSelector(ep, {
+          overview: ep.overview || item.description,
+          startTime,
+        });
+      },
+    );
+  };
+
+  useEffect(() => {
+    if (reopenSelectorConsumed || !item || !preferredStreamId || streamParams || streamSelectorOpen) {
+      return;
+    }
+
+    const navState = location.state as DetailsHistoryRouteState | undefined;
+
+    if (!navState?.reopenStreamSelector) return;
+    let cancelled = false;
+
+    void (async () => {
+      const opened = await openDetailsReopenSelector(navState, {
+        isCancelled: () => cancelled,
       });
-      setStreamSelectorOpen(true);
-      setReopenSelectorConsumed(true);
+
+      if (!cancelled && opened) {
+        setReopenSelectorConsumed(true);
+      }
     })();
 
     return () => {
@@ -1029,11 +744,11 @@ function DetailsContent() {
   }, [
     item,
     location.state,
+    openDetailsReopenSelector,
     preferredStreamId,
     reopenSelectorConsumed,
     streamParams,
     streamSelectorOpen,
-    streamSelectorType,
   ]);
 
   const effectiveStreamParams = streamParams;
@@ -1051,32 +766,25 @@ function DetailsContent() {
     if (!item || item.type !== 'series') return null;
 
     const continueWatchingEntry = continueWatching?.find(
-      (entry) => entry.id === item.id && entry.type_ === 'series',
+      (entry) => entry.id === item.id && isSeriesLikeHistoryEntryType(entry.type_),
     );
     if (continueWatchingEntry) {
       return continueWatchingEntry;
     }
 
-    return watchHistory?.find((entry) => entry.id === item.id && entry.type_ === 'series') ?? null;
+    return (
+      watchHistory?.find(
+        (entry) => entry.id === item.id && isSeriesLikeHistoryEntryType(entry.type_),
+      ) ?? null
+    );
   }, [continueWatching, watchHistory, item]);
 
-  const formatTime = (seconds?: number) => {
-    if (!seconds || Number.isNaN(seconds)) return null;
-    const s = Math.floor(seconds);
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = Math.floor(s % 60);
-    if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
-    return `${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
-  };
-
   const getResumeInfo = useCallback((entry: WatchProgress | null) => {
-    if (!entry || entry.duration <= 0) {
+    const startTime = getPlayableResumeStartTime(entry);
+    if (!startTime) {
       return { canResume: false, startTime: undefined as number | undefined };
     }
-    const percent = entry.position / entry.duration;
-    const canResume = percent > 0.05 && percent < 0.95 && entry.position > 10;
-    return { canResume, startTime: canResume ? entry.position : undefined };
+    return { canResume: true, startTime };
   }, []);
 
   const movieResume = getResumeInfo(progress);
@@ -1102,17 +810,30 @@ function DetailsContent() {
     return 'Play';
   }, [item, progress, canResumeInSelectedSeason]);
 
-  const formatEpisodeDuration = (seconds?: number) => {
-    if (!seconds || Number.isNaN(seconds)) return null;
-    const minutes = Math.round(seconds / 60);
-    if (minutes <= 0) return null;
-    return `${minutes}m`;
-  };
-
   const handleRetryDetails = () => {
     if (!effectiveRouteType || !effectiveRouteId) return;
     queryClient.invalidateQueries({ queryKey: ['details', effectiveRouteType, effectiveRouteId] });
   };
+
+  const handleOpenTrailer = useCallback(async () => {
+    const primaryTrailerUrl = item?.trailers?.[0]?.url?.trim();
+    if (!primaryTrailerUrl) return;
+
+    const embedUrl = resolveTrailerEmbedUrl(primaryTrailerUrl, { autoplay: true });
+    if (embedUrl) {
+      setTrailerUrl(embedUrl);
+      setTrailerOpen(true);
+      return;
+    }
+
+    try {
+      await openExternal(primaryTrailerUrl);
+    } catch (error) {
+      toast.error('Failed to open trailer', {
+        description: getErrorMessage(error),
+      });
+    }
+  }, [item]);
 
   useEffect(() => {
     if (!resumeEpisodeCoords) return;
@@ -1151,6 +872,13 @@ function DetailsContent() {
       if (progress && movieResume.canResume) {
         try {
           const plan = await buildHistoryPlaybackPlan(progress, from);
+          if (plan.kind === 'details') {
+            const opened = await openDetailsReopenSelector(plan.state as DetailsHistoryRouteState);
+            if (opened) {
+              return;
+            }
+          }
+
           navigate(plan.target, { state: plan.state });
         } catch (err) {
           toast.error('Failed to continue movie', {
@@ -1173,9 +901,15 @@ function DetailsContent() {
       try {
         const plan = await buildHistoryPlaybackPlan(seriesProgress, from);
         if (plan.kind === 'details') {
-          toast.info('Episode context missing', {
-            description: 'Select an episode below to continue watching.',
-          });
+          if (plan.reason === 'missing-saved-stream') {
+            const opened = await openDetailsReopenSelector(plan.state as DetailsHistoryRouteState);
+            if (opened) {
+              return;
+            }
+          }
+
+          const notice = getHistoryPlaybackFallbackNotice(plan.reason, 'select-episode');
+          toast.info(notice.title, { description: notice.description });
           document.getElementById('episodes-section')?.scrollIntoView({ behavior: 'smooth' });
           return;
         }
@@ -1194,180 +928,113 @@ function DetailsContent() {
 
   return (
     <div className='relative pb-20'>
-      {/* Back Button */}
-      <motion.div
-        initial={{ opacity: 0, x: -12 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={{ delay: 0.3, duration: 0.4 }}
-        className='fixed top-5 left-4 md:left-[80px] z-50'
-      >
-        <Button
-          variant='ghost'
-          onClick={handleBack}
-          className='h-9 px-4 gap-1.5 rounded-md bg-black/40 hover:bg-black/60 text-white/80 hover:text-white backdrop-blur-md border border-white/10 hover:border-white/20 text-sm font-medium transition-colors shadow-sm duration-300'
-        >
-          <ArrowLeft className='h-4 w-4' />
-          Back
-        </Button>
-      </motion.div>
-
-      {/* Hero Section - Compact */}
-      <div className='relative h-[65vh] w-full overflow-hidden'>
+      {/* Hero Section - Immersive */}
+      <div className='relative min-h-[70vh] flex items-end pt-32 pb-24 w-full -mt-8'>
         {/* Backdrop */}
         {backdropUrl && (
           <motion.div
-            initial={{ scale: 1.05, opacity: 0 }}
+            initial={{ scale: 1.02, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
-            transition={{ duration: 0.8, ease: 'easeOut' }}
-            className='absolute inset-0'
+            transition={{ duration: 0.6, ease: 'easeOut' }}
+            className='absolute inset-0 z-0'
           >
-            <div className='absolute inset-0 bg-black/20 z-10' />
+            <div className='absolute inset-0 bg-black/30 z-10' />
             <div className='absolute inset-0 bg-gradient-to-t from-background via-background/80 to-transparent z-10' />
-            <div className='absolute inset-0 bg-gradient-to-r from-background via-background/40 to-transparent z-10' />
+            <div className='absolute bottom-0 left-0 right-0 h-64 bg-gradient-to-t from-background via-background/90 to-transparent z-10' />
+            <div className='absolute inset-0 bg-gradient-to-r from-background via-background/60 to-transparent z-10' />
             <img
               src={backdropUrl}
               alt='Backdrop'
               className='w-full h-full object-cover'
               loading='eager'
               decoding='async'
+              style={{ objectPosition: 'center 20%' }}
             />
           </motion.div>
         )}
 
         {/* Content */}
-        <div className='absolute inset-0 z-20 container flex flex-col justify-end pb-8'>
-          <div className='flex flex-col md:flex-row gap-6 md:gap-8 items-end'>
-            {/* Poster (Hidden on mobile, smaller on desktop) */}
-            <motion.div
-              initial={{ y: 40, opacity: 0 }}
-              animate={{ y: 0, opacity: 1 }}
-              transition={{ delay: 0.2, duration: 0.6 }}
-              className='shrink-0 w-48 aspect-[2/3] rounded-md overflow-hidden shadow-2xl ring-1 ring-white/10 hidden md:block bg-zinc-900'
-            >
-              {item.poster ? (
-                <img
-                  src={item.poster}
-                  alt={item.title}
-                  className='w-full h-full object-cover'
-                  loading='eager'
-                  decoding='async'
-                />
-              ) : (
-                <div className='w-full h-full flex items-center justify-center text-white/20'>
-                  No Poster
-                </div>
-              )}
-            </motion.div>
-
+        <div className='relative z-20 container md:pl-24 lg:pl-28 flex flex-col'>
+          <div className='flex flex-col gap-6 w-full max-w-4xl'>
             {/* Info */}
-            <div className='flex-1 space-y-4 w-full'>
+            <div className='space-y-6 w-full'>
               <motion.div
-                initial={{ y: 20, opacity: 0 }}
+                initial={{ y: 12, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.3, duration: 0.6 }}
+                transition={{ delay: 0.1, duration: 0.4 }}
               >
                 {item.logo ? (
                   <img
                     src={item.logo}
                     alt={item.title}
-                    className='h-24 md:h-32 object-contain origin-left mb-4 drop-shadow-2xl'
+                    className='h-24 md:h-32 object-contain origin-left mb-6 drop-shadow-2xl'
                   />
                 ) : (
-                  <h1 className='text-4xl md:text-6xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-white to-white/60 mb-2 leading-none drop-shadow-2xl'>
+                  <h1 className='text-5xl md:text-7xl lg:text-8xl font-serif font-bold tracking-tight text-white mb-6 leading-[1.1] drop-shadow-2xl'>
                     {item.title}
                   </h1>
                 )}
 
                 {/* Metadata Row */}
-                <div className='flex flex-wrap items-center gap-3 text-xs md:text-sm font-medium text-white/90'>
+                <div className='flex flex-wrap items-center gap-4 text-sm font-medium text-white/90'>
+                  <span>{item.year?.split('-')[0] || 'Unknown'}</span>
+                  
+                  {item.type === 'series' && (
+                    <span>{hasEpisodesTab && seasonCount > 0 ? `${seasonCount} Seasons` : 'TV Series'}</span>
+                  )}
+                  {item.type === 'movie' && <span>Movie</span>}
+
+                  {item.genres && item.genres.length > 0 && (
+                     <div className='px-3 py-1 rounded-full border border-white/20 bg-white/5 backdrop-blur-md text-xs tracking-wide'>
+                       {item.genres[0]}
+                     </div>
+                  )}
+
                   {item.rating && (
-                    <div className='flex items-center gap-1.5 text-amber-400'>
-                      <Star className='w-3.5 h-3.5 fill-current' />
-                      <span>{item.rating}</span>
+                    <div className='flex items-center gap-1.5'>
+                      <div className="flex text-amber-500">
+                        {Array.from({ length: 5 }).map((_, i) => (
+                           <Star key={i} className={cn("w-4 h-4 fill-current", i >= Math.round(Number(item.rating) / 2) && "opacity-30")} />
+                        ))}
+                      </div>
+                      <span className="ml-1 font-semibold">{item.rating}</span>
                     </div>
                   )}
-                  <div className='w-1 h-1 rounded-full bg-white/30' />
-                  <span>{item.year?.split('-')[0] || 'Unknown'}</span>
-                  <div className='w-1 h-1 rounded-full bg-white/30' />
-                  <span>
-                    {item.type === 'series'
-                      ? filteredEpisodes.length > 0
-                        ? `${filteredEpisodes.length} Eps`
-                        : 'TV Series'
-                      : 'Movie'}
-                  </span>
-
-                  {/* Genres */}
-                  <div className='flex items-center gap-1.5 ml-2'>
-                    {item.genres?.slice(0, 3).map((g) => (
-                      <span
-                        key={g}
-                        className='px-2 py-0.5 rounded bg-white/10 text-[10px] md:text-xs text-white/80 border border-white/5 cursor-default'
-                      >
-                        {g}
-                      </span>
-                    ))}
-                  </div>
                 </div>
               </motion.div>
 
               <motion.p
-                initial={{ y: 20, opacity: 0 }}
+                initial={{ y: 12, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.4, duration: 0.6 }}
-                className='text-base md:text-lg text-white/80 max-w-3xl leading-relaxed line-clamp-3 font-light drop-shadow-md'
+                transition={{ delay: 0.15, duration: 0.4 }}
+                className='text-base md:text-[17px] text-white/70 max-w-2xl leading-relaxed line-clamp-3 md:line-clamp-4 font-normal drop-shadow-md'
               >
                 {item.description}
               </motion.p>
 
               <motion.div
-                initial={{ y: 20, opacity: 0 }}
+                initial={{ y: 12, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.5, duration: 0.6 }}
-                className='flex flex-wrap items-center gap-3 pt-3'
+                transition={{ delay: 0.2, duration: 0.4 }}
+                className='flex flex-wrap items-center gap-4 pt-4'
               >
-                <Button
-                  size='lg'
-                  className='h-11 px-6 text-[14px] font-semibold rounded-md transition-colors duration-300'
+                <button
+                  className='flex items-center gap-3 group'
                   onClick={handlePrimaryAction}
                 >
-                  <Play className='w-4 h-4 mr-2 fill-current' /> {playButtonText}
-                </Button>
-
-                {item.type === 'movie' &&
-                  progress &&
-                  movieResume.canResume &&
-                  formatTime(progress.position) && (
-                    <span className='text-xs md:text-sm text-white/60 font-medium'>
-                      Continue from {formatTime(progress.position)}
+                  <div className="h-11 md:h-12 px-6 md:px-7 rounded-lg bg-gradient-to-b from-zinc-200 to-zinc-300 text-black flex items-center justify-center gap-2.5 group-hover:from-white group-hover:to-zinc-200 group-active:scale-[0.97] transition-all duration-200 shadow-md">
+                    <Play className='w-4.5 h-4.5 fill-current' />
+                    <span className="text-sm font-semibold tracking-tight">
+                      {playButtonText}
                     </span>
-                  )}
+                  </div>
+                </button>
 
-                {item.type === 'series' &&
-                  seriesProgress &&
-                  canResumeInSelectedSeason &&
-                  seriesProgress.season !== undefined &&
-                  seriesProgress.episode !== undefined && (
-                    <div className='flex items-center gap-2'>
-                      <Badge variant='outline' className='rounded-md border-white/15 bg-white/5 text-white/80'>
-                        S{seriesProgress.season} • E{seriesProgress.episode}
-                      </Badge>
-                      {formatTime(seriesProgress.position) && (
-                        <span className='text-xs md:text-sm text-white/60 font-medium'>
-                          {formatTime(seriesProgress.position)}
-                        </span>
-                      )}
-                    </div>
-                  )}
-
-                <div className='flex gap-3'>
-                  <Button
-                    size='icon'
-                    variant='outline'
+                <div className='flex gap-2.5 ml-1'>
+                  <button
                     className={cn(
-                      'h-11 w-11 rounded-md bg-zinc-900/60 border-white/[0.1] text-white hover:bg-zinc-800/80 hover:border-white/20 transition-colors duration-300 backdrop-blur-md shadow-sm',
-                      isInLibrary &&
-                        'bg-green-500/10 text-green-400 hover:bg-green-500/20 hover:text-green-300 border-green-500/30',
+                      'w-11 h-11 md:h-12 md:w-12 rounded-lg border border-white/[0.12] bg-white/[0.06] flex items-center justify-center text-white/70 hover:bg-white/[0.1] hover:text-white hover:border-white/[0.2] transition-all duration-200 backdrop-blur-sm',
+                      isInLibrary && 'border-green-500/30 text-green-400 bg-green-500/[0.06] hover:bg-green-500/[0.12]'
                     )}
                     onClick={() => toggleLibrary.mutate()}
                   >
@@ -1376,29 +1043,19 @@ function DetailsContent() {
                     ) : isInLibrary ? (
                       <Check className='w-5 h-5' />
                     ) : (
-                      <Plus className='w-5 h-5' />
+                      <Plus className='w-6 h-6' />
                     )}
-                  </Button>
+                  </button>
 
                   {item.trailers && item.trailers.length > 0 && (
-                    <Button
-                      size='icon'
-                      variant='outline'
-                      className='h-11 w-11 rounded-md bg-zinc-900/60 border-white/[0.1] text-white hover:bg-red-500/10 hover:text-red-500 hover:border-red-500/30 transition-colors duration-300 backdrop-blur-md shadow-sm'
+                    <button
+                      className='w-11 h-11 md:h-12 md:w-12 rounded-lg border border-white/[0.12] bg-white/[0.06] flex items-center justify-center text-white/70 hover:bg-white/[0.1] hover:text-white hover:border-white/[0.2] transition-all duration-200 backdrop-blur-sm hover:text-red-400 hover:border-red-500/25 hover:bg-red-500/[0.06]'
                       onClick={() => {
-                        const trailer = item.trailers![0];
-                        const videoIdMatch = trailer.url.match(/(?:v=|\/)([\w-]{11})(?:\?|&|\/|$)/);
-                        const videoId = videoIdMatch ? videoIdMatch[1] : null;
-                        if (videoId) {
-                          setTrailerUrl(`https://www.youtube.com/embed/${videoId}?autoplay=1`);
-                          setTrailerOpen(true);
-                        } else {
-                          window.open(trailer.url, '_blank');
-                        }
+                        void handleOpenTrailer();
                       }}
                     >
                       <Youtube className='w-5 h-5' />
-                    </Button>
+                    </button>
                   )}
                 </div>
               </motion.div>
@@ -1406,9 +1063,9 @@ function DetailsContent() {
               {/* Cast Section */}
               {item.cast && item.cast.length > 0 && (
                 <motion.div
-                  initial={{ y: 20, opacity: 0 }}
+                  initial={{ y: 12, opacity: 0 }}
                   animate={{ y: 0, opacity: 1 }}
-                  transition={{ delay: 0.6, duration: 0.6 }}
+                  transition={{ delay: 0.25, duration: 0.4 }}
                   className='pt-6 max-w-3xl'
                 >
                   <div className='flex flex-wrap items-center gap-x-2 gap-y-2 text-[13px] md:text-[14px]'>
@@ -1438,18 +1095,18 @@ function DetailsContent() {
 
       {/* Tabs Section */}
       {(hasEpisodesTab || hasRelationsTab || hasAnimeMetadataTab) && (
-        <div id='episodes-section' className='container py-8'>
+        <div id='episodes-section' className='container md:pl-24 lg:pl-28 py-8'>
           <Tabs
             value={resolvedActiveTab}
             onValueChange={(value) => setActiveTab(value as DetailsTab)}
             className='w-full space-y-6'
           >
-            <div className='flex items-center justify-between border-b border-white/5 pb-0'>
-              <TabsList className='bg-transparent p-0 gap-8 h-auto'>
+            <div className='flex flex-col gap-4 border-b border-white/5 pb-0'>
+              <TabsList className='bg-transparent p-0 gap-8 h-auto justify-start'>
                 {hasEpisodesTab && (
                   <TabsTrigger
                     value='episodes'
-                    className='rounded-none border-b-2 border-transparent data-[state=active]:border-white data-[state=active]:bg-transparent data-[state=active]:text-white text-zinc-500 text-xl px-2 pb-4 font-bold transition-all hover:text-zinc-300'
+                    className='rounded-none border-b-2 border-transparent data-[state=active]:border-white data-[state=active]:bg-transparent data-[state=active]:text-white text-zinc-500 text-lg px-2 pb-3 font-semibold transition-all hover:text-zinc-300'
                   >
                     Episodes
                   </TabsTrigger>
@@ -1457,7 +1114,7 @@ function DetailsContent() {
                 {hasRelationsTab && (
                   <TabsTrigger
                     value='relations'
-                    className='rounded-none border-b-2 border-transparent data-[state=active]:border-white data-[state=active]:bg-transparent data-[state=active]:text-white text-zinc-500 text-xl px-2 pb-4 font-bold transition-all hover:text-zinc-300'
+                    className='rounded-none border-b-2 border-transparent data-[state=active]:border-white data-[state=active]:bg-transparent data-[state=active]:text-white text-zinc-500 text-lg px-2 pb-3 font-semibold transition-all hover:text-zinc-300'
                   >
                     Relations
                   </TabsTrigger>
@@ -1465,65 +1122,41 @@ function DetailsContent() {
                 {hasAnimeMetadataTab && (
                   <TabsTrigger
                     value='anime-metadata'
-                    className='rounded-none border-b-2 border-transparent data-[state=active]:border-white data-[state=active]:bg-transparent data-[state=active]:text-white text-zinc-500 text-xl px-2 pb-4 font-bold transition-all hover:text-zinc-300'
+                    className='rounded-none border-b-2 border-transparent data-[state=active]:border-white data-[state=active]:bg-transparent data-[state=active]:text-white text-zinc-500 text-lg px-2 pb-3 font-semibold transition-all hover:text-zinc-300'
                   >
                     Cast & Info
                   </TabsTrigger>
                 )}
               </TabsList>
-
-              {/* Season Selector */}
-              {hasEpisodesTab &&
-                localSeasonEntries.length + relatedSeasonEntries.length > 1 && (
-                  <div className='flex items-center gap-2 ml-auto'>
-                    <SeasonSwitcher
-                      localSeasons={localSeasonEntries}
-                      relatedSeasons={relatedSeasonEntries}
-                      activeSeason={scopedInlineTarget ? null : selectedSeason}
-                      activeCandidateKey={activeRelatedCandidateKey}
-                      activeInlineLabel={activeCandidateLabel}
-                      isInlineMode={!!scopedInlineTarget}
-                      inlineModeOriginTitle={scopedInlineTarget?.originTitle}
-                      onLocalSeason={(seasonNumber) => {
-                        if (scopedInlineTarget) {
-                          setInlineTarget(null);
-                          setActiveRelatedCandidateKey(null);
-                          setActiveCandidateLabel('');
-                          setUserSelectedSeason(seasonNumber);
-                          setEpisodePagination({});
-                          setEpisodeSearch('');
-                          setActiveTab('episodes');
-                          return;
-                        }
-
-                        setActiveRelatedCandidateKey(null);
-                        setActiveCandidateLabel('');
-                        setUserSelectedSeason(seasonNumber);
-                        setEpisodeSearch('');
-                      }}
-                      onRelatedSeason={(entry) => {
-                        handleInlineDetailsSwitch(
-                          entry.routeType,
-                          entry.id,
-                          entry.seasonNumber,
-                          entry.itemKey,
-                          entry.label,
-                        );
-                      }}
-                      onPrefetch={prefetchInlineDetailsTarget}
-                    />
-                  </div>
-                )}
             </div>
 
             <TabsContent
               value='episodes'
-              className='mt-0 focus-visible:outline-none animate-in fade-in slide-in-from-bottom-4 duration-500'
+              className='mt-0 focus-visible:outline-none animate-in fade-in slide-in-from-bottom-4 duration-500 flex flex-col gap-6'
             >
-              {item.type === 'series' && filteredEpisodes.length > 0 ? (
+              {/* Season Selector */}
+              {hasEpisodesTab && localSeasonEntries.length > 1 && (
+                  <div className='w-full'>
+                    <SeasonSwitcher
+                      localSeasons={localSeasonEntries}
+                      activeSeason={selectedSeason ?? null}
+                      onLocalSeason={(seasonNumber) => {
+                        if (scopedInlineTarget) {
+                          setInlineTarget(null);
+                          resetEpisodePane(seasonNumber);
+                          setActiveTab('episodes');
+                          return;
+                        }
+
+                        selectSeason(seasonNumber);
+                      }}
+                    />
+                  </div>
+                )}
+              {item.type === 'series' && (hasEpisodesForSelectedSeason || shouldShowEpisodeProgressSkeleton) ? (
                 <>
                 {/* Episode search bar */}
-                {filteredEpisodes.length > 5 && (
+                {shouldShowEpisodeSearch && (
                   <div className='mb-4 relative'>
                     <Search className='absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500 pointer-events-none z-10' />
                     <Input
@@ -1535,7 +1168,7 @@ function DetailsContent() {
                     {episodeSearch && (
                       <button
                         type='button'
-                        onClick={() => setEpisodeSearch('')}
+                        onClick={clearEpisodeSearch}
                         className='absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 transition-colors'
                       >
                         <X className='h-3.5 w-3.5' />
@@ -1543,67 +1176,52 @@ function DetailsContent() {
                     )}
                   </div>
                 )}
-                {shouldUseLongSeasonPaging && !shouldShowEpisodeProgressSkeleton && !episodeSearch.trim() && (
-                  <div className='mb-3 flex items-center justify-between rounded-md border border-white/[0.06] bg-white/[0.02] px-3 py-2'>
-                    <span className='text-xs text-zinc-400'>
-                      Episodes {visibleEpisodeStart}-{visibleEpisodeEnd} of {filteredEpisodes.length}
-                    </span>
-                    <div className='flex items-center gap-2'>
-                      <Button
-                        variant='outline'
-                        size='sm'
-                        className='h-8 px-3 bg-white/[0.03] border-white/[0.08] hover:bg-white/[0.08] hover:border-white/20 text-white disabled:text-zinc-500'
-                        disabled={activeEpisodePageIndex <= 0}
-                        onClick={() => {
-                          setEpisodePagination((prev) => ({
-                            ...prev,
-                            [currentEpisodeSeasonKey]: {
-                              count: EPISODES_PAGE_SIZE,
-                              pageIndex: Math.max(0, activeEpisodePageIndex - 1),
-                            },
-                          }));
-                        }}
-                      >
-                        Prev
-                      </Button>
-                      <span className='text-xs text-zinc-400 tabular-nums'>
-                        Page {activeEpisodePageIndex + 1} / {totalEpisodePages}
-                      </span>
-                      <Button
-                        variant='outline'
-                        size='sm'
-                        className='h-8 px-3 bg-white/[0.03] border-white/[0.08] hover:bg-white/[0.08] hover:border-white/20 text-white disabled:text-zinc-500'
-                        disabled={activeEpisodePageIndex >= totalEpisodePages - 1}
-                        onClick={() => {
-                          setEpisodePagination((prev) => ({
-                            ...prev,
-                            [currentEpisodeSeasonKey]: {
-                              count: EPISODES_PAGE_SIZE,
-                              pageIndex: Math.min(totalEpisodePages - 1, activeEpisodePageIndex + 1),
-                            },
-                          }));
-                        }}
-                      >
-                        Next
-                      </Button>
-                    </div>
+                <div className='flex items-center justify-between gap-4'>
+                  <div>
+                    <p className='text-[12px] font-semibold tabular-nums text-zinc-400'>
+                      {episodeRangeLabel}
+                      {visibleEpisodeStart > 0 && (
+                        <span className='text-zinc-600 font-medium'>
+                          {` of ${totalEpisodeCount}`}
+                        </span>
+                      )}
+                    </p>
                   </div>
-                )}
-                <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-3'>
+
+                  {totalEpisodePages > 1 && (
+                    <div className='flex items-center gap-2'>
+                      <button
+                        type='button'
+                        onClick={() => changeEpisodePage('previous')}
+                        disabled={!hasPreviousEpisodes}
+                        className='flex h-7 w-7 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white disabled:cursor-not-allowed disabled:opacity-35'
+                        aria-label='Show previous episodes'
+                      >
+                        <ChevronLeft className='h-3.5 w-3.5' />
+                      </button>
+                      <div className='min-w-[80px] text-center text-[11px] text-zinc-500 tabular-nums'>
+                        {activeEpisodePageIndex + 1} / {totalEpisodePages}
+                      </div>
+                      <button
+                        type='button'
+                        onClick={() => changeEpisodePage('next')}
+                        disabled={!hasMoreEpisodes}
+                        className='flex h-7 w-7 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white disabled:cursor-not-allowed disabled:opacity-35'
+                        aria-label='Show next episodes'
+                      >
+                        <ChevronRight className='h-3.5 w-3.5' />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className='grid grid-cols-1 gap-4 pb-2 sm:grid-cols-2 2xl:grid-cols-4'>
                   {shouldShowEpisodeProgressSkeleton
-                    ? visibleEpisodes.map((ep) => (
+                    ? Array.from({ length: EPISODE_DISPLAY_PAGE_SIZE }).map((_, i) => (
                         <div
-                          key={`episode-skeleton-${ep.id}`}
-                          className='flex w-full text-left gap-4 rounded-md p-2.5 bg-transparent border border-transparent'
-                        >
-                          <Skeleton className='shrink-0 w-40 aspect-video rounded-lg bg-zinc-900/60' />
-                          <div className='flex-1 min-w-0 flex flex-col justify-center gap-2'>
-                            <Skeleton className='h-3 w-24 bg-white/10' />
-                            <Skeleton className='h-4 w-4/5 bg-white/10' />
-                            <Skeleton className='h-3 w-full bg-white/10' />
-                            <Skeleton className='h-3 w-3/5 bg-white/10' />
-                          </div>
-                        </div>
+                          key={`episode-skeleton-${i}`}
+                          className='aspect-video w-full rounded-xl bg-zinc-900/60 animate-pulse'
+                        />
                       ))
                     : visibleEpisodes.length === 0 && episodeSearch.trim()
                       ? (
@@ -1620,11 +1238,6 @@ function DetailsContent() {
                         ? (epProgress.position / epProgress.duration) * 100
                         : 0;
                     const progressPercent = Math.min(100, Math.max(0, progressRaw));
-                    const isWatched =
-                      epProgress &&
-                      epProgress.duration > 0 &&
-                      epProgress.position / epProgress.duration > 0.9;
-                    const durationLabel = formatEpisodeDuration(epProgress?.duration);
                     const isResumeEp = !!(
                       seriesProgress &&
                       seriesProgress.season === ep.season &&
@@ -1639,175 +1252,69 @@ function DetailsContent() {
                         key={ep.id}
                         ref={isResumeEp ? (el) => { resumeEpisodeRef.current = el; } : undefined}
                         className={cn(
-                          'group flex w-full text-left gap-4 rounded-md p-2.5',
-                          'border border-transparent bg-transparent',
-                          'hover:bg-white/[0.03] hover:border-white/[0.02]',
-                          'transition-colors duration-200 cursor-pointer',
-                          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20',
-                          isResumeEp && 'bg-primary/5 hover:bg-primary/10 border-primary/20 ring-1 ring-primary/20',
+                          'relative aspect-video w-full overflow-hidden rounded-xl bg-zinc-900 text-left group block',
+                          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50',
+                          isResumeEp && 'ring-2 ring-indigo-500',
                         )}
                         onClick={() => handleWatchEpisode(ep)}
                       >
                         {/* Thumbnail */}
-                        <div className='shrink-0 w-40 aspect-video rounded-lg bg-zinc-900/50 relative overflow-hidden'>
-                          {ep.thumbnail ? (
-                            <img
-                              src={ep.thumbnail}
-                              alt={`Ep ${ep.episode}`}
-                              className={cn(
-                                'w-full h-full object-cover transition-all duration-300',
-                                isWatched && !isResumeEp
-                                  ? 'opacity-45 saturate-[0.4] group-hover:opacity-70 group-hover:saturate-75'
-                                  : 'opacity-100',
-                                isSpoiler && 'blur-sm scale-110',
-                              )}
-                              loading='lazy'
-                              decoding='async'
-                              onError={(e) => {
-                                // On load failure hide broken img and show placeholder
-                                (e.currentTarget as HTMLImageElement).style.display = 'none';
-                                const placeholder = e.currentTarget.nextElementSibling as HTMLElement | null;
-                                if (placeholder) placeholder.style.display = 'flex';
-                              }}
-                            />
-                          ) : null}
-                          {/* Placeholder shown when no thumbnail or img fails */}
-                          <div
-                            className='absolute inset-0 flex items-center justify-center text-white/10 font-bold text-xl'
-                            style={{ display: ep.thumbnail ? 'none' : 'flex' }}
-                          >
-                            EP {ep.episode}
-                          </div>
-                          {/* Progress Bar */}
-                          {epProgress && progressPercent > 0 && (
-                            <div className='absolute bottom-0 left-0 right-0 h-[3px] bg-black/40 overflow-hidden'>
-                              <div
-                                className='h-full bg-primary/90'
-                                style={{ width: `${progressPercent}%` }}
-                              />
-                            </div>
-                          )}
-                          {/* Play Overlay */}
-                          <div className='absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-150 bg-black/40'>
-                            <div className='w-9 h-9 rounded-full bg-black/60 border border-white/25 flex items-center justify-center'>
-                              <Play className='w-3.5 h-3.5 fill-white ml-0.5' />
-                            </div>
+                        {ep.thumbnail ? (
+                          <img
+                            src={ep.thumbnail}
+                            alt={`Ep ${ep.episode}`}
+                            className={cn(
+                              'absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-105',
+                              isSpoiler && 'blur-md scale-110',
+                            )}
+                            loading='lazy'
+                            decoding='async'
+                            onError={(e) => {
+                              (e.currentTarget as HTMLImageElement).style.display = 'none';
+                              const placeholder = e.currentTarget.nextElementSibling as HTMLElement | null;
+                              if (placeholder) placeholder.style.display = 'flex';
+                            }}
+                          />
+                        ) : null}
+                        
+                        {/* Placeholder fallback */}
+                        <div
+                          className='absolute inset-0 bg-zinc-900 items-center justify-center text-white/20 font-bold text-2xl'
+                          style={{ display: ep.thumbnail ? 'none' : 'flex' }}
+                        >
+                          EP {ep.episode}
+                        </div>
+
+                        {/* Gradients */}
+                        <div className='absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent pointer-events-none' />
+
+                        {/* Hover Play Icon centered */}
+                        <div className='absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none z-10'>
+                          <div className='w-12 h-12 rounded-full bg-black/50 backdrop-blur-sm border border-white/20 flex items-center justify-center shadow-2xl'>
+                            <Play className='w-5 h-5 fill-white ml-0.5' />
                           </div>
                         </div>
 
-                        {/* Episode Info */}
-                        <div className='flex-1 min-w-0 flex flex-col justify-center gap-1.5'>
-                          {/* Meta row: ep number + badges + duration */}
-                          <div className='flex items-center justify-between gap-2'>
-                            <div className='flex items-center gap-1.5 min-w-0'>
-                              <span className='text-[11px] font-medium text-zinc-500 shrink-0'>
-                                EP {ep.episode}
-                              </span>
-                              {isWatched && !isResumeEp && (
-                                <Check className='w-3 h-3 text-green-400/70 flex-shrink-0' />
-                              )}
-                              {isResumeEp && (
-                                <span className='inline-flex items-center text-[9px] font-bold text-primary uppercase tracking-wider bg-primary/15 border border-primary/25 px-1.5 py-0.5 rounded'>
-                                  Resume
-                                </span>
-                              )}
-                            </div>
-                            {durationLabel && (
-                              <span className='text-[11px] text-zinc-500 flex-shrink-0'>
-                                {durationLabel}
-                              </span>
-                            )}
-                          </div>
-                          {/* Title */}
-                          <h4
-                            className={cn(
-                              'text-sm font-semibold leading-snug truncate',
-                              isWatched && !isResumeEp
-                                ? 'text-zinc-400/90 group-hover:text-zinc-300'
-                                : 'text-zinc-100 group-hover:text-white',
-                            )}
-                          >
-                            {ep.title || `Episode ${ep.episode}`}
+                        {/* Title Bottom Left */}
+                        <div className='absolute bottom-4 left-3 right-3 z-10 pointer-events-none'>
+                          <h4 className='text-white font-semibold text-[15px] leading-tight drop-shadow-md line-clamp-2'>
+                            {isSpoiler ? `Episode ${ep.episode}` : (ep.title || `Episode ${ep.episode}`)}
                           </h4>
-                          {/* Description */}
-                          <p className={cn(
-                            'text-xs text-zinc-500 line-clamp-2 leading-relaxed',
-                            isSpoiler && 'blur-sm select-none',
-                          )}>
-                            {isSpoiler
-                              ? 'Episode description hidden (spoiler protection)'
-                              : (ep.overview || '')}
-                          </p>
-                          {/* Air date */}
-                          {ep.released && (
-                            <span className='text-[10px] text-zinc-600'>
-                              {new Date(ep.released).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
-                            </span>
-                          )}
                         </div>
+
+                        {/* Progress Bar */}
+                        {epProgress && progressPercent > 0 && (
+                          <div className='absolute bottom-0 left-0 right-0 h-1 bg-white/20 z-20 pointer-events-none'>
+                            <div
+                              className='h-full bg-indigo-500'
+                              style={{ width: `${progressPercent}%` }}
+                            />
+                          </div>
+                        )}
                       </button>
                     );
                   })}
                 </div>
-                {shouldUseLongSeasonPaging && !shouldShowEpisodeProgressSkeleton && !episodeSearch.trim() && (
-                  <div className='mt-4 flex items-center justify-center gap-2'>
-                    <Button
-                      variant='outline'
-                      className='bg-white/[0.03] border-white/[0.08] hover:bg-white/[0.08] hover:border-white/20 text-white disabled:text-zinc-500'
-                      disabled={activeEpisodePageIndex <= 0}
-                      onClick={() => {
-                        setEpisodePagination((prev) => ({
-                          ...prev,
-                          [currentEpisodeSeasonKey]: {
-                            count: EPISODES_PAGE_SIZE,
-                            pageIndex: Math.max(0, activeEpisodePageIndex - 1),
-                          },
-                        }));
-                      }}
-                    >
-                      Previous 50
-                    </Button>
-                    <Button
-                      variant='outline'
-                      className='bg-white/[0.03] border-white/[0.08] hover:bg-white/[0.08] hover:border-white/20 text-white disabled:text-zinc-500'
-                      disabled={activeEpisodePageIndex >= totalEpisodePages - 1}
-                      onClick={() => {
-                        setEpisodePagination((prev) => ({
-                          ...prev,
-                          [currentEpisodeSeasonKey]: {
-                            count: EPISODES_PAGE_SIZE,
-                            pageIndex: Math.min(totalEpisodePages - 1, activeEpisodePageIndex + 1),
-                          },
-                        }));
-                      }}
-                    >
-                      Next 50
-                    </Button>
-                  </div>
-                )}
-                {hasMoreEpisodes && !shouldShowEpisodeProgressSkeleton && (
-                  <div className='mt-4 flex items-center justify-center'>
-                    <Button
-                      variant='outline'
-                      className='bg-white/[0.03] border-white/[0.08] hover:bg-white/[0.08] hover:border-white/20 text-white'
-                      onClick={() => {
-                        setEpisodePagination((prev) => {
-                          const baseCount =
-                            prev[currentEpisodeSeasonKey]?.count ?? defaultEpisodeVisibleCount;
-                          return {
-                            ...prev,
-                            [currentEpisodeSeasonKey]: {
-                              count: baseCount + EPISODES_PAGE_SIZE,
-                              pageIndex: 0,
-                            },
-                          };
-                        });
-                      }}
-                    >
-                      Show More Episodes ({remainingEpisodes} left)
-                    </Button>
-                  </div>
-                )}
                 </>
               ) : (
                 <div className='text-center py-24 text-zinc-600'>
@@ -1822,7 +1329,7 @@ function DetailsContent() {
               value='relations'
               className='mt-0 focus-visible:outline-none animate-in fade-in slide-in-from-bottom-4 duration-500'
             >
-              <div className='grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4'>
+              <div className='grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6'>
                 {intelligentRelations.map((rel, i) => (
                   <motion.div
                     initial={{ opacity: 0, scale: 0.9 }}
@@ -1841,6 +1348,7 @@ function DetailsContent() {
                     >
                       <MediaCard
                         item={rel}
+                        subtitle={buildRelationContextLabel(rel) ?? undefined}
                         onPlay={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
@@ -1850,14 +1358,19 @@ function DetailsContent() {
                         }}
                       />
                       {(formatRelationRoleLabel(rel.relationRole) || buildRelationContextLabel(rel)) && (
-                        <div className='flex flex-col items-center gap-0.5 pt-1'>
+                        <div className='flex items-center gap-1.5 pt-1.5'>
                           {formatRelationRoleLabel(rel.relationRole) && (
-                            <span className='text-[11px] font-medium text-zinc-300'>
+                            <span
+                              className={cn(
+                                'rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] leading-none whitespace-nowrap',
+                                getRelationRoleBadgeClass(rel.relationRole),
+                              )}
+                            >
                               {formatRelationRoleLabel(rel.relationRole)}
                             </span>
                           )}
                           {buildRelationContextLabel(rel) && (
-                            <span className='text-[10px] text-zinc-500'>
+                            <span className='text-[10px] text-zinc-500 leading-none whitespace-nowrap'>
                               {buildRelationContextLabel(rel)}
                             </span>
                           )}
@@ -1908,7 +1421,15 @@ function DetailsContent() {
         from={`${location.pathname}${location.search}`}
       />
 
-      <Dialog open={trailerOpen} onOpenChange={setTrailerOpen}>
+      <Dialog
+        open={trailerOpen}
+        onOpenChange={(open) => {
+          setTrailerOpen(open);
+          if (!open) {
+            setTrailerUrl(null);
+          }
+        }}
+      >
         <DialogContent className='max-w-5xl p-0 overflow-hidden bg-black border-zinc-800'>
           {trailerUrl && (
             <div className='aspect-video w-full'>
@@ -1918,7 +1439,8 @@ function DetailsContent() {
                 src={trailerUrl}
                 title='Trailer'
                 frameBorder='0'
-                allow='accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture'
+                allow='accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share'
+                referrerPolicy='strict-origin-when-cross-origin'
                 allowFullScreen
               />
             </div>
@@ -1931,25 +1453,29 @@ function DetailsContent() {
 
 function DetailsSkeleton() {
   return (
-    <div className='min-h-screen bg-background animate-pulse'>
-      <div className='h-[60vh] bg-secondary w-full' />
-      <div className='container -mt-48 relative flex flex-col md:flex-row gap-8'>
-        <div className='w-48 aspect-[2/3] bg-secondary rounded-md shrink-0 hidden md:block ring-1 ring-white/5' />
-        <div className='flex-1 space-y-6 pt-12'>
-          <Skeleton className='h-12 w-3/4' />
+    <div className='min-h-screen bg-background'>
+      {/* Mimics the hero backdrop area with a subtle shimmer instead of a solid block */}
+      <div className='relative h-[70vh] w-full -mt-8 overflow-hidden'>
+        <div className='absolute inset-0 bg-zinc-950' />
+        <div className='absolute inset-0 bg-gradient-to-t from-background via-background/60 to-transparent' />
+        <div className='absolute bottom-0 left-0 right-0 h-64 bg-gradient-to-t from-background to-transparent' />
+      </div>
+
+      <div className='container md:pl-24 lg:pl-28 -mt-56 relative z-10'>
+        <div className='flex flex-col gap-6 w-full max-w-4xl animate-pulse'>
+          <Skeleton className='h-10 w-72 bg-zinc-800/60' />
           <div className='flex gap-3'>
-            <Skeleton className='h-5 w-16' />
-            <Skeleton className='h-5 w-16' />
-            <Skeleton className='h-5 w-16' />
+            <Skeleton className='h-5 w-14 bg-zinc-800/50' />
+            <Skeleton className='h-5 w-20 bg-zinc-800/50' />
+            <Skeleton className='h-5 w-16 bg-zinc-800/50' />
           </div>
-          <div className='space-y-2'>
-            <Skeleton className='h-4 w-full' />
-            <Skeleton className='h-4 w-full' />
-            <Skeleton className='h-4 w-2/3' />
+          <div className='space-y-2.5'>
+            <Skeleton className='h-4 w-full max-w-lg bg-zinc-800/40' />
+            <Skeleton className='h-4 w-4/5 max-w-md bg-zinc-800/40' />
           </div>
-          <div className='flex gap-3 pt-2'>
-            <Skeleton className='h-10 w-32 rounded-full' />
-            <Skeleton className='h-10 w-10 rounded-full' />
+          <div className='flex gap-3 pt-3'>
+            <Skeleton className='h-12 w-36 rounded-lg bg-zinc-800/50' />
+            <Skeleton className='h-12 w-12 rounded-lg bg-zinc-800/40' />
           </div>
         </div>
       </div>

@@ -28,7 +28,10 @@ import {
 import { useNavigate, useLocation } from 'react-router-dom';
 import { CreateListDialog } from '@/components/list/create-list-dialog';
 import { ListIcon } from '@/components/list/list-icons';
-import { buildHistoryPlaybackPlan } from '@/lib/history-playback';
+import {
+  buildHistoryPlaybackPlan,
+  getHistoryPlaybackFallbackNotice,
+} from '@/lib/history-playback';
 import { buildPlayerNavigationTarget } from '@/lib/player-navigation';
 
 interface MediaCardContextMenuProps {
@@ -216,9 +219,8 @@ export function MediaCardContextMenu({ item, children, onPlay }: MediaCardContex
         (typeof historyEntry.season === 'number' && typeof historyEntry.episode === 'number');
 
       if (!hasSeriesEpisodeContext) {
-        toast.info('Episode context missing', {
-          description: 'Opening details so you can choose the episode to continue.',
-        });
+        const notice = getHistoryPlaybackFallbackNotice('missing-episode-context', 'open-details');
+        toast.info(notice.title, { description: notice.description });
         navigate(`/details/${playbackType}/${item.id}`, { state: { from } });
         return;
       }
@@ -227,9 +229,10 @@ export function MediaCardContextMenu({ item, children, onPlay }: MediaCardContex
         const plan = await buildHistoryPlaybackPlan(historyEntry, from);
 
         if (plan.kind === 'details') {
-          toast.info('Episode context missing', {
-            description: 'Opening details so you can select the episode to continue.',
-          });
+          const notice = getHistoryPlaybackFallbackNotice(plan.reason, 'open-details');
+          toast.info(notice.title, { description: notice.description });
+          navigate(plan.target, { state: plan.state });
+          return;
         }
 
         navigate(plan.target, { state: plan.state });

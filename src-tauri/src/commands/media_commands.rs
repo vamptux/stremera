@@ -3,10 +3,9 @@ use super::{
     playback_state::{PlaybackEpisodeMappingSnapshot, PlaybackStateService},
 };
 use crate::providers::{
-    AnimeSupplementalMetadata,
     cinemeta::Cinemeta,
     kitsu::{Kitsu, KitsuEpisodePage},
-    Episode, MediaDetails, Provider,
+    AnimeSupplementalMetadata, Episode, MediaDetails, Provider,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -64,7 +63,9 @@ pub(crate) async fn fetch_media_details_inner(
 
     let media_type = normalize_cinemeta_type(media_type)
         .ok_or_else(|| "Invalid media type. Expected movie or series.".to_string())?;
-    cinemeta_provider.get_details(media_type, id.to_string()).await
+    cinemeta_provider
+        .get_details(media_type, id.to_string())
+        .await
 }
 
 #[command]
@@ -185,14 +186,9 @@ pub async fn get_episode_stream_mapping(
         return Ok(Some(mapping.into()));
     }
 
-    let details = fetch_media_details_inner(
-        &cinemeta_provider,
-        &kitsu_provider,
-        &media_type,
-        &id,
-        true,
-    )
-    .await?;
+    let details =
+        fetch_media_details_inner(&cinemeta_provider, &kitsu_provider, &media_type, &id, true)
+            .await?;
 
     if let Some(episodes) = details.episodes.as_ref() {
         let fallback_lookup_id = details.imdb_id.as_deref().unwrap_or(id.as_str());
@@ -206,13 +202,7 @@ pub async fn get_episode_stream_mapping(
     }
 
     Ok(playback_state
-        .get_episode_mapping(
-            &app,
-            &media_type,
-            &id,
-            canonical_season,
-            canonical_episode,
-        )?
+        .get_episode_mapping(&app, &media_type, &id, canonical_season, canonical_episode)?
         .map(Into::into))
 }
 

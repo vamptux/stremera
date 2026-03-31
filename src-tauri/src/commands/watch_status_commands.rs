@@ -1,8 +1,8 @@
-use super::{
-    normalize_non_empty, WATCH_STATUS_INDEX_KEY, WATCH_STATUS_MAP_KEY, WATCH_STATUS_STORE_FILE,
-};
 use super::store_helpers::{
     load_or_migrate_watch_status_index, load_watch_statuses_map, watch_status_item_key,
+};
+use super::{
+    normalize_non_empty, WATCH_STATUS_INDEX_KEY, WATCH_STATUS_MAP_KEY, WATCH_STATUS_STORE_FILE,
 };
 use serde_json::json;
 use std::collections::HashMap;

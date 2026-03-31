@@ -1,8 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type {
-  PlaybackStreamOutcomeReport,
-  PlaybackStreamReusePolicy,
-} from '@/lib/playback-stream-health';
+import type { PlaybackStreamOutcomeReport } from '@/lib/playback-stream-health';
 import { handlePreviewInvoke } from '@/lib/api-preview-mocks';
 import {
   buildStreamRankingCacheKey,
@@ -145,6 +142,7 @@ export interface TorrentioStream {
   fileIdx?: number;
   behaviorHints?: {
     bingeGroup?: string;
+    filename?: string;
   };
   cached?: boolean;
   seeders?: number;
@@ -247,28 +245,7 @@ export interface ResolveBestStreamOptions extends StreamRankingOptions {
   bypassCache?: boolean;
 }
 
-export interface PlaybackSessionTouchRequest {
-  id: string;
-  type_: string;
-  season?: number;
-  episode?: number;
-  absolute_season?: number;
-  absolute_episode?: number;
-  stream_season?: number;
-  stream_episode?: number;
-  aniskip_episode?: number;
-  title: string;
-  stream_url?: string;
-  stream_format?: string;
-  stream_lookup_id?: string;
-  stream_key?: string;
-  source_name?: string;
-  stream_family?: string;
-  position?: number;
-  duration?: number;
-}
-
-/** A user-configured Stremio-compatible addon source. */
+/** A user-configured addon source compatible with Stremera's addon pipeline. */
 export interface AddonConfig {
   id: string;
   url: string;
@@ -276,7 +253,7 @@ export interface AddonConfig {
   enabled: boolean;
 }
 
-/** Parsed name/description from a Stremio addon's manifest.json. */
+/** Parsed name/description from an addon manifest.json. */
 export interface AddonManifest {
   name: string;
   description?: string;
@@ -290,6 +267,7 @@ const SEARCH_CACHE_TTL_MS = 1000 * 60 * 2;
 const API_CACHE_MAX_ENTRIES = 200;
 const RESOLVE_STREAM_CACHE_TTL_MS = 1000 * 60 * 5;
 const MULTI_GENRE_CACHE_TTL_MS = 1000 * 60 * 5;
+const SEARCH_QUERY_MAX_CHARS = 120;
 
 type TimedCacheEntry<T> = { value: T; expiresAt: number };
 
@@ -419,12 +397,12 @@ function buildResolveStreamKey(
   url?: string,
 ): string {
   return [
-    magnet,
-    infoHash ?? 'na',
+    magnet.trim(),
+    infoHash?.trim().toLowerCase() ?? 'na',
     fileIdx ?? 'na',
     season ?? 'na',
     episode ?? 'na',
-    url ?? 'na',
+    url?.trim() ?? 'na',
   ].join('|');
 }
 
@@ -435,7 +413,7 @@ function buildStreamCacheKey(
   episode?: number,
   absoluteEpisode?: number,
 ): string {
-  return `${type}|${id}|${season ?? 'na'}|${episode ?? 'na'}|${absoluteEpisode ?? 'na'}`;
+  return `${type.trim().toLowerCase()}|${id.trim()}|${season ?? 'na'}|${episode ?? 'na'}|${absoluteEpisode ?? 'na'}`;
 }
 
 function normalizeStreamMediaType(type: string, id: string): string {
@@ -452,7 +430,7 @@ function buildMediaDetailsCacheKey(type: string, id: string): string {
 }
 
 function normalizeSearchQuery(query: string): string {
-  return query.trim().replace(/\s+/g, ' ');
+  return query.trim().replace(/\s+/g, ' ').slice(0, SEARCH_QUERY_MAX_CHARS);
 }
 
 function normalizeGenreFilters(genres: string[]): string[] {
@@ -507,13 +485,17 @@ export const api = {
       }),
     );
   },
-  searchMedia: (query: string) => {
+  searchMedia: (query: string, mediaType?: 'movie' | 'series') => {
     const normalizedQuery = normalizeSearchQuery(query);
     if (!normalizedQuery) return Promise.resolve([]);
 
-    const cacheKey = normalizedQuery.toLowerCase();
+    const normalizedMediaType = mediaType?.trim().toLowerCase() as 'movie' | 'series' | undefined;
+    const cacheKey = `${normalizedMediaType ?? 'all'}|${normalizedQuery.toLowerCase()}`;
     return runCachedRequest(searchRequestCache, cacheKey, () =>
-      safeInvoke<MediaItem[]>('search_media', { query: normalizedQuery }),
+      safeInvoke<MediaItem[]>('search_media', {
+        query: normalizedQuery,
+        media_type: normalizedMediaType,
+      }),
     );
   },
   getMediaDetails: (type: string, id: string, options?: { includeEpisodes?: boolean }) => {
@@ -521,6 +503,25 @@ export const api = {
     const normalizedId = id.trim();
     const includeEpisodes = options?.includeEpisodes ?? true;
     const cacheKey = `${buildMediaDetailsCacheKey(normalizedType, normalizedId)}|${includeEpisodes ? 'full' : 'lite'}`;
+
+    if (!includeEpisodes) {
+      const fullCacheKey = `${buildMediaDetailsCacheKey(normalizedType, normalizedId)}|full`;
+      const cachedFullDetails = getTimedCache(mediaDetailsRequestCache.values, fullCacheKey);
+      if (cachedFullDetails) {
+        setTimedCache(
+          mediaDetailsRequestCache.values,
+          cacheKey,
+          cachedFullDetails,
+          mediaDetailsRequestCache.ttlMs,
+        );
+        return Promise.resolve(cachedFullDetails);
+      }
+
+      const inFlightFullDetails = mediaDetailsRequestCache.inFlight.get(fullCacheKey);
+      if (inFlightFullDetails) {
+        return inFlightFullDetails;
+      }
+    }
 
     return runCachedRequest(mediaDetailsRequestCache, cacheKey, () =>
       safeInvoke<MediaDetails>('get_media_details', {
@@ -663,19 +664,21 @@ export const api = {
   // Settings
   getAddonConfigs: () => safeInvoke<AddonConfig[]>('get_addon_configs'),
   saveAddonConfigs: async (configs: AddonConfig[]) => {
-    await safeInvoke<void>('save_addon_configs', { configs });
+    const saved = await safeInvoke<AddonConfig[]>('save_addon_configs', { configs });
     clearStreamingCaches();
+    return saved;
   },
   fetchAddonManifest: (url: string) => safeInvoke<AddonManifest>('fetch_addon_manifest', { url }),
   savePlaybackLanguagePreferences: (
     preferredAudioLanguage?: string,
     preferredSubtitleLanguage?: string,
   ) =>
-    safeInvoke<void>('save_playback_language_preferences', {
+    safeInvoke<PlaybackLanguagePreferences>('save_playback_language_preferences', {
       preferredAudioLanguage,
       preferredSubtitleLanguage,
-    }).then(() => {
+    }).then((savedPreferences) => {
       clearStreamingCaches();
+      return savedPreferences;
     }),
   getPlaybackLanguagePreferences: () =>
     safeInvoke<PlaybackLanguagePreferences>('get_playback_language_preferences'),
@@ -695,17 +698,6 @@ export const api = {
       media_type: mediaType,
       preferred_audio_language: preferredAudioLanguage,
       preferred_subtitle_language: preferredSubtitleLanguage,
-    }),
-  getPlaybackStreamReusePolicy: (id: string, type: string, season?: number, episode?: number) =>
-    safeInvoke<PlaybackStreamReusePolicy>('get_playback_stream_reuse_policy', {
-      id,
-      type: type,
-      season,
-      episode,
-    }),
-  touchPlaybackSession: (session: PlaybackSessionTouchRequest) =>
-    safeInvoke<void>('touch_playback_session', {
-      session,
     }),
   reportPlaybackStreamOutcome: (report: PlaybackStreamOutcomeReport) =>
     safeInvoke<void>('report_playback_stream_outcome', report as unknown as Record<string, unknown>),
@@ -783,15 +775,21 @@ export const api = {
     season: number | undefined,
     episode: number | undefined,
     duration?: number,
-  ) =>
-    safeInvoke<SkipSegment[]>('get_skip_times', {
+  ) => {
+    const normalizedDuration =
+      typeof duration === 'number' && Number.isFinite(duration) && duration > 0
+        ? duration
+        : undefined;
+
+    return safeInvoke<SkipSegment[]>('get_skip_times', {
       mediaType,
       id,
       imdbId,
       season,
       episode,
-      duration: duration ?? 0,
-    }),
+      duration: normalizedDuration,
+    });
+  },
 
   // Returns true when at least one enabled addon is configured (stream resolution is possible)
   checkApiKeys: async () => {

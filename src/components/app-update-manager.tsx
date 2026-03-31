@@ -2,9 +2,12 @@ import { useEffect, useRef } from 'react';
 import { toast } from 'sonner';
 import { getErrorMessage } from '@/lib/api';
 import { useAppUpdater } from '@/hooks/use-app-updater';
+import {
+  getLastNotifiedAppUpdateVersion,
+  setLastNotifiedAppUpdateVersion,
+} from '@/lib/app-updater';
 
 const UPDATE_TOAST_ID = 'app-update-toast';
-const LAST_NOTIFIED_VERSION_KEY = 'stremera:last-notified-app-update-version';
 
 export function AppUpdateManager() {
   const didCheckRef = useRef(false);
@@ -19,12 +22,12 @@ export function AppUpdateManager() {
         const update = await checkForUpdates();
         if (!update) return;
 
-        const lastNotifiedVersion = window.localStorage.getItem(LAST_NOTIFIED_VERSION_KEY);
+        const lastNotifiedVersion = getLastNotifiedAppUpdateVersion();
         if (lastNotifiedVersion === update.version) {
           return;
         }
 
-        window.localStorage.setItem(LAST_NOTIFIED_VERSION_KEY, update.version);
+        setLastNotifiedAppUpdateVersion(update.version);
 
         toast.info(`Update ${update.version} is ready`, {
           description:

@@ -3,6 +3,7 @@ export interface StreamRankingOptions {
   rankingMediaType?: string;
   rankingSeason?: number;
   rankingEpisode?: number;
+  rankingTitle?: string;
 }
 
 export interface StreamRankingTarget {
@@ -10,6 +11,7 @@ export interface StreamRankingTarget {
   mediaType?: string;
   season?: number;
   episode?: number;
+  title?: string;
 }
 
 export function buildStreamRankingOptions(
@@ -22,6 +24,7 @@ export function buildStreamRankingOptions(
     rankingMediaType: target.mediaType?.trim() || undefined,
     rankingSeason: target.season,
     rankingEpisode: target.episode,
+    rankingTitle: target.title?.trim() || undefined,
   };
 }
 
@@ -31,6 +34,7 @@ export function buildStreamRankingCacheKey(options?: StreamRankingOptions): stri
     options?.rankingMediaId ?? 'na',
     options?.rankingSeason ?? 'na',
     options?.rankingEpisode ?? 'na',
+    options?.rankingTitle?.trim().toLowerCase() ?? 'na',
   ].join('|');
 }
 
@@ -42,5 +46,6 @@ export function buildStreamRankingInvokePayload(
     ranking_media_type: options?.rankingMediaType,
     ranking_season: options?.rankingSeason,
     ranking_episode: options?.rankingEpisode,
+    ranking_title: options?.rankingTitle,
   };
 }

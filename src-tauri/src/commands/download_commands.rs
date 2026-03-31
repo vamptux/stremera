@@ -38,9 +38,7 @@ pub async fn pause_download(manager: State<'_, DownloadManager>, id: String) -> 
 }
 
 #[command]
-pub async fn pause_active_downloads(
-    manager: State<'_, DownloadManager>,
-) -> Result<usize, String> {
+pub async fn pause_active_downloads(manager: State<'_, DownloadManager>) -> Result<usize, String> {
     Ok(manager.pause_active_downloads().await)
 }
 
@@ -108,7 +106,7 @@ pub fn get_default_download_path(app: AppHandle) -> Result<String, String> {
     Ok(app
         .path()
         .download_dir()
-        .map(|p| p.join("Streamy"))
+        .map(|p| p.join("Stremera"))
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
         .to_string_lossy()
         .to_string())

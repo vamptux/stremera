@@ -5,9 +5,8 @@ use super::config_store::{
 use super::list_helpers::{list_item_store_key, list_meta_key, UserList, LISTS_ORDER_KEY};
 use super::store_helpers::{library_item_key, watch_status_item_key};
 use super::{
-    LIBRARY_INDEX_KEY, LIBRARY_MAP_KEY, LIBRARY_STORE_FILE, LISTS_STORE_FILE,
-    SETTINGS_STORE_FILE, WATCH_STATUS_INDEX_KEY, WATCH_STATUS_MAP_KEY,
-    WATCH_STATUS_STORE_FILE,
+    LIBRARY_INDEX_KEY, LIBRARY_MAP_KEY, LIBRARY_STORE_FILE, LISTS_STORE_FILE, SETTINGS_STORE_FILE,
+    WATCH_STATUS_INDEX_KEY, WATCH_STATUS_MAP_KEY, WATCH_STATUS_STORE_FILE,
 };
 use serde_json::json;
 use tauri::AppHandle;
@@ -79,8 +78,7 @@ fn migrate_settings_store(app: &AppHandle) -> Result<(), String> {
     let canonical_api_key = stored_api_key.or(legacy_api_key);
 
     if let Some(api_key) = canonical_api_key {
-        let api_key_changed = get_trimmed_store_string(&store, DEBRID_API_KEY_KEY)
-            .as_deref()
+        let api_key_changed = get_trimmed_store_string(&store, DEBRID_API_KEY_KEY).as_deref()
             != Some(api_key.as_str());
         store.set(DEBRID_API_KEY_KEY, json!(api_key));
         if api_key_changed {

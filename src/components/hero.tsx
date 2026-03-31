@@ -126,9 +126,6 @@ export function Hero({ items, onFirstImageLoaded }: HeroProps) {
 
 
   const heroRating = heroDetails?.rating ?? null;
-  const heroGenres = heroDetails?.genres?.length
-    ? heroDetails.genres.slice(0, 3).join(' • ')
-    : null;
 
   const { data: library } = useQuery({
     queryKey: ['library'],
@@ -136,36 +133,36 @@ export function Hero({ items, onFirstImageLoaded }: HeroProps) {
     staleTime: 1000 * 60 * 5,
   });
 
-  const isInLibrary = item && library?.some((l) => l.id === item.id);
+  const isInLibrary = item && library?.some((libraryItem) => libraryItem.id === item.id);
 
   const toggleLibrary = useMutation({
     mutationFn: async () => {
       if (!item) return;
       if (isInLibrary) {
         await api.removeFromLibrary(item.id);
-        return "removed";
-      } else {
-        await api.addToLibrary(item);
-        return "added";
+        return 'removed';
       }
+
+      await api.addToLibrary(item);
+      return 'added';
     },
     onSuccess: (action) => {
       queryClient.invalidateQueries({ queryKey: ['library'] });
       if (item) {
-        toast.success(action === "added" ? "Added to Library" : "Removed from Library", {
-            description: item.title,
+        toast.success(action === 'added' ? 'Added to Library' : 'Removed from Library', {
+          description: item.title,
         });
       }
     },
     onError: () => {
-      toast.error("Failed to update library");
-    }
+      toast.error('Failed to update library');
+    },
   });
 
   if (!item) {
     return (
-      <div className="w-full h-[55vh] bg-zinc-900/20 animate-pulse relative overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent" />
+      <div className="w-full h-[60vh] min-h-[420px] max-h-[680px] -mt-8 bg-zinc-950 relative overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-t from-black via-black/50 to-transparent" />
       </div>
     );
   }
@@ -174,21 +171,20 @@ export function Hero({ items, onFirstImageLoaded }: HeroProps) {
 
   return (
     <div
-      className="relative w-full h-[60vh] min-h-[400px] max-h-[700px] overflow-hidden group"
+      className="relative w-full h-[60vh] min-h-[420px] max-h-[680px] -mt-8 overflow-hidden group"
       onMouseEnter={() => setIsPausedByHover(true)}
       onMouseLeave={() => setIsPausedByHover(false)}
     >
       
       {/* Scroll Dimming & Blur Overlay */}
       <div 
-        className="absolute inset-0 bg-black/80 backdrop-blur-sm pointer-events-none transition-opacity duration-300 ease-out z-[5]"
+        className="absolute inset-0 bg-black/60 backdrop-blur-[2px] pointer-events-none transition-opacity duration-300 ease-out z-[5]"
         style={{ opacity: scrollOpacity }}
       />
 
       {/* Background Image - with smooth transition and mask for seamless blending */}
       <div 
         className={cn("absolute inset-0 transition-opacity duration-500 ease-in-out", isTransitioning ? "opacity-0" : "opacity-100")}
-        style={{ maskImage: 'linear-gradient(to bottom, black 40%, transparent 100%)', WebkitMaskImage: 'linear-gradient(to bottom, black 40%, transparent 100%)' }}
       >
           {backdropUrl && (
              <>
@@ -203,117 +199,133 @@ export function Hero({ items, onFirstImageLoaded }: HeroProps) {
                       }
                     }}
                 />
-                <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-black/20 to-transparent" />
-                <div className="absolute inset-0 bg-gradient-to-l from-transparent via-transparent to-black/10" />
+                <div className="absolute inset-0 bg-gradient-to-r from-black/70 via-black/25 to-transparent" />
+                <div className="absolute inset-0 bg-gradient-to-t from-black via-black/35 to-transparent" />
              </>
           )}
       </div>
 
-      {/* Content */}
-      <div className={cn("absolute inset-0 flex items-end justify-start transition-all duration-500 ease-in-out pb-16 pl-6 md:pl-24 lg:pl-28", isTransitioning ? "opacity-0 translate-y-4" : "opacity-100 translate-y-0")}>
-        <div 
-          className="max-w-4xl w-full flex flex-col items-start text-left space-y-4"
-          style={{ opacity: 1 - scrollOpacity }}
-        >
-            
-            {/* Logo or Title */}
-            <div className="mb-2">
-                {item.logo ? (
-                    <img 
-                        src={item.logo} 
-                        alt={item.title} 
-                        className="max-h-[140px] object-contain object-left-bottom drop-shadow-2xl animate-in fade-in slide-in-from-left-4 duration-700"
-                    />
-                ) : (
-                    <h1 className="text-5xl md:text-6xl font-black text-transparent bg-clip-text bg-gradient-to-br from-white to-white/60 tracking-tighter drop-shadow-2xl leading-[0.9] animate-in fade-in slide-in-from-bottom-6 duration-700">
-                        {item.title}
-                    </h1>
-                )}
+      {/* Visible area wrapper — content offset past sidebar, image bleeds behind it */}
+      <div className="absolute inset-0">
+        <div className="relative w-full h-full">
+          {/* Content */}
+          <div className={cn("absolute inset-0 flex items-end justify-start transition-all duration-500 ease-in-out pb-16 pl-6 md:pl-[84px] lg:pl-28", isTransitioning ? "opacity-0 translate-y-3" : "opacity-100 translate-y-0")}>
+            <div
+              className="max-w-5xl w-full flex items-end gap-6 text-left"
+              style={{ opacity: 1 - scrollOpacity }}
+            >
+          {/* Poster */}
+          {item.poster && (
+            <div className="hidden md:block flex-none w-[88px] rounded-lg overflow-hidden shadow-2xl animate-in fade-in duration-700 shrink-0 self-end">
+              <img src={item.poster} alt={item.title} className="w-full aspect-[2/3] object-cover" />
+            </div>
+          )}
+
+          <div className="flex flex-col items-start gap-2.5 min-w-0 pb-1">
+            {/* Logo or title */}
+            {item.logo ? (
+              <img
+                src={item.logo}
+                alt={item.title}
+                className="max-h-[180px] max-w-[420px] object-contain object-left-bottom drop-shadow-2xl animate-in fade-in duration-700"
+              />
+            ) : (
+              <h1 className="text-4xl md:text-5xl font-bold text-white tracking-tight drop-shadow-lg animate-in fade-in duration-700 leading-tight">
+                {item.title}
+              </h1>
+            )}
+
+            {/* Compact metadata + gradient badges */}
+            <div className="flex items-center flex-wrap gap-x-2.5 gap-y-1 text-[12px] text-zinc-400 animate-in fade-in duration-700 delay-100">
+              {heroRating && (
+                <>
+                  <span className="flex items-center gap-1 text-white/80 font-medium">
+                    <Star className="w-3 h-3 fill-yellow-400 text-yellow-400" />
+                    {heroRating}
+                  </span>
+                  <span className="text-zinc-700">·</span>
+                </>
+              )}
+              {item.year && (
+                <>
+                  <span>{item.year.split('-')[0]}</span>
+                  <span className="text-zinc-700">·</span>
+                </>
+              )}
+              <span className="inline-flex items-center rounded-md border border-white/[0.12] bg-white/[0.08] px-2 py-[3px] text-[11px] font-medium text-zinc-300">
+                {item.type === 'series' ? 'Series' : 'Movie'}
+              </span>
+              {heroDetails?.genres && heroDetails.genres.length > 0 && (
+                heroDetails.genres.slice(0, 3).map((genre) => (
+                  <span
+                    key={genre}
+                    className="inline-flex items-center rounded-md border border-white/[0.08] bg-white/[0.04] px-2 py-[3px] text-[11px] font-medium text-zinc-400"
+                  >
+                    {genre}
+                  </span>
+                ))
+              )}
             </div>
 
-            {/* Metadata Badge Row */}
-            <div className="flex items-center justify-start gap-4 text-[14px] font-medium text-white/80 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-100">
-                {heroRating && (
-                    <span className="flex items-center gap-1.5 font-semibold text-white/90">
-                        <Star className="w-4 h-4 fill-primary text-primary" />
-                        {heroRating}
-                    </span>
-                )}
-                {heroRating && <span className="w-1 h-1 rounded-full bg-white/20" />}
-                <span className="text-white/80">{item.year?.split('-')[0] || "2024"}</span>
-                <span className="w-1 h-1 rounded-full bg-white/20" />
-                <span className={cn(
-                    "inline-flex items-center gap-1.5 text-[11px] font-semibold px-2 py-1 rounded border",
-                    item.type === 'series'
-                      ? "bg-sky-500/[0.08] text-sky-300/80 border-sky-500/[0.15]"
-                      : "bg-amber-500/[0.08] text-amber-300/80 border-amber-500/[0.15]"
-                )}>
-                    <span className={cn("w-1.5 h-1.5 rounded-full flex-shrink-0", item.type === 'series' ? 'bg-sky-400' : 'bg-amber-400')} />
-                    {item.type === 'series' ? 'TV Series' : 'Movie'}
-                </span>
-                {heroGenres && (
-                   <>
-                    <span className="w-1 h-1 rounded-full bg-white/20 hidden md:block" />
-                    <span className="hidden md:block text-white/70">{heroGenres}</span> 
-                   </>
-                )}
-            </div>
+            {/* Description — one line */}
+            {item.description && (
+              <p className="text-[12.5px] text-zinc-500 line-clamp-1 max-w-md leading-relaxed animate-in fade-in duration-700 delay-150">
+                {item.description}
+              </p>
+            )}
 
-            {/* Description (Short) */}
-            <p className="text-white/70 text-[14px] md:text-base line-clamp-2 max-w-xl font-normal leading-relaxed animate-in fade-in slide-in-from-bottom-8 duration-700 delay-200 text-left">
-                {item.description || "Experience this title in stunning quality. Stream instantly with no waiting."}
-            </p>
-
-            {/* Actions */}
-            <div className="flex items-center gap-3 pt-6 animate-in fade-in slide-in-from-bottom-10 duration-700 delay-300">
-                <Link to={`/details/${item.type}/${item.id}`} state={{ from }}>
-                    <Button size="lg" className="h-12 px-8 text-[15px] font-semibold bg-white hover:bg-zinc-200 text-black transition-colors rounded-md shadow border border-transparent hover:border-zinc-800 transition-colors">
-                        <Play className="w-5 h-5 mr-2 fill-current" />
-                        Watch Now
-                    </Button>
-                </Link>
+            {/* Actions — compact */}
+            <div className="flex items-center gap-2 animate-in fade-in duration-700 delay-200 pt-0.5">
+              <Link to={`/details/${item.type}/${item.id}`} state={{ from }}>
                 <Button
-                    size="lg"
-                    variant="secondary"
-                    className={cn(
-                        "h-12 px-8 backdrop-blur-md border border-white/[0.08] transition-all duration-300 rounded-md shadow-sm text-[15px] font-semibold",
-                        isInLibrary 
-                            ? "bg-green-500/10 text-green-400 hover:bg-green-500/15 border-green-500/20" 
-                            : "bg-zinc-950/50 hover:bg-white/5 hover:border-white/10 text-white/90 hover:text-white"
-                    )}
-                    onClick={() => toggleLibrary.mutate()}
-                    disabled={toggleLibrary.isPending}
+                  size="sm"
+                  className="h-8 px-4 text-[12.5px] font-semibold text-white transition-colors rounded-md gap-1.5 border border-white/[0.14] bg-white/[0.12] hover:bg-white/[0.18] hover:border-white/[0.22]"
                 >
-                    {isInLibrary ? (
-                        <>
-                            <Check className="w-4 h-4 mr-2" />
-                            In Library
-                        </>
-                    ) : (
-                        <>
-                            <Plus className="w-4 h-4 mr-2" />
-                            Add to Library
-                        </>
-                    )}
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  Watch
                 </Button>
+              </Link>
+              <Button
+                size="sm"
+                variant="ghost"
+                className={cn(
+                  "h-8 px-3.5 text-[12.5px] font-medium rounded-md transition-all duration-200 gap-1.5 border",
+                  isInLibrary
+                    ? 'text-green-400 border-green-500/25 bg-green-500/[0.08] hover:bg-green-500/[0.14]'
+                    : 'text-zinc-300 border-white/[0.1] bg-white/[0.05] hover:bg-white/[0.09] hover:text-white',
+                )}
+                onClick={() => toggleLibrary.mutate()}
+                disabled={toggleLibrary.isPending}
+              >
+                {isInLibrary ? <Check className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+                {isInLibrary ? 'Saved' : 'Watchlist'}
+              </Button>
             </div>
+          </div>
         </div>
       </div>
 
-      {/* Carousel Indicators */}
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex gap-2 z-20">
-        {items.map((_, idx) => (
-            <button 
+          {/* Carousel Indicators - centered in visible area */}
+          <div
+            className="absolute bottom-5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 z-20 rounded-full bg-white/[0.06] backdrop-blur-md px-2.5 py-1.5 border border-white/[0.06] transition-opacity duration-300"
+            style={{ opacity: Math.max(0, 1 - scrollOpacity * 2) }}
+          >
+            {items.map((_, idx) => (
+              <button
                 key={idx}
                 type="button"
                 aria-label={`Go to slide ${idx + 1}`}
                 onClick={() => handleSelect(idx)}
                 className={cn(
-                    "h-1 rounded-full transition-all duration-300",
-              idx === activeIndex ? "w-6 bg-white" : "w-1.5 bg-white/25 hover:bg-white/60"
+                  "rounded-full transition-all duration-500 ease-out",
+                  idx === activeIndex
+                    ? "w-5 h-[5px] bg-white shadow-[0_0_6px_rgba(255,255,255,0.4)]"
+                    : "w-[5px] h-[5px] bg-white/25 hover:bg-white/50"
                 )}
-            />
-        ))}
+              />
+            ))}
+          </div>
+        </div>
       </div>
     </div>
   );

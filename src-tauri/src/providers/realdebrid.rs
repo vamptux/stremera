@@ -1,7 +1,7 @@
+use super::build_provider_http_client;
 use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
 
 const RD_BASE_URL: &str = "https://api.real-debrid.com";
 
@@ -13,6 +13,37 @@ pub struct RealDebrid {
 /// Adds Authorization header for compatibility with endpoints that require Bearer tokens.
 fn add_auth_header(builder: RequestBuilder, token: &str) -> RequestBuilder {
     builder.header("Authorization", format!("Bearer {}", token))
+}
+
+fn normalize_access_token(access_token: &str) -> Result<&str, String> {
+    let trimmed = access_token.trim();
+    if trimmed.is_empty() {
+        return Err("Real-Debrid access token is missing.".to_string());
+    }
+
+    Ok(trimmed)
+}
+
+fn normalize_availability_hashes(hashes: Vec<String>) -> Result<Vec<String>, String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for hash in hashes {
+        let candidate = hash.trim().to_ascii_lowercase();
+        if candidate.len() != 40 || !candidate.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+
+        if seen.insert(candidate.clone()) {
+            normalized.push(candidate);
+        }
+    }
+
+    if normalized.is_empty() {
+        return Err("At least one valid 40-character torrent info hash is required.".to_string());
+    }
+
+    Ok(normalized)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,15 +109,12 @@ pub struct UnrestrictResponse {
 impl RealDebrid {
     pub fn new() -> Self {
         Self {
-            client: Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(20))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            client: build_provider_http_client(Some(8)),
         }
     }
 
     pub async fn get_user_info(&self, access_token: &str) -> Result<UserInfo, String> {
+        let access_token = normalize_access_token(access_token)?;
         let url = format!("{}/rest/1.0/user", RD_BASE_URL);
         let res = add_auth_header(self.client.get(&url), access_token)
             .send()
@@ -107,6 +135,8 @@ impl RealDebrid {
         access_token: &str,
         hashes: Vec<String>,
     ) -> Result<InstantAvailabilityResponse, String> {
+        let access_token = normalize_access_token(access_token)?;
+        let hashes = normalize_availability_hashes(hashes)?;
         let url = format!(
             "{}/rest/1.0/torrents/instantAvailability/{}",
             RD_BASE_URL,
@@ -133,6 +163,7 @@ impl RealDebrid {
         access_token: &str,
         magnet: &str,
     ) -> Result<AddMagnetResponse, String> {
+        let access_token = normalize_access_token(access_token)?;
         let url = format!("{}/rest/1.0/torrents/addMagnet", RD_BASE_URL);
         let res = add_auth_header(self.client.post(&url), access_token)
             .form(&[("magnet", magnet)])
@@ -157,6 +188,7 @@ impl RealDebrid {
         id: &str,
         files: &str,
     ) -> Result<(), String> {
+        let access_token = normalize_access_token(access_token)?;
         let url = format!("{}/rest/1.0/torrents/selectFiles/{}", RD_BASE_URL, id);
         let res = add_auth_header(self.client.post(&url), access_token)
             .form(&[("files", files)])
@@ -177,6 +209,7 @@ impl RealDebrid {
         access_token: &str,
         id: &str,
     ) -> Result<TorrentInfo, String> {
+        let access_token = normalize_access_token(access_token)?;
         let url = format!("{}/rest/1.0/torrents/info/{}", RD_BASE_URL, id);
         let res = add_auth_header(self.client.get(&url), access_token)
             .send()
@@ -197,6 +230,7 @@ impl RealDebrid {
         access_token: &str,
         link: &str,
     ) -> Result<UnrestrictResponse, String> {
+        let access_token = normalize_access_token(access_token)?;
         let url = format!("{}/rest/1.0/unrestrict/link", RD_BASE_URL);
         let res = add_auth_header(self.client.post(&url), access_token)
             .form(&[("link", link)])

@@ -8,6 +8,14 @@
   #root {
     background-color: black;
     color: white;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  html::-webkit-scrollbar,
+  body::-webkit-scrollbar,
+  #root::-webkit-scrollbar {
+    display: none;
   }
 
   :root {

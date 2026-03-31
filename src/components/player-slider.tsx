@@ -16,7 +16,7 @@ export const PlayerSlider = React.forwardRef<
     onPointerDown={(e) => e.stopPropagation()}
     {...props}
   >
-    <SliderPrimitive.Track className='relative h-[4px] w-full grow overflow-hidden rounded-full bg-white/20 transition-[height] duration-150 group-hover/slider:h-[6px]'>
+    <SliderPrimitive.Track className='relative h-[5px] w-full grow overflow-hidden rounded-full bg-white/15 transition-[height] duration-150 group-hover/slider:h-[7px]'>
       <SliderPrimitive.Range className='absolute h-full bg-white' />
     </SliderPrimitive.Track>
     <SliderPrimitive.Thumb className='block h-4 w-4 cursor-pointer opacity-0' />

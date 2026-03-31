@@ -238,4 +238,3 @@ pub(super) fn load_watch_statuses_map<R: tauri::Runtime>(
 
     Ok(statuses)
 }
-

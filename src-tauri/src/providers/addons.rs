@@ -438,7 +438,7 @@ struct CachedStreams {
     expires_at: Instant,
 }
 
-pub struct StremioAddonTransport {
+pub struct AddonTransport {
     client: Client,
     /// In-memory, TTL-based cache for `get_streams` results keyed by
     /// `{type}|{id}|{rd_token_hash_or_none}|{addon_url_hash}`.
@@ -508,7 +508,7 @@ pub fn stream_quality_score(stream: &TorrentioStream) -> i32 {
     score
 }
 
-impl StremioAddonTransport {
+impl AddonTransport {
     fn matches_stream_identity(left: &TorrentioStream, right: &TorrentioStream) -> bool {
         left.info_hash == right.info_hash
             && left.file_idx == right.file_idx
@@ -574,7 +574,7 @@ impl StremioAddonTransport {
     }
 
     pub fn new() -> Self {
-        // Build a header map that mirrors what a browser / Stremio sends so that
+        // Build a header map that mirrors what a browser-like addon client sends so that
         // Some addon hosts sit behind CDN or anti-bot layers that are friendlier
         // to browser-like request headers.
         let mut headers = header::HeaderMap::new();
@@ -598,7 +598,7 @@ impl StremioAddonTransport {
             header::CACHE_CONTROL,
             header::HeaderValue::from_static("no-cache"),
         );
-        // Stremio-specific header understood by multiple addon implementations.
+        // Keep the legacy Stremio header for compatibility with existing addons.
         headers.insert(
             header::HeaderName::from_static("stremio-addon-transport"),
             header::HeaderValue::from_static("network/http"),
@@ -690,7 +690,7 @@ impl StremioAddonTransport {
         eprintln!("Addon stream URL: {}", sanitize_addon_log(&url));
 
         // Derive origin from the base URL so the request looks like it's coming
-        // from the same-origin (Stremio-like context).  This satisfies Cloudflare
+        // from the same-origin addon context. This satisfies Cloudflare
         // CORS-aware checks without leaking the user's API key in the Referer.
         let origin = Self::build_request_origin(&base_url)?;
 
@@ -864,8 +864,8 @@ impl StremioAddonTransport {
                     return batch_a.cmp(&batch_b);
                 }
 
-                let score_a = Self::get_stream_score(a);
-                let score_b = Self::get_stream_score(b);
+                let score_a = stream_quality_score(a);
+                let score_b = stream_quality_score(b);
                 if score_a != score_b {
                     return score_b.cmp(&score_a);
                 }
@@ -984,10 +984,6 @@ impl StremioAddonTransport {
         merged
     }
 
-    fn get_stream_score(stream: &TorrentioStream) -> i32 {
-        stream_quality_score(stream)
-    }
-
     fn hydrate_streams(streams: &mut [TorrentioStream]) {
         for stream in streams {
             Self::hydrate_stream(stream);
@@ -1069,7 +1065,6 @@ impl StremioAddonTransport {
     }
 
     fn dedupe_streams(streams: &mut Vec<TorrentioStream>) {
-        use std::hash::{Hash, Hasher};
         let mut seen = HashSet::new();
         streams.retain(|s| {
             let mut hasher = std::hash::DefaultHasher::new();
@@ -1147,7 +1142,7 @@ fn sanitize_addon_log(value: &str) -> String {
     TOKEN_RE.replace_all(value, "$1[redacted]").into_owned()
 }
 
-impl Default for StremioAddonTransport {
+impl Default for AddonTransport {
     fn default() -> Self {
         Self::new()
     }
@@ -1355,7 +1350,7 @@ mod tests {
             ));
         }
 
-        let out = StremioAddonTransport::truncate_streams(input);
+        let out = AddonTransport::truncate_streams(input);
         let torrent_count = out
             .iter()
             .filter(|s| {
@@ -1371,20 +1366,20 @@ mod tests {
 
     #[test]
     fn root_fallback_probe_detects_embedded_config_segments() {
-        assert!(StremioAddonTransport::should_probe_root_fallback(
+        assert!(AddonTransport::should_probe_root_fallback(
             "https://torrentio.strem.fun/debridoptions=foo/manifest.json"
         ));
-        assert!(StremioAddonTransport::should_probe_root_fallback(
+        assert!(AddonTransport::should_probe_root_fallback(
             "https://mediafusion.example.com/manifest.json?token=abc"
         ));
     }
 
     #[test]
     fn root_fallback_probe_rejects_plain_addon_urls() {
-        assert!(!StremioAddonTransport::should_probe_root_fallback(
+        assert!(!AddonTransport::should_probe_root_fallback(
             "https://debridmediamanager.com/api/stremio/token/manifest.json"
         ));
-        assert!(!StremioAddonTransport::should_probe_root_fallback(
+        assert!(!AddonTransport::should_probe_root_fallback(
             "https://mediafusion.elfhosted.com/catalog/series"
         ));
     }

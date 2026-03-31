@@ -25,8 +25,8 @@ function CharactersSkeleton() {
         <Skeleton className='h-6 w-36 bg-white/10' />
         <div className='grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4'>
           {Array.from({ length: 8 }).map((_, i) => (
-            <div key={i} className='flex gap-3 rounded-xl border border-white/[0.04] bg-white/[0.02] p-3'>
-              <Skeleton className='h-11 w-11 shrink-0 rounded-full bg-white/10' />
+            <div key={i} className='flex gap-3 rounded-lg border border-white/[0.04] bg-white/[0.02] p-2'>
+              <Skeleton className='h-9 w-9 shrink-0 rounded-full bg-white/10' />
               <div className='flex-1 space-y-2 py-1'>
                 <Skeleton className='h-3.5 w-2/3 bg-white/10' />
                 <Skeleton className='h-3 w-1/3 bg-white/10' />
@@ -39,8 +39,8 @@ function CharactersSkeleton() {
         <Skeleton className='h-6 w-28 bg-white/10' />
         <div className='grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3'>
           {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className='flex gap-3 rounded-xl border border-white/[0.04] bg-white/[0.02] p-3'>
-              <Skeleton className='h-11 w-11 shrink-0 rounded-full bg-white/10' />
+            <div key={i} className='flex gap-3 rounded-lg border border-white/[0.04] bg-white/[0.02] p-2'>
+              <Skeleton className='h-9 w-9 shrink-0 rounded-full bg-white/10' />
               <div className='flex-1 space-y-2 py-1'>
                 <Skeleton className='h-3.5 w-40 bg-white/10' />
                 <Skeleton className='h-3 w-24 bg-white/10' />
@@ -59,8 +59,8 @@ function PlatformsSkeleton() {
       <Skeleton className='h-6 w-44 bg-white/10' />
       <div className='grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3'>
         {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className='flex items-center gap-4 rounded-xl border border-white/[0.04] bg-white/[0.02] p-4'>
-            <Skeleton className='h-11 w-11 shrink-0 rounded-xl bg-white/10' />
+          <div key={i} className='flex items-center gap-4 rounded-lg border border-white/[0.04] bg-white/[0.02] p-3'>
+            <Skeleton className='h-10 w-10 shrink-0 rounded-lg bg-white/10' />
             <div className='flex-1 min-w-0 space-y-2'>
               <Skeleton className='h-4 w-32 bg-white/10' />
               <div className='flex gap-2'>
@@ -90,10 +90,10 @@ export function AnimeMetadataPanel({
   if (isLoading) {
     return (
       <div className='space-y-6'>
-        <div className='rounded-2xl border border-white/[0.06] bg-white/[0.02] p-2'>
+        <div className='rounded-lg border border-white/[0.06] bg-white/[0.02] p-2'>
           <div className='grid w-full grid-cols-2 gap-2'>
-            <Skeleton className='h-9 rounded-xl bg-white/10' />
-            <Skeleton className='h-9 rounded-xl bg-white/10' />
+            <Skeleton className='h-9 rounded-lg bg-white/10' />
+            <Skeleton className='h-9 rounded-lg bg-white/10' />
           </div>
         </div>
         <CharactersSkeleton />
@@ -135,16 +135,16 @@ export function AnimeMetadataPanel({
   return (
     <Tabs defaultValue={hasOverview ? 'overview' : 'platforms'} className='space-y-6'>
       {hasOverview && hasPlatforms && (
-        <TabsList className='h-auto rounded-2xl border border-white/[0.06] bg-white/[0.02] p-1.5'>
+        <TabsList className='h-auto rounded-lg border border-white/[0.06] bg-white/[0.02] p-1'>
           <TabsTrigger
             value='overview'
-            className='rounded-xl px-4 py-2 text-xs font-semibold text-zinc-400 data-[state=active]:bg-white/[0.08] data-[state=active]:text-white'
+            className='rounded-md px-4 py-1.5 text-xs font-semibold text-zinc-400 data-[state=active]:bg-white data-[state=active]:text-black data-[state=active]:shadow-sm'
           >
             Cast, Staff & Studios
           </TabsTrigger>
           <TabsTrigger
             value='platforms'
-            className='rounded-xl px-4 py-2 text-xs font-semibold text-zinc-400 data-[state=active]:bg-white/[0.08] data-[state=active]:text-white'
+            className='rounded-md px-4 py-1.5 text-xs font-semibold text-zinc-400 data-[state=active]:bg-white data-[state=active]:text-black data-[state=active]:shadow-sm'
           >
             Platforms
           </TabsTrigger>
@@ -163,13 +163,13 @@ export function AnimeMetadataPanel({
               <span className='text-xs text-zinc-600 font-medium tabular-nums'>{characters.length}</span>
             </div>
 
-            <div className='grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4'>
+            <div className='grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4'>
               {characters.map((character) => (
                 <article
                   key={`${character.name}-${character.role ?? 'unknown'}`}
-                  className='group flex items-center gap-3 rounded-xl border border-white/[0.04] bg-white/[0.01] p-2.5 hover:bg-white/[0.03] transition-colors'
+                  className='group flex items-center gap-2.5 rounded-lg border border-white/[0.04] bg-white/[0.015] p-2 hover:bg-white/[0.03] transition-colors'
                 >
-                  <div className='h-11 w-11 shrink-0 overflow-hidden rounded-full bg-zinc-900 ring-1 ring-white/5'>
+                  <div className='h-9 w-9 shrink-0 overflow-hidden rounded-full bg-zinc-900 ring-1 ring-white/5'>
                     {character.image ? (
                       <img
                         src={character.image}
@@ -210,13 +210,13 @@ export function AnimeMetadataPanel({
               </span>
             </div>
 
-            <div className='grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3'>
+            <div className='grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-3'>
               {productions.map((company) => (
                 <article
                   key={`${company.name}-${company.roles.join('|')}`}
-                  className='group flex items-center gap-3 rounded-xl border border-white/[0.04] bg-white/[0.01] p-2.5 hover:bg-white/[0.03] transition-colors'
+                  className='group flex items-center gap-2.5 rounded-lg border border-white/[0.04] bg-white/[0.015] p-2 hover:bg-white/[0.03] transition-colors'
                 >
-                  <div className='flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-zinc-900 ring-1 ring-white/5'>
+                  <div className='flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-zinc-900 ring-1 ring-white/5'>
                     {company.logo ? (
                       <img
                         src={company.logo}
@@ -260,13 +260,13 @@ export function AnimeMetadataPanel({
               <span className='text-xs text-zinc-600 font-medium tabular-nums'>{staff.length}</span>
             </div>
 
-            <div className='grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3'>
+            <div className='grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-3'>
               {staff.map((member) => (
                 <article
                   key={`${member.name}-${member.roles.join('|')}`}
-                  className='group flex items-center gap-3 rounded-xl border border-white/[0.04] bg-white/[0.01] p-2.5 hover:bg-white/[0.03] transition-colors'
+                  className='group flex items-center gap-2.5 rounded-lg border border-white/[0.04] bg-white/[0.015] p-2 hover:bg-white/[0.03] transition-colors'
                 >
-                  <div className='h-11 w-11 shrink-0 overflow-hidden rounded-full bg-zinc-900 ring-1 ring-white/5'>
+                  <div className='h-9 w-9 shrink-0 overflow-hidden rounded-full bg-zinc-900 ring-1 ring-white/5'>
                     {member.image ? (
                       <img
                         src={member.image}
@@ -309,7 +309,7 @@ export function AnimeMetadataPanel({
         <span className='text-xs text-zinc-600 font-medium tabular-nums'>{platforms.length}</span>
       </div>
 
-      <div className='grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-3'>
+      <div className='grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3'>
         {platforms.map((platform) => {
           const subSummary = summarizeLanguages(platform.subLanguages);
           const dubSummary = summarizeLanguages(platform.dubLanguages);
@@ -320,21 +320,19 @@ export function AnimeMetadataPanel({
               href={platform.url}
               target='_blank'
               rel='noreferrer'
-              className='group flex items-center gap-4 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3.5 transition-all duration-150 hover:bg-white/[0.05] hover:border-white/[0.10]'
+              className='group flex items-center gap-3.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3.5 py-3 transition-all duration-150 hover:bg-white/[0.05] hover:border-white/[0.12]'
             >
-              <div className='flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-zinc-800/70 ring-1 ring-white/[0.05]'>
+              <div className='flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-zinc-800/80 ring-1 ring-white/[0.06]'>
                 {platform.logo ? (
                   <img
                     src={platform.logo}
                     alt={platform.name}
-                    className='h-9 w-9 object-contain'
+                    className='h-8 w-8 object-contain'
                     loading='lazy'
                     decoding='async'
                   />
                 ) : (
-                  <span className='text-sm font-bold text-zinc-400'>
-                    {platform.name.slice(0, 2).toUpperCase()}
-                  </span>
+                  <Tv className='h-4 w-4 text-zinc-500' />
                 )}
               </div>
 
@@ -347,14 +345,14 @@ export function AnimeMetadataPanel({
                 </div>
 
                 {(subSummary || dubSummary) && (
-                  <div className='mt-1.5 flex flex-wrap gap-1.5'>
+                  <div className='mt-1 flex flex-wrap gap-1'>
                     {subSummary && (
-                      <span className='inline-flex items-center rounded-md border border-sky-500/20 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-300 leading-none'>
+                      <span className='inline-flex items-center rounded border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-300 leading-none'>
                         SUB · {subSummary}
                       </span>
                     )}
                     {dubSummary && (
-                      <span className='inline-flex items-center rounded-md border border-violet-500/20 bg-violet-500/10 px-2 py-0.5 text-[10px] font-medium text-violet-300 leading-none'>
+                      <span className='inline-flex items-center rounded border border-violet-500/20 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-300 leading-none'>
                         DUB · {dubSummary}
                       </span>
                     )}

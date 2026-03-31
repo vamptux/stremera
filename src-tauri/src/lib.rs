@@ -2,21 +2,28 @@ mod commands;
 pub mod downloader;
 pub mod providers;
 
-use commands::PendingAppUpdate;
 use commands::playback_state::PlaybackStateService;
+use commands::PendingAppUpdate;
 use downloader::DownloadManager;
 use providers::cinemeta::Cinemeta;
 use providers::kitsu::Kitsu;
 use providers::netflix::Netflix;
 use providers::realdebrid::RealDebrid;
 use providers::skip_times::SkipTimesProvider;
-use providers::stremio_addon::StremioAddonTransport;
+use providers::addons::AddonTransport;
 use tauri::Manager;
 use tauri_plugin_store::Builder as StoreBuilder;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                if let Some(icon) = webview.app_handle().default_window_icon().cloned() {
+                    let _ = webview.window().set_icon(icon);
+                }
+            }
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_libmpv::init())
@@ -24,6 +31,12 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(StoreBuilder::default().build())
         .setup(|app| {
+            if let Some(icon) = app.default_window_icon().cloned() {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_icon(icon);
+                }
+            }
+
             let handle = app.handle().clone();
             app.manage(DownloadManager::new(handle.clone()));
             app.manage(PlaybackStateService::new());
@@ -37,7 +50,7 @@ pub fn run() {
         })
         .manage(Cinemeta::new())
         .manage(RealDebrid::new())
-        .manage(StremioAddonTransport::new())
+        .manage(AddonTransport::new())
         .manage(Netflix::new())
         .manage(Kitsu::new())
         .manage(SkipTimesProvider::new())
@@ -64,8 +77,6 @@ pub fn run() {
             commands::get_rd_user,
             commands::rd_verify_token,
             commands::rd_logout,
-            commands::playback_state_commands::get_playback_stream_reuse_policy,
-            commands::playback_state_commands::touch_playback_session,
             commands::playback_state_commands::report_playback_stream_outcome,
             commands::watch_history_commands::save_watch_progress,
             commands::watch_history_commands::get_watch_history,

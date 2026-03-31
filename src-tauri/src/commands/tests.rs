@@ -1,23 +1,19 @@
-use super::*;
 use super::config_store::{
     extract_embedded_realdebrid_token, normalize_addon_url, normalize_debrid_provider,
-    resolve_addon_configs,
-    AddonConfig,
+    resolve_addon_configs, AddonConfig,
 };
 use super::history_helpers::{
-    choose_continue_watching_entry, choose_exact_watch_progress_entry,
-    choose_watch_history_entry, is_continue_watching_candidate,
+    choose_continue_watching_entry, choose_exact_watch_progress_entry, choose_watch_history_entry,
+    choose_watch_history_entry_with_source_health, is_continue_watching_candidate,
 };
-use super::playback_state::{merge_keyed_progress_entries, PlaybackStreamReusePolicy};
+use super::playback_state::merge_keyed_progress_entries;
 use super::streaming_helpers::{
-    build_addon_source_priority_map, build_magnet, build_stream_query_ids,
-    find_best_matching_file, merge_unique_streams, prepare_addon_streams,
-    stream_resolution_priority, stream_source_priority,
+    build_addon_source_priority_map, build_magnet, build_stream_query_ids, find_best_matching_file,
+    merge_unique_streams, prepare_addon_streams, stream_resolution_priority,
+    stream_source_priority,
 };
-use super::watch_history_commands::{
-    compare_continue_watching_candidates, continue_watching_resumability_confidence,
-};
-use crate::providers::stremio_addon::TorrentioStream;
+use super::*;
+use crate::providers::addons::TorrentioStream;
 use std::collections::{HashMap, HashSet};
 
 fn mk_watch_progress(id: &str, type_: &str, last_watched: u64) -> WatchProgress {
@@ -59,7 +55,7 @@ fn mk_stream(
         info_hash: info_hash.map(|v| v.to_string()),
         url: url.map(|v| v.to_string()),
         file_idx: None,
-        behavior_hints: Some(crate::providers::stremio_addon::BehaviorHints {
+        behavior_hints: Some(crate::providers::addons::BehaviorHints {
             binge_group: None,
             filename: filename.map(|v| v.to_string()),
         }),
@@ -255,8 +251,7 @@ fn near_completion_progress_is_not_skipped() {
     incoming.position = 871.0;
 
     assert!(!history_helpers::should_skip_watch_progress_save(
-        &existing,
-        &incoming,
+        &existing, &incoming,
     ));
 }
 
@@ -377,10 +372,9 @@ fn resolve_addon_configs_respects_explicit_empty_list() {
 
 #[test]
 fn normalize_addon_url_strips_manifest_suffix_and_fragment() {
-    let normalized = normalize_addon_url(
-        "https://example-addon.test/path/manifest.json?foo=bar#fragment",
-    )
-    .expect("valid addon url");
+    let normalized =
+        normalize_addon_url("https://example-addon.test/path/manifest.json?foo=bar#fragment")
+            .expect("valid addon url");
 
     assert_eq!(
         normalized.as_deref(),
@@ -527,8 +521,55 @@ fn choose_watch_history_entry_prefers_same_episode_resume_donor() {
         .expect("history entry");
 
     assert_eq!(chosen.position, 512.0);
-    assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("tt-correct-episode"));
-    assert_eq!(chosen.last_stream_url.as_deref(), Some("magnet:?xt=urn:btih:same12"));
+    assert_eq!(
+        chosen.last_stream_lookup_id.as_deref(),
+        Some("tt-correct-episode")
+    );
+    assert_eq!(
+        chosen.last_stream_url.as_deref(),
+        Some("magnet:?xt=urn:btih:same12")
+    );
+}
+
+#[test]
+fn choose_watch_history_entry_avoids_cooldown_source_backfill_for_same_episode() {
+    let mut latest = mk_watch_progress("tt7654321", "series", 300);
+    latest.season = Some(1);
+    latest.episode = Some(4);
+
+    let mut cooldown_source = mk_watch_progress("tt7654321", "series", 280);
+    cooldown_source.season = Some(1);
+    cooldown_source.episode = Some(4);
+    cooldown_source.position = 900.0;
+    cooldown_source.duration = 2_400.0;
+    cooldown_source.last_stream_lookup_id = Some("cooldown-lookup".to_string());
+    cooldown_source.last_stream_url = Some("https://bad.example/episode-4.m3u8".to_string());
+    cooldown_source.source_name = Some("Bad CDN".to_string());
+
+    let mut healthier_source = mk_watch_progress("tt7654321", "series", 260);
+    healthier_source.season = Some(1);
+    healthier_source.episode = Some(4);
+    healthier_source.position = 860.0;
+    healthier_source.duration = 2_400.0;
+    healthier_source.last_stream_lookup_id = Some("healthy-lookup".to_string());
+    healthier_source.source_name = Some("Good CDN".to_string());
+
+    let source_health_priorities = HashMap::from([
+        ("bad cdn".to_string(), 0_u8),
+        ("good cdn".to_string(), 3_u8),
+    ]);
+
+    let chosen = choose_watch_history_entry_with_source_health(
+        vec![latest, cooldown_source, healthier_source],
+        Some(&source_health_priorities),
+    )
+    .expect("history entry");
+
+    assert_eq!(chosen.position, 860.0);
+    assert_eq!(chosen.duration, 2_400.0);
+    assert_eq!(chosen.source_name.as_deref(), Some("Good CDN"));
+    assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("tt7654321"));
+    assert_eq!(chosen.last_stream_url, None);
 }
 
 #[test]
@@ -549,8 +590,14 @@ fn choose_watch_history_entry_does_not_borrow_resume_time_from_other_episode() {
 
     assert_eq!(chosen.position, 0.0);
     assert_eq!(chosen.duration, 0.0);
-    assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("tt-other-episode"));
-    assert_eq!(chosen.last_stream_url.as_deref(), Some("magnet:?xt=urn:btih:other11"));
+    assert_eq!(
+        chosen.last_stream_lookup_id.as_deref(),
+        Some("tt-other-episode")
+    );
+    assert_eq!(
+        chosen.last_stream_url.as_deref(),
+        Some("magnet:?xt=urn:btih:other11")
+    );
 }
 
 #[test]
@@ -634,35 +681,36 @@ fn choose_continue_watching_entry_keeps_latest_episode_when_no_resumable_candida
     latest.episode = Some(5);
     latest.absolute_season = Some(1);
     latest.absolute_episode = Some(5);
+    latest.position = 180.0;
+    latest.duration = 2_400.0;
 
     let mut older = mk_watch_progress("tt7654321", "series", 300);
     older.season = Some(1);
     older.episode = Some(4);
     older.absolute_season = Some(1);
     older.absolute_episode = Some(4);
+    older.position = 120.0;
+    older.duration = 2_400.0;
 
-    let chosen = choose_continue_watching_entry(vec![latest, older])
-        .expect("continue watching entry");
+    let chosen =
+        choose_continue_watching_entry(vec![latest, older]).expect("continue watching entry");
 
     assert_eq!(chosen.episode, Some(5));
     assert_eq!(chosen.last_watched, 400);
 }
 
 #[test]
-fn continue_watching_confidence_prefers_verified_reusable_resume() {
-    let mut verified = mk_watch_progress("tt7654321", "series", 350);
-    verified.season = Some(1);
-    verified.episode = Some(4);
-    verified.absolute_season = Some(1);
-    verified.absolute_episode = Some(4);
-    verified.position = 1_020.0;
-    verified.duration = 2_400.0;
-    verified.last_stream_lookup_id = Some("tt7654321".to_string());
-    verified.last_stream_key = Some("alpha:4".to_string());
-    verified.source_name = Some("Alpha".to_string());
-    verified.stream_family = Some("alpha|release:test".to_string());
+fn choose_continue_watching_entry_prefers_more_resumable_progress_over_newer_item() {
+    let mut deeper_resume = mk_watch_progress("tt7654321", "series", 350);
+    deeper_resume.season = Some(1);
+    deeper_resume.episode = Some(4);
+    deeper_resume.absolute_season = Some(1);
+    deeper_resume.absolute_episode = Some(4);
+    deeper_resume.position = 1_020.0;
+    deeper_resume.duration = 2_400.0;
+    deeper_resume.last_stream_lookup_id = Some("tt7654321".to_string());
 
-    let mut newer = mk_watch_progress("tt9999999", "series", 500);
+    let mut newer = mk_watch_progress("tt7654321", "series", 500);
     newer.season = Some(1);
     newer.episode = Some(7);
     newer.absolute_season = Some(1);
@@ -670,37 +718,11 @@ fn continue_watching_confidence_prefers_verified_reusable_resume() {
     newer.position = 920.0;
     newer.duration = 2_400.0;
 
-    let verified_policy = PlaybackStreamReusePolicy {
-        kind: "remote-direct".to_string(),
-        is_remote: true,
-        should_bypass: false,
-        can_reuse_directly: true,
-        last_failure_reason: None,
-        consecutive_failures: 0,
-        cooldown_until: None,
-        last_verified_at: Some(500),
-        last_failure_at: None,
-    };
-    let bypassed_policy = PlaybackStreamReusePolicy {
-        kind: "remote-direct".to_string(),
-        is_remote: true,
-        should_bypass: true,
-        can_reuse_directly: false,
-        last_failure_reason: Some("startup-timeout".to_string()),
-        consecutive_failures: 2,
-        cooldown_until: Some(900),
-        last_verified_at: None,
-        last_failure_at: Some(480),
-    };
+    let chosen = choose_continue_watching_entry(vec![newer, deeper_resume])
+        .expect("continue watching entry");
 
-    assert!(
-        continue_watching_resumability_confidence(&verified, &verified_policy)
-            > continue_watching_resumability_confidence(&newer, &bypassed_policy)
-    );
-    assert_eq!(
-        compare_continue_watching_candidates(&verified, &verified_policy, &newer, &bypassed_policy),
-        std::cmp::Ordering::Less
-    );
+    assert_eq!(chosen.episode, Some(4));
+    assert_eq!(chosen.position, 1_020.0);
 }
 #[test]
 fn choose_exact_watch_progress_entry_prefers_exact_episode_match() {
@@ -774,6 +796,18 @@ fn continue_watching_candidate_filters_finished_items() {
     assert!(!is_continue_watching_candidate(&item));
 
     item.position = 940.0;
+    assert!(is_continue_watching_candidate(&item));
+}
+
+#[test]
+fn continue_watching_candidate_filters_low_progress_startup_stub() {
+    let mut item = mk_watch_progress("tt101", "movie", 10);
+    item.position = 4.0;
+    item.duration = 1_000.0;
+
+    assert!(!is_continue_watching_candidate(&item));
+
+    item.position = 5.0;
     assert!(is_continue_watching_candidate(&item));
 }
 

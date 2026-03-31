@@ -1,21 +1,19 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, WatchProgress, MediaItem } from '@/lib/api';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { MediaCardSkeleton, MediaCard } from './media-card';
-import { ChevronLeft, ChevronRight, Trash2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
-import { useOnlineStatus } from '@/hooks/use-online-status';
 import {
   buildHistoryPlaybackPlan,
-  warmContinueWatchingCandidates,
+  getHistoryPlaybackFallbackNotice,
 } from '@/lib/history-playback';
 
 export function ResumeSection() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const warmedResolveKeysRef = useRef<Set<string>>(new Set());
-  const isOnline = useOnlineStatus();
   const { data, isLoading } = useQuery({
     queryKey: ['continue-watching'],
     queryFn: api.getContinueWatching,
@@ -27,14 +25,6 @@ export function ResumeSection() {
 
   const items = useMemo(() => data || [], [data]);
 
-  useEffect(() => {
-    if (!isOnline) return;
-
-    void warmContinueWatchingCandidates(items, {
-      warmedKeys: warmedResolveKeysRef.current,
-    });
-  }, [items, isOnline]);
-
   const scroll = (direction: 'left' | 'right') => {
     if (scrollContainerRef.current) {
       const { current } = scrollContainerRef;
@@ -44,39 +34,48 @@ export function ResumeSection() {
     }
   };
 
-  if (!isLoading && items.length === 0) return null;
+  const contentInsets = 'px-6 pl-[72px] md:px-12 md:pl-24 lg:px-14 lg:pl-28';
+
+  if (!isLoading && items.length === 0) {
+    return (
+      <div className={cn(contentInsets, 'pt-5 pb-3')}>
+        <div className='rounded-lg border border-white/[0.05] bg-white/[0.015] px-6 py-7 text-center'>
+          <p className='text-[13px] font-medium text-white/40'>No activity yet</p>
+          <p className='mt-1 text-[12px] text-zinc-700'>Start watching something to see it here</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <section className='space-y-4 py-6 relative group/section'>
-      <div className='relative flex items-center justify-between pl-[72px] pr-6 md:pl-24 md:pr-12 lg:pl-28 mb-2'>
-        <h2 className='text-xl font-bold tracking-wide text-white drop-shadow-md'>
-          Resume Watching
-        </h2>
+    <section className='py-4 relative group/section'>
+      <div className={cn(contentInsets, 'relative flex items-center justify-between mb-2')}>
+        <h2 className='text-base font-semibold text-white tracking-tight'>Continue Watching</h2>
 
-        <div className='flex items-center gap-2 opacity-0 group-hover/section:opacity-100 transition-opacity duration-300'>
+        <div className='flex items-center gap-1.5 opacity-0 group-hover/section:opacity-100 transition-opacity duration-300'>
           <Button
             size='icon'
             variant='ghost'
-            className='h-9 w-9 rounded-full bg-white/10 border border-white/20 text-white hover:bg-white hover:text-black transition-all duration-300 backdrop-blur-md'
+            className='h-7 w-7 rounded-lg bg-white/[0.06] border border-white/[0.1] text-zinc-400 hover:bg-white/[0.12] hover:text-white transition-all duration-200 backdrop-blur-sm'
             onClick={() => scroll('left')}
           >
-            <ChevronLeft className='h-5 w-5' />
+            <ChevronLeft className='h-4 w-4' />
           </Button>
           <Button
             size='icon'
             variant='ghost'
-            className='h-9 w-9 rounded-full bg-white/10 border border-white/20 text-white hover:bg-white hover:text-black transition-all duration-300 backdrop-blur-md'
+            className='h-7 w-7 rounded-lg bg-white/[0.06] border border-white/[0.1] text-zinc-400 hover:bg-white/[0.12] hover:text-white transition-all duration-200 backdrop-blur-sm'
             onClick={() => scroll('right')}
           >
-            <ChevronRight className='h-5 w-5' />
+            <ChevronRight className='h-4 w-4' />
           </Button>
         </div>
       </div>
 
-      <div className='relative group'>
+      <div className={cn(contentInsets, 'relative overflow-hidden')}>
         <div
           ref={scrollContainerRef}
-          className='flex overflow-x-auto gap-4 pl-[72px] pr-6 md:pl-24 md:pr-12 lg:pl-28 pt-4 pb-8 scrollbar-hide snap-x snap-mandatory scroll-pl-[72px] md:scroll-pl-24 lg:scroll-pl-28 relative z-0'
+          className='flex overflow-x-auto gap-4 pt-4 pb-8 scrollbar-hide snap-x snap-mandatory relative z-0'
           style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
         >
           {isLoading
@@ -132,9 +131,8 @@ function ResumeCard({ item }: { item: WatchProgress }) {
     try {
       const plan = await buildHistoryPlaybackPlan(item, from);
       if (plan.kind === 'details') {
-        toast.info('Episode context missing', {
-          description: 'Opening details so you can select the episode to continue.',
-        });
+        const notice = getHistoryPlaybackFallbackNotice(plan.reason, 'open-details');
+        toast.info(notice.title, { description: notice.description });
         navigate(plan.target, { state: plan.state });
         return;
       }
@@ -152,7 +150,6 @@ function ResumeCard({ item }: { item: WatchProgress }) {
     title: item.title,
     type: item.type_ as 'movie' | 'series',
     poster: item.poster,
-    year: '', // Optional
   };
 
   return (
@@ -169,15 +166,6 @@ function ResumeCard({ item }: { item: WatchProgress }) {
             : undefined
         }
       />
-      <Button
-        size='icon'
-        variant='ghost'
-        className='absolute top-1 right-1 h-7 w-7 rounded-full bg-black/80 text-zinc-400 hover:bg-red-600 hover:text-white transition-all duration-200 opacity-100 z-[60] backdrop-blur-md shadow-sm border border-white/10'
-        onClick={(e) => removeItem.mutate(e)}
-        title='Remove from Continue Watching'
-      >
-        <Trash2 className='w-3.5 h-3.5' />
-      </Button>
     </div>
   );
 }

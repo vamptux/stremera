@@ -52,7 +52,7 @@ const RES_RANK: Record<StreamResolution, number> = {
 const LANGUAGE_TAG_REGEX = /\[([A-Z]{2,3})\]/g;
 const EMOJI_META_REGEX = /[\u26A1\u2B07\uD83D\uDCBE\uD83D\uDC64\uD83C\uDF31\s[\]|]/gu;
 
-const BATCH_HINT_REGEX = /\bbatch\b|\bcomplete\s+(?:series|season|pack|collection)\b|\bseason\s*pack\b|\bfull\s+(?:season|series)\b|\bs\d{1,2}\s*[-~]\s*s\d{1,2}\b|\b(?:e|ep)\d{1,4}\s*[-~]\s*(?:e|ep)\d{1,4}\b|\bseason\s*\d+\s*[-~&]\s*(?:season\s*)?\d+\b|\bepisode\s*\d+\s*[-~]\s*(?:episode\s*)?\d+\b/i;
+const BATCH_HINT_REGEX = /\bbatch\b|\bcomplete\s+(?:series|season|pack|collection)\b|\bseason\s*pack\b|\bfull\s+(?:season|series)\b|\bs\d{1,2}\s*[-~]\s*s\d{1,2}\b|\bs\d{1,2}e\d{1,4}\s*[-~]\s*e?\d{1,4}\b|\b\d{1,2}x\d{1,4}\s*[-~]\s*(?:\d{1,2}x)?\d{1,4}\b|\b(?:e|ep)\d{1,4}\s*[-~]\s*(?:e|ep)\d{1,4}\b|\bseason\s*\d+\s*[-~&]\s*(?:season\s*)?\d+\b|\bepisode\s*\d+\s*[-~]\s*(?:episode\s*)?\d+\b/i;
 
 export function isHttpStreamUrl(url?: string | null): boolean {
   const normalized = url?.trim().toLowerCase() ?? '';
@@ -239,7 +239,7 @@ export function getStreamPresentation(stream: TorrentioStream): StreamPresentati
 }
 
 export function isBatchStream(stream: TorrentioStream): boolean {
-  const haystack = `${stream.name ?? ''}\n${stream.title ?? ''}`;
+  const haystack = `${stream.name ?? ''}\n${stream.title ?? ''}\n${stream.behaviorHints?.filename ?? ''}`;
   return BATCH_HINT_REGEX.test(haystack);
 }
 

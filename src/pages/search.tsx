@@ -530,7 +530,7 @@ export function Search() {
         return api.searchKitsu(normalizedQuery);
       }
 
-      return api.searchMedia(normalizedQuery);
+      return api.searchMedia(normalizedQuery, activeType);
     },
     [activeType],
   );
@@ -788,17 +788,17 @@ export function Search() {
   const showSkeleton = !isError && (isLoading || (isFetching && !isFetchingNextPage && rawResults.length === 0));
 
   return (
-    <div className="h-screen flex flex-col pt-10 container max-w-[1800px] mx-auto px-4 sm:px-6 lg:px-8">
+    <div className="h-screen flex flex-col pt-5 container max-w-[1800px] mx-auto px-4 sm:px-6 md:pl-24 lg:px-8 lg:pl-28">
 
       {/* ── Search bar ─────────────────────────────────────────────────── */}
-      <div ref={suggestContainerRef} className="max-w-4xl mx-auto w-full relative mb-3 flex-shrink-0 z-20 flex flex-col gap-2">
+      <div ref={suggestContainerRef} className="max-w-2xl mx-auto w-full relative mb-4 flex-shrink-0 z-20 flex flex-col gap-3">
 
         <div className="relative group">
           <Input
             ref={suggestionInputRef}
             type="text"
             placeholder="Search movies, shows, anime..."
-            className="w-full h-12 pl-11 pr-10 text-[15px] bg-white/[0.04] border-white/[0.06] group-hover:border-white/10 focus:border-white/15 focus:bg-white/[0.06] rounded-md shadow-sm transition-all duration-200 placeholder:text-zinc-600 text-zinc-100"
+            className="w-full h-11 pl-10 pr-9 text-sm bg-white/[0.04] border-white/[0.08] group-hover:border-white/[0.12] focus:border-white/[0.18] focus:bg-white/[0.06] rounded-xl shadow-none transition-all duration-200 placeholder:text-zinc-600 text-zinc-100"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onFocus={() => setSuggestFocused(true)}
@@ -806,7 +806,7 @@ export function Search() {
               if (e.key === 'Escape') setSuggestFocused(false);
             }}
           />
-          <SearchIcon className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4.5 w-4.5 h-[18px] w-[18px] text-zinc-500 pointer-events-none" />
+          <SearchIcon className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500 pointer-events-none" />
           {query && (
             <button type="button"
               className="absolute right-2.5 top-1/2 -translate-y-1/2 h-6 w-6 rounded-md bg-white/5 hover:bg-white/10 flex items-center justify-center text-zinc-500 hover:text-zinc-300 transition-colors"
@@ -819,13 +819,13 @@ export function Search() {
             <>
               {/* Recent searches — shown when input is empty */}
               {!query.trim() && recentSearches.length > 0 && (
-                <div className="absolute top-full left-0 right-0 mt-1.5 bg-zinc-950/98 backdrop-blur-xl border border-white/[0.07] rounded-md shadow-2xl z-50 overflow-hidden py-1">
-                  <div className="flex items-center justify-between px-3 pt-1.5 pb-1">
-                    <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 flex items-center gap-1.5">
+                <div className="absolute top-full left-0 right-0 mt-1 bg-zinc-900 border border-white/[0.09] rounded-lg shadow-lg z-50 overflow-hidden">
+                  <div className="flex items-center justify-between px-3 pt-2 pb-1.5">
+                    <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500 flex items-center gap-1.5">
                       <History className="h-3 w-3" /> Recent
                     </span>
                     <button type="button" onMouseDown={(e) => e.preventDefault()} onClick={clearRecent}
-                      className="text-[10px] text-zinc-600 hover:text-red-400 transition-colors"
+                      className="text-[10px] text-zinc-500 hover:text-red-400 transition-colors"
                     >Clear</button>
                   </div>
                   {recentSearches.map((entry) => {
@@ -836,19 +836,19 @@ export function Search() {
                       <button
                         key={itemKey}
                         type="button"
-                        className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-white/[0.04] transition-colors text-left group"
+                        className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-white/[0.05] transition-colors text-left group"
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={() => applyRecentSearch(entry)}
                       >
-                        <History className="h-3.5 w-3.5 text-zinc-600 shrink-0" />
+                        <History className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
                         <div className="min-w-0 flex-1">
-                          <span className="block truncate text-[13px] text-zinc-400 transition-colors group-hover:text-zinc-200">{entry.query}</span>
+                          <span className="block truncate text-[13px] text-zinc-300 transition-colors group-hover:text-white">{entry.query}</span>
                           {contextLabel && (
-                            <span className="block truncate text-[11px] text-zinc-600">{contextLabel}</span>
+                            <span className="block truncate text-[11px] text-zinc-500">{contextLabel}</span>
                           )}
                         </div>
                         <X
-                          className="h-3 w-3 text-zinc-700 opacity-0 group-hover:opacity-100 hover:text-red-400 transition-all shrink-0"
+                          className="h-3 w-3 text-zinc-600 opacity-0 group-hover:opacity-100 hover:text-red-400 transition-all shrink-0"
                           onClick={(e) => removeRecent(entry, e)}
                         />
                       </button>
@@ -859,12 +859,12 @@ export function Search() {
 
               {/* Autocomplete — shown when typing */}
               {showSuggestions && (
-                <div className="absolute top-full left-0 right-0 mt-1.5 bg-zinc-950/98 backdrop-blur-xl border border-white/[0.07] rounded-md shadow-2xl z-50 overflow-hidden py-1">
+                <div className="absolute top-full left-0 right-0 mt-1 bg-zinc-900 border border-white/[0.09] rounded-lg shadow-lg z-50 overflow-hidden">
                   {suggestions.map((item) => (
                     <button
                       key={item.id}
                       type="button"
-                      className="w-full flex items-center gap-3 px-3 py-2 hover:bg-white/[0.04] transition-colors text-left group"
+                      className="w-full flex items-center gap-3 px-3 py-2 hover:bg-white/[0.05] transition-colors text-left group"
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={() => handleSuggestionSelect(item)}
                     >
@@ -881,7 +881,7 @@ export function Search() {
                         <p className="text-[13px] font-medium text-zinc-300 group-hover:text-white truncate leading-tight">
                           {item.title}
                         </p>
-                        <p className="text-[11px] text-zinc-600 mt-0.5">
+                        <p className="text-[11px] text-zinc-500 mt-0.5">
                           {[item.year?.split('-')[0], item.type === 'series' ? 'Series' : item.type === 'movie' ? 'Movie' : 'Anime']
                             .filter(Boolean).join(' · ')}
                         </p>
@@ -890,12 +890,12 @@ export function Search() {
                   ))}
                   <button
                     type="button"
-                    className="w-full flex items-center gap-2.5 px-3 py-2 border-t border-white/[0.05] hover:bg-white/[0.04] transition-colors text-left mt-0.5"
+                    className="w-full flex items-center gap-2.5 px-3 py-2 border-t border-white/[0.07] hover:bg-white/[0.05] transition-colors text-left"
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => setSuggestFocused(false)}
                   >
-                    <SearchIcon className="w-3.5 h-3.5 text-zinc-600 flex-shrink-0" />
-                    <span className="text-[12px] text-zinc-500">
+                    <SearchIcon className="w-3.5 h-3.5 text-zinc-500 flex-shrink-0" />
+                    <span className="text-[12px] text-zinc-400">
                       Show all results for <span className="text-zinc-300">&ldquo;{query}&rdquo;</span>
                     </span>
                   </button>
@@ -906,16 +906,16 @@ export function Search() {
         </div>
 
         {/* ── Compact filter bar — all controls in one non-shifting row ── */}
-        <div className="flex flex-wrap items-center gap-2.5 w-full">
+        <div className="flex flex-wrap items-center gap-2 w-full">
           {/* Type toggles */}
-          <div className="flex gap-1 bg-white/[0.03] border border-white/[0.08] rounded-md p-1">
+          <div className="flex gap-0.5 bg-white/[0.03] border border-white/[0.07] rounded-xl p-0.5">
             {(['movie', 'series', 'anime'] as const).map(t => (
               <button key={t} type="button"
                 className={cn(
-                  'px-4 py-2 rounded-md text-[13px] font-medium transition-all leading-none',
+                  'px-3.5 py-1.5 rounded-lg text-[12px] font-medium transition-all leading-none',
                   activeType === t
-                    ? 'bg-white/[0.12] text-white shadow-sm'
-                    : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/5'
+                    ? 'bg-white text-black shadow-sm'
+                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]'
                 )}
                 onClick={() => handleTypeChange(t)}
               >
@@ -929,13 +929,13 @@ export function Search() {
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost"
-                  className="h-10 px-4 gap-2 text-[13px] text-zinc-400 hover:text-white bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.08] hover:border-white/20 rounded-md font-medium transition-all"
+                  className="h-8 px-3 gap-1.5 text-[12px] text-zinc-400 hover:text-white bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.07] hover:border-white/[0.14] rounded-lg font-medium transition-colors"
                 >
                   {activeFeed === 'trending'
-                    ? <TrendingUp className="h-4 w-4 text-orange-400 shrink-0" />
-                    : <Sparkles   className="h-4 w-4 text-yellow-400 shrink-0" />}
+                    ? <TrendingUp className="h-3.5 w-3.5 text-orange-400 shrink-0" />
+                    : <Sparkles   className="h-3.5 w-3.5 text-yellow-400 shrink-0" />}
                   {activeFeedLabel}
-                  <ChevronDown className="h-4 w-4 opacity-40 ml-1" />
+                  <ChevronDown className="h-3.5 w-3.5 opacity-40 ml-0.5" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="bg-zinc-950/95 border-white/10 backdrop-blur-md rounded-md min-w-[140px] p-1.5">
@@ -957,17 +957,17 @@ export function Search() {
               <PopoverTrigger asChild>
                 <Button variant="ghost"
                   className={cn(
-                    "h-10 px-4 gap-2 text-[13px] text-zinc-400 hover:text-white bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.08] hover:border-white/20 rounded-md font-medium transition-all",
-                    activeGenres.length > 0 && "text-white border-white/20 bg-white/[0.08]"
+                    "h-8 px-3 gap-1.5 text-[12px] text-zinc-400 hover:text-white bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.07] hover:border-white/[0.14] rounded-lg font-medium transition-colors",
+                    activeGenres.length > 0 && "text-white border-white/[0.18] bg-white/[0.08]"
                   )}
                 >
                   Genre
                   {activeGenres.length > 0 && (
-                    <span className="h-5 min-w-[20px] px-1 rounded bg-white/20 text-[11px] font-bold flex items-center justify-center ml-1">
+                    <span className="h-4 min-w-[16px] px-0.5 rounded bg-white/20 text-[10px] font-bold flex items-center justify-center ml-0.5">
                       {activeGenres.length}
                     </span>
                   )}
-                  <ChevronDown className="h-4 w-4 opacity-40 ml-1" />
+                  <ChevronDown className="h-3.5 w-3.5 opacity-40 ml-0.5" />
                 </Button>
               </PopoverTrigger>
               <PopoverContent align="start" sideOffset={8}
@@ -1025,12 +1025,12 @@ export function Search() {
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost"
                   className={cn(
-                    "h-10 px-4 gap-2 text-[13px] text-zinc-400 hover:text-white bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.08] hover:border-white/20 rounded-md font-medium transition-all",
-                    activeProvider !== 'cinemeta' && "text-white border-white/20 bg-white/[0.08]"
+                    "h-8 px-3 gap-1.5 text-[12px] text-zinc-400 hover:text-white bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.07] hover:border-white/[0.14] rounded-lg font-medium transition-colors",
+                    activeProvider !== 'cinemeta' && "text-white border-white/[0.18] bg-white/[0.08]"
                   )}
                 >
                   {PROVIDERS.find(p => p.id === activeProvider)?.short ?? 'All'}
-                  <ChevronDown className="h-4 w-4 opacity-40 ml-1" />
+                  <ChevronDown className="h-3.5 w-3.5 opacity-40 ml-0.5" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="bg-zinc-950/95 border-white/10 backdrop-blur-md rounded-md min-w-[140px] p-1.5">
@@ -1052,7 +1052,7 @@ export function Search() {
               <PopoverTrigger asChild>
                 <Button variant="ghost"
                   className={cn(
-                    "h-10 px-4 gap-2 text-[13px] text-zinc-400 hover:text-white bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.08] hover:border-white/20 rounded-md font-medium transition-all",
+                    "h-9 px-3.5 gap-1.5 text-[13px] text-zinc-400 hover:text-white bg-white/[0.03] hover:bg-white/[0.05] border border-white/[0.07] hover:border-white/15 rounded-md font-medium transition-colors",
                     (yearFrom !== null || yearTo !== null) && "text-white border-white/20 bg-white/[0.08]"
                   )}
                 >
@@ -1119,12 +1119,12 @@ export function Search() {
             <DropdownMenuTrigger asChild>
               <Button variant="ghost"
                 className={cn(
-                  "h-10 px-4 gap-2 text-[13px] text-zinc-400 hover:text-white bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.08] hover:border-white/20 rounded-md font-medium transition-all",
-                  activeSort !== 'default' && "text-white border-white/20 bg-white/[0.08]"
+                  "h-8 px-3 gap-1.5 text-[12px] text-zinc-400 hover:text-white bg-white/[0.02] hover:bg-white/[0.05] border border-white/[0.06] hover:border-white/[0.12] rounded-lg font-medium transition-colors",
+                  activeSort !== 'default' && "text-white border-white/[0.15] bg-white/[0.06]"
                 )}
               >
                 {activeSortLabel}
-                <ChevronDown className="h-4 w-4 opacity-40 ml-1" />
+                <ChevronDown className="h-3.5 w-3.5 opacity-40 ml-0.5" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="bg-zinc-950/95 border-white/10 backdrop-blur-md rounded-md min-w-[160px] p-1.5">
@@ -1142,9 +1142,9 @@ export function Search() {
           {/* Clear all active filters */}
           {hasActiveFilters && (
             <button type="button" onClick={clearAllFilters}
-              className="h-10 px-3 rounded-md text-[13px] font-medium text-zinc-400 hover:text-red-400 flex items-center gap-1.5 transition-colors ml-auto bg-white/[0.02] hover:bg-red-500/10 border border-transparent hover:border-red-500/20"
+              className="h-8 px-2.5 rounded-lg text-[11px] font-medium text-zinc-500 hover:text-red-400 flex items-center gap-1 transition-colors ml-auto"
             >
-              <X className="h-4 w-4" /> Clear All
+              <X className="h-3 w-3" /> Clear
             </button>
           )}
         </div>
@@ -1154,7 +1154,7 @@ export function Search() {
           <div className="flex items-center gap-2 flex-wrap mt-1">
             {activeGenres.map(g => (
               <Badge key={g} variant="secondary"
-                className="h-7 bg-white/[0.06] text-white/90 border border-white/[0.1] hover:bg-white/[0.1] text-[12px] pl-3 pr-2 flex items-center gap-1.5 cursor-default rounded-md transition-colors"
+                className="h-6 bg-white/[0.05] text-white/80 border border-white/[0.08] hover:bg-white/[0.08] text-[11px] pl-2.5 pr-1.5 flex items-center gap-1 cursor-default rounded-md transition-colors"
               >
                 {g}
                 <X className="h-3 w-3 cursor-pointer opacity-50 hover:opacity-100 hover:text-red-400 transition-all"
@@ -1172,10 +1172,10 @@ export function Search() {
       </div>
 
       {/* ── Scrollable content ──────────────────────────────────────────── */}
-      <div
+              <div
         ref={scrollContainerRef}
         data-media-scroll-container="true"
-        className="flex-1 overflow-y-auto scroll-smooth min-h-0 -mr-4 pr-4 -ml-4 pl-4 pb-10 pt-3"
+        className="flex-1 overflow-y-auto scroll-smooth min-h-0 -mr-4 pr-4 -ml-4 pl-4 pb-10 pt-2"
       >
         <div className="w-full">
 
@@ -1189,7 +1189,7 @@ export function Search() {
               <p className="text-sm opacity-50 mt-1">Connect to the internet to browse and search</p>
             </div>
           ) : showSkeleton ? (
-            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-9 gap-4 pb-20">
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-9 gap-2.5 pb-20">
               {Array.from({ length: 24 }).map((_, i) => <MediaCardSkeleton key={i} />)}
             </div>
           ) : isError ? (
@@ -1201,8 +1201,8 @@ export function Search() {
           ) : filteredResults.length > 0 ? (
             <>
               {/* Result count bar */}
-              <div className="flex items-center justify-between mb-3 px-1 text-xs text-muted-foreground">
-                <span className="flex items-center gap-1.5 flex-wrap">
+              <div className="flex items-center justify-between mb-3 px-1">
+                <span className="flex items-center gap-1.5 flex-wrap text-[12px] text-zinc-400">
                   {debouncedQuery ? (
                     <>
                       {filteredResults.length} results for &ldquo;{debouncedQuery}&rdquo;
@@ -1223,7 +1223,8 @@ export function Search() {
                         <span className="opacity-40 ml-0.5">of {rawResults.length} fetched</span>
                       )}
                       {supportsFeed && (
-                        <span className="inline-flex items-center gap-1 opacity-55">
+                        <span className="inline-flex items-center gap-1 text-zinc-400">
+                          <span className="opacity-30 text-xs">·</span>
                           {activeFeed === 'trending'
                             ? <TrendingUp className="h-3 w-3" />
                             : <Sparkles    className="h-3 w-3" />}
@@ -1235,14 +1236,14 @@ export function Search() {
                 </span>
                 {hasActiveFilters && (
                   <button type="button" onClick={clearAllFilters}
-                    className="text-xs text-zinc-600 hover:text-zinc-300 transition-colors flex items-center gap-1 shrink-0"
+                    className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors flex items-center gap-1 shrink-0"
                   >
                     <Filter className="h-3 w-3" /> Clear all
                   </button>
                 )}
               </div>
 
-              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-9 gap-4">
+              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-2.5">
                 {filteredResults.map(item => <MediaCard key={item.id} item={item} />)}
               </div>
 
@@ -1313,3 +1314,5 @@ export function Search() {
     </div>
   );
 }
+
+

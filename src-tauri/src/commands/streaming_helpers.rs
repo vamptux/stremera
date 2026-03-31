@@ -1,29 +1,26 @@
 use super::config_store::AddonConfig;
 use crate::providers::realdebrid::TorrentFile;
-use crate::providers::stremio_addon::{stream_quality_score, TorrentioStream};
+use crate::providers::addons::{stream_quality_score, TorrentioStream};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 static STREAM_FAMILY_EPISODE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        concat!(
-            r"(?i)",
-            r"\bs\d{1,2}e\d{1,4}\b",
-            r"|\b\d{1,2}x\d{1,4}\b",
-            r"|\b(?:episode|ep)\.?\s*\d{1,4}\b",
-            r"|\b#\d{1,4}\b",
-            r"|\b(?:season\s*\d+\s*)?-\s*\d{2,4}\b"
-        ),
-    )
+    Regex::new(concat!(
+        r"(?i)",
+        r"\bs\d{1,2}e\d{1,4}\b",
+        r"|\b\d{1,2}x\d{1,4}\b",
+        r"|\b(?:episode|ep)\.?\s*\d{1,4}\b",
+        r"|\b#\d{1,4}\b",
+        r"|\b(?:season\s*\d+\s*)?-\s*\d{2,4}\b"
+    ))
     .expect("valid stream family episode regex")
 });
 static STREAM_FAMILY_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b\d+(?:\.\d+)?\s*(?:k|m|g|t)i?b\b")
-        .expect("valid stream family size regex")
+    Regex::new(r"(?i)\b\d+(?:\.\d+)?\s*(?:k|m|g|t)i?b\b").expect("valid stream family size regex")
 });
 static STREAM_FAMILY_NON_WORD_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[^a-z0-9]+") .expect("valid stream family non-word regex"));
+    LazyLock::new(|| Regex::new(r"[^a-z0-9]+").expect("valid stream family non-word regex"));
 
 fn normalize_stream_family_component(value: &str) -> Option<String> {
     let normalized = STREAM_FAMILY_EPISODE_REGEX.replace_all(value, " ");

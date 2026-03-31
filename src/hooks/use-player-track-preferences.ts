@@ -119,14 +119,22 @@ export function usePlayerTrackPreferences({
           ...normalizedPatch,
         };
 
-        globalPlaybackPrefsRef.current = next;
-
-        await api.savePlaybackLanguagePreferences(
+        const savedPreferences = await api.savePlaybackLanguagePreferences(
           next.preferredAudioLanguage,
           next.preferredSubtitleLanguage,
         );
 
-        queryClient.setQueryData(['playbackLanguagePreferences'], next);
+        globalPlaybackPrefsRef.current = {
+          preferredAudioLanguage:
+            normalizeLanguageToken(savedPreferences?.preferredAudioLanguage) || undefined,
+          preferredSubtitleLanguage:
+            normalizeLanguageToken(savedPreferences?.preferredSubtitleLanguage) || undefined,
+        };
+
+        queryClient.setQueryData(
+          ['playbackLanguagePreferences'],
+          globalPlaybackPrefsRef.current,
+        );
         void queryClient.invalidateQueries({ queryKey: ['effectivePlaybackLanguagePreferences'] });
         void queryClient.invalidateQueries({ queryKey: ['streams'] });
       };

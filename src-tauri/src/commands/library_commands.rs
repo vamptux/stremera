@@ -1,9 +1,9 @@
-use super::{normalize_non_empty, LIBRARY_INDEX_KEY, LIBRARY_MAP_KEY, LIBRARY_STORE_FILE};
-use crate::providers::MediaItem;
 use super::store_helpers::{
     library_item_key, load_library_map, load_or_migrate_library_index, merge_library_item,
     normalize_library_item,
 };
+use super::{normalize_non_empty, LIBRARY_INDEX_KEY, LIBRARY_MAP_KEY, LIBRARY_STORE_FILE};
+use crate::providers::MediaItem;
 use serde_json::json;
 use tauri::{command, AppHandle};
 use tauri_plugin_store::StoreExt;

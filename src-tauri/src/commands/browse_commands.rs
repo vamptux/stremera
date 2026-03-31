@@ -90,12 +90,16 @@ pub async fn get_multi_genre_catalog(
     let page_skip = skip.filter(|value| *value > 0);
 
     if media_type.trim().eq_ignore_ascii_case("anime") {
-        let catalog_id =
-            normalize_non_empty(&catalog_id).ok_or_else(|| "Catalog ID is required.".to_string())?;
+        let catalog_id = normalize_non_empty(&catalog_id)
+            .ok_or_else(|| "Catalog ID is required.".to_string())?;
         let provider = &*kitsu_provider;
         let futures = normalized_genres.into_iter().map(|genre| {
             let catalog_id = catalog_id.clone();
-            async move { provider.get_anime_catalog(&catalog_id, Some(genre), page_skip).await }
+            async move {
+                provider
+                    .get_anime_catalog(&catalog_id, Some(genre), page_skip)
+                    .await
+            }
         });
 
         return merge_multi_genre_results(

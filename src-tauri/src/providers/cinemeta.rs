@@ -1,4 +1,5 @@
-use super::{Episode, MediaDetails, MediaItem, Provider, build_provider_http_client};
+use super::{build_provider_http_client, Episode, MediaDetails, MediaItem, Provider};
+use futures_util::future::join_all;
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -42,8 +43,8 @@ impl Cinemeta {
     }
 
     /// Fetch from *both* `top` and `imdbRating` catalogs in parallel and merge the
-    /// results.  The user's selected feed (`primary_catalog`) determines which items
-    /// appear first.  This roughly doubles the available content (~70-90 unique items
+    /// results. The user's selected feed (`primary_catalog`) determines which items
+    /// appear first. This roughly doubles the available content (~70-90 unique items
     /// vs ~40-50 from a single endpoint).
     pub async fn get_discover_catalog(
         &self,
@@ -91,6 +92,19 @@ impl Cinemeta {
         Ok(all_items)
     }
 
+    pub async fn search_with_media_type(
+        &self,
+        query: &str,
+        media_type: Option<&str>,
+    ) -> Result<Vec<MediaItem>, String> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.search_catalogs(query, media_type).await
+    }
+
     /// Fetch a single catalog page from one Cinemeta endpoint.
     async fn fetch_catalog_page(
         &self,
@@ -128,6 +142,68 @@ impl Cinemeta {
             catalog_id,
             encode(query)
         )
+    }
+
+    fn normalize_search_media_scope(
+        media_type: Option<&str>,
+    ) -> Result<&'static [&'static str], String> {
+        match media_type.map(|value| value.trim().to_ascii_lowercase()) {
+            Some(value) if value == "movie" => Ok(&["movie"]),
+            Some(value) if value == "series" => Ok(&["series"]),
+            Some(_) => Err("Invalid media type for search. Expected movie or series.".to_string()),
+            None => Ok(&["movie", "series"]),
+        }
+    }
+
+    async fn search_catalogs(
+        &self,
+        query: &str,
+        media_type: Option<&str>,
+    ) -> Result<Vec<MediaItem>, String> {
+        let media_types = Self::normalize_search_media_scope(media_type)?;
+        let mut urls = Vec::with_capacity(media_types.len() * 2);
+
+        for media_type in media_types {
+            urls.push(Self::build_search_catalog_url(media_type, "top", query));
+            urls.push(Self::build_search_catalog_url(
+                media_type,
+                "imdbRating",
+                query,
+            ));
+        }
+
+        let results = join_all(
+            urls.iter()
+                .map(|url| self.fetch_catalog_items_from_url(url)),
+        )
+        .await;
+        let mut merged = Vec::new();
+        let mut seen = HashSet::new();
+        let mut had_success = false;
+        let mut last_error: Option<String> = None;
+
+        for result in results {
+            match result {
+                Ok(items) => {
+                    had_success = true;
+                    for item in items {
+                        let key = format!("{}:{}", item.type_, item.id);
+                        if seen.insert(key) {
+                            merged.push(item);
+                        }
+                    }
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        if !had_success {
+            return Err(last_error.unwrap_or_else(|| "Cinemeta search failed.".to_string()));
+        }
+
+        Ok(merged)
     }
 
     fn map_catalog_items(catalog: CatalogResponse) -> Vec<MediaItem> {
@@ -256,7 +332,7 @@ struct MetaVideo {
     released: Option<String>,
     #[serde(default)]
     overview: Option<String>,
-    #[serde(default)] // title/name
+    #[serde(default)]
     title: Option<String>,
     #[serde(default)]
     thumbnail: Option<String>,
@@ -277,49 +353,7 @@ impl Provider for Cinemeta {
             return Ok(Vec::new());
         }
 
-        let mut results = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut had_success = false;
-        let mut last_error: Option<String> = None;
-        let movie_top_url = Self::build_search_catalog_url("movie", "top", query);
-        let movie_imdb_rating_url = Self::build_search_catalog_url("movie", "imdbRating", query);
-        let series_top_url = Self::build_search_catalog_url("series", "top", query);
-        let series_imdb_rating_url = Self::build_search_catalog_url("series", "imdbRating", query);
-
-        let (movie_top_res, movie_imdb_rating_res, series_top_res, series_imdb_rating_res) = tokio::join!(
-            self.fetch_catalog_items_from_url(&movie_top_url),
-            self.fetch_catalog_items_from_url(&movie_imdb_rating_url),
-            self.fetch_catalog_items_from_url(&series_top_url),
-            self.fetch_catalog_items_from_url(&series_imdb_rating_url)
-        );
-
-        for result in [
-            movie_top_res,
-            movie_imdb_rating_res,
-            series_top_res,
-            series_imdb_rating_res,
-        ] {
-            match result {
-                Ok(items) => {
-                    had_success = true;
-                    for item in items {
-                        let key = format!("{}:{}", item.type_, item.id);
-                        if seen.insert(key) {
-                            results.push(item);
-                        }
-                    }
-                }
-                Err(err) => {
-                    last_error = Some(err);
-                }
-            }
-        }
-
-        if !had_success {
-            return Err(last_error.unwrap_or_else(|| "Cinemeta search failed.".to_string()));
-        }
-
-        Ok(results)
+        self.search_catalogs(query, None).await
     }
 
     async fn get_details(&self, type_: String, id: String) -> Result<MediaDetails, String> {

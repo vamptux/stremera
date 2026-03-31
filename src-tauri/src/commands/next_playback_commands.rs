@@ -1,10 +1,10 @@
+use super::config_store::get_effective_playback_rd_token;
 use super::{
     has_playable_stream_source, is_http_url, is_placeholder_no_stream, normalize_non_empty,
     normalize_stream_media_type, BEST_STREAM_MAX_CANDIDATES, SETTINGS_STORE_FILE,
 };
-use super::config_store::get_effective_playback_rd_token;
 use crate::providers::{
-    cinemeta::Cinemeta, kitsu::Kitsu, realdebrid::RealDebrid, stremio_addon::StremioAddonTransport,
+    cinemeta::Cinemeta, kitsu::Kitsu, realdebrid::RealDebrid, addons::AddonTransport,
 };
 use tauri::{command, AppHandle, State};
 use tauri_plugin_store::StoreExt;
@@ -25,7 +25,7 @@ pub async fn prepare_next_playback_plan(
     playback_state: State<'_, PlaybackStateService>,
     cinemeta_provider: State<'_, Cinemeta>,
     kitsu_provider: State<'_, Kitsu>,
-    addon_transport: State<'_, StremioAddonTransport>,
+    addon_transport: State<'_, AddonTransport>,
     rd_provider: State<'_, RealDebrid>,
     media_type: String,
     id: String,
@@ -87,6 +87,7 @@ pub async fn prepare_next_playback_plan(
         &StreamRankingScope {
             media_type: media_type.clone(),
             media_id: id.clone(),
+            title: Some(details.title.clone()),
             season: Some(plan.canonical.season),
             episode: Some(plan.canonical.episode),
         },

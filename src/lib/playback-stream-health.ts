@@ -1,27 +1,5 @@
-export type SavedStreamReuseKind =
-  | 'unknown'
-  | 'local-file'
-  | 'localhost'
-  | 'remote-debrid'
-  | 'remote-signed'
-  | 'remote-manifest'
-  | 'remote-direct';
-
-export interface PlaybackStreamReusePolicy {
-  kind: SavedStreamReuseKind;
-  isRemote: boolean;
-  shouldBypass: boolean;
-  canReuseDirectly: boolean;
-  lastFailureReason?: string;
-  consecutiveFailures: number;
-  cooldownUntil?: number;
-  lastVerifiedAt?: number;
-  lastFailureAt?: number;
-}
-
 export type PlaybackStreamOutcome =
   | 'verified'
-  | 'expired-saved-stream'
   | 'startup-timeout'
   | 'load-failed'
   | 'disconnected';

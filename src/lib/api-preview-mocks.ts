@@ -1,13 +1,5 @@
 type PreviewInvokeArgs = Record<string, unknown> | undefined;
 
-const EMPTY_PLAYBACK_REUSE_POLICY = {
-  kind: 'unknown',
-  isRemote: false,
-  shouldBypass: false,
-  canReuseDirectly: false,
-  consecutiveFailures: 0,
-};
-
 const EMPTY_MEDIA_EPISODES_PAGE = {
   episodes: [],
   seasons: [],
@@ -95,8 +87,6 @@ export async function handlePreviewInvoke<T>(
             ? args.page_size
             : EMPTY_MEDIA_EPISODES_PAGE.pageSize,
       } as T;
-    case 'get_playback_stream_reuse_policy':
-      return EMPTY_PLAYBACK_REUSE_POLICY as T;
     case 'get_playback_language_preferences':
     case 'get_effective_playback_language_preferences':
       return {} as T;
@@ -117,7 +107,6 @@ export async function handlePreviewInvoke<T>(
       return [] as T;
     case 'get_data_stats':
       return EMPTY_DATA_STATS as T;
-    case 'touch_playback_session':
     case 'save_playback_language_preference_outcome':
       return undefined as T;
     case 'pause_active_downloads':

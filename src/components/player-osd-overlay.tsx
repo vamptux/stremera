@@ -35,23 +35,24 @@ export function PlayerOsdOverlay({
   return (
     <div
       className={cn(
-        'pointer-events-none absolute inset-0 z-50 flex items-center justify-center transition-opacity duration-150',
+        'pointer-events-none absolute inset-0 z-50 flex items-center justify-center transition-opacity duration-100',
         visible ? 'opacity-100' : 'opacity-0',
       )}
       aria-live='polite'
       aria-atomic='true'
     >
+      {/* Play/Pause: tiny icon that fades quickly — no bg to avoid clashing with center play btn */}
       {(action.kind === 'play' || action.kind === 'pause') && (
         <div
           className={cn(
-            'transition-all duration-200',
-            visible ? 'scale-100 opacity-100' : 'scale-110 opacity-0',
+            'transition-all duration-100',
+            visible ? 'scale-100 opacity-60' : 'scale-75 opacity-0',
           )}
         >
           {action.kind === 'play' ? (
-            <Play className='h-10 w-10 fill-white text-white drop-shadow-[0_2px_16px_rgba(0,0,0,0.8)]' />
+            <Play className='h-7 w-7 fill-white text-white drop-shadow-lg' />
           ) : (
-            <Pause className='h-10 w-10 fill-white text-white drop-shadow-[0_2px_16px_rgba(0,0,0,0.8)]' />
+            <Pause className='h-7 w-7 fill-white text-white drop-shadow-lg' />
           )}
         </div>
       )}

@@ -1,21 +1,24 @@
-use super::{
-    normalize_non_empty, normalize_stream_media_type, PlaybackLanguagePreferences,
-    SETTINGS_STORE_FILE,
-};
 use super::config_store::{
-    get_effective_playback_rd_token, get_trimmed_store_string, AddonConfig,
+    get_effective_playback_rd_token, get_trimmed_store_string, normalize_addon_url, AddonConfig,
 };
+use super::playback_preferences_commands::sanitize_language_pref;
 use super::playback_state::PlaybackStateService;
 use super::stream_coordinator::{
-    build_source_health_priorities, build_stream_family_priorities,
-    build_title_source_affinities,
-    sort_streams_by_recommendation,
+    build_source_health_priorities, build_stream_family_priorities, build_title_source_affinities,
+    sort_streams_by_recommendation, StreamMatchContext, StreamRecommendationInputs,
 };
 use super::streaming_helpers::{
     build_addon_source_priority_map, build_stream_query_ids, merge_unique_streams,
     prepare_addon_streams,
 };
-use crate::providers::{realdebrid::RealDebrid, stremio_addon::{StremioAddonTransport, TorrentioStream}};
+use super::{
+    normalize_non_empty, normalize_stream_media_type, PlaybackLanguagePreferences,
+    SETTINGS_STORE_FILE,
+};
+use crate::providers::{
+    realdebrid::RealDebrid,
+    addons::{AddonTransport, TorrentioStream},
+};
 use futures_util::future::join_all;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -25,12 +28,6 @@ use tauri_plugin_store::StoreExt;
 const ADDON_STREAM_FETCH_TIMEOUT_SECS: u64 = 20;
 const ADDON_STREAM_FALLBACK_QUERY_TIMEOUT_SECS: u64 = 8;
 
-fn sanitize_language_pref(value: Option<String>) -> Option<String> {
-    value
-        .map(|candidate| candidate.trim().to_ascii_lowercase())
-        .filter(|candidate| !candidate.is_empty())
-}
-
 fn load_effective_playback_language_preferences<R: tauri::Runtime>(
     store: &tauri_plugin_store::Store<R>,
     app: &AppHandle,
@@ -39,14 +36,14 @@ fn load_effective_playback_language_preferences<R: tauri::Runtime>(
     media_type: &str,
 ) -> PlaybackLanguagePreferences {
     let defaults = PlaybackLanguagePreferences {
-        preferred_audio_language: sanitize_language_pref(get_trimmed_store_string(
-            store,
-            "preferred_audio_language",
-        )),
-        preferred_subtitle_language: sanitize_language_pref(get_trimmed_store_string(
-            store,
-            "preferred_subtitle_language",
-        )),
+        preferred_audio_language: sanitize_language_pref(
+            get_trimmed_store_string(store, "preferred_audio_language"),
+            false,
+        ),
+        preferred_subtitle_language: sanitize_language_pref(
+            get_trimmed_store_string(store, "preferred_subtitle_language"),
+            true,
+        ),
     };
 
     playback_state
@@ -70,6 +67,7 @@ pub(crate) struct StreamQueryRequest<'a> {
 pub(crate) struct StreamRankingScope {
     pub media_type: String,
     pub media_id: String,
+    pub title: Option<String>,
     pub season: Option<u32>,
     pub episode: Option<u32>,
 }
@@ -82,6 +80,7 @@ pub(crate) fn resolve_stream_ranking_scope(
     fallback_episode: Option<u32>,
     ranking_media_type: Option<String>,
     ranking_media_id: Option<String>,
+    ranking_title: Option<String>,
     ranking_season: Option<u32>,
     ranking_episode: Option<u32>,
 ) -> Result<StreamRankingScope, String> {
@@ -99,13 +98,14 @@ pub(crate) fn resolve_stream_ranking_scope(
     Ok(StreamRankingScope {
         media_type,
         media_id,
+        title: ranking_title.as_deref().and_then(normalize_non_empty),
         season: ranking_season.or(fallback_season),
         episode: ranking_episode.or(fallback_episode),
     })
 }
 
 pub(crate) async fn fetch_prepared_streams_for_addon(
-    provider: &StremioAddonTransport,
+    provider: &AddonTransport,
     rd_provider: &RealDebrid,
     effective_type: &str,
     query_ids: &[String],
@@ -179,7 +179,7 @@ pub(crate) async fn fetch_prepared_streams_for_addon(
 pub(crate) async fn fetch_ranked_streams(
     app: &AppHandle,
     playback_state: &PlaybackStateService,
-    provider: &StremioAddonTransport,
+    provider: &AddonTransport,
     rd_provider: &RealDebrid,
     query: &StreamQueryRequest<'_>,
     ranking: &StreamRankingScope,
@@ -200,7 +200,21 @@ pub(crate) async fn fetch_ranked_streams(
     let store = app.store(SETTINGS_STORE_FILE).map_err(|e| e.to_string())?;
     let token = get_effective_playback_rd_token(&store);
     let addon_configs = super::config_store::load_addon_configs(&store);
-    let enabled_addons: Vec<AddonConfig> = addon_configs.into_iter().filter(|addon| addon.enabled).collect();
+    let mut seen_addon_urls = HashSet::new();
+    let enabled_addons: Vec<AddonConfig> = addon_configs
+        .into_iter()
+        .filter(|addon| addon.enabled)
+        .filter_map(|mut addon| {
+            let normalized_url = normalize_addon_url(&addon.url).ok().flatten()?;
+            if !seen_addon_urls.insert(normalized_url.clone()) {
+                return None;
+            }
+
+            addon.url = normalized_url;
+            addon.name = addon.name.trim().to_string();
+            Some(addon)
+        })
+        .collect();
 
     if enabled_addons.is_empty() {
         return Ok(Vec::new());
@@ -270,12 +284,26 @@ pub(crate) async fn fetch_ranked_streams(
     );
     sort_streams_by_recommendation(
         &mut merged,
-        &addon_source_priorities,
-        &source_health_priorities,
-        &stream_family_priorities,
-        &title_source_affinities,
-        playback_language_preferences.preferred_audio_language.as_deref(),
-        playback_language_preferences.preferred_subtitle_language.as_deref(),
+        StreamRecommendationInputs {
+            addon_source_priorities: &addon_source_priorities,
+            source_health_priorities: &source_health_priorities,
+            stream_family_priorities: &stream_family_priorities,
+            title_source_affinities: &title_source_affinities,
+            match_context: StreamMatchContext {
+                media_type: &ranking.media_type,
+                title: ranking.title.as_deref(),
+                query_season: query.season,
+                query_episode: query.episode,
+                canonical_season: ranking.season,
+                canonical_episode: ranking.episode,
+            },
+            preferred_audio_language: playback_language_preferences
+                .preferred_audio_language
+                .as_deref(),
+            preferred_subtitle_language: playback_language_preferences
+                .preferred_subtitle_language
+                .as_deref(),
+        },
     );
 
     Ok(merged)

@@ -183,7 +183,10 @@ fn normalize_loaded_addon_configs(configs: Vec<AddonConfig>) -> Vec<AddonConfig>
     let mut seen_urls = std::collections::HashSet::with_capacity(configs.len());
     let mut seen_ids = std::collections::HashSet::with_capacity(configs.len());
 
-    for mut config in configs.into_iter().filter_map(normalize_loaded_addon_config) {
+    for mut config in configs
+        .into_iter()
+        .filter_map(normalize_loaded_addon_config)
+    {
         if !seen_urls.insert(config.url.clone()) {
             continue;
         }

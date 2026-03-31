@@ -1,9 +1,9 @@
 use super::config_store::{
-    get_effective_debrid_provider, get_effective_rd_token, load_addon_configs,
-    normalize_addon_url, normalize_debrid_provider, resolve_addon_configs,
-    save_addon_configs_to_store, AddonConfig, AddonManifest, DebridConfig,
+    get_effective_debrid_provider, get_effective_rd_token, load_addon_configs, normalize_addon_url,
+    normalize_debrid_provider, resolve_addon_configs, save_addon_configs_to_store, AddonConfig,
+    AddonManifest, DebridConfig,
 };
-use crate::providers::stremio_addon::StremioAddonTransport;
+use crate::providers::addons::AddonTransport;
 use serde_json::json;
 use std::time::Duration;
 use tauri::{command, AppHandle, State};
@@ -12,11 +12,13 @@ use tauri_plugin_store::StoreExt;
 #[command]
 pub async fn save_debrid_config(
     app: AppHandle,
-    addon_transport: State<'_, StremioAddonTransport>,
+    addon_transport: State<'_, AddonTransport>,
     provider: String,
     api_key: String,
 ) -> Result<(), String> {
-    let store = app.store(super::SETTINGS_STORE_FILE).map_err(|e| e.to_string())?;
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
     let provider = normalize_debrid_provider(&provider)
         .ok_or_else(|| "Unsupported debrid provider.".to_string())?;
     let api_key = api_key.trim().to_string();
@@ -46,7 +48,9 @@ pub async fn save_debrid_config(
 
 #[command]
 pub async fn get_debrid_config(app: AppHandle) -> Result<DebridConfig, String> {
-    let store = app.store(super::SETTINGS_STORE_FILE).map_err(|e| e.to_string())?;
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
     let provider = get_effective_debrid_provider(&store);
     let api_key = if provider == "realdebrid" {
         get_effective_rd_token(&store).unwrap_or_default()
@@ -59,17 +63,21 @@ pub async fn get_debrid_config(app: AppHandle) -> Result<DebridConfig, String> {
 
 #[command]
 pub async fn get_addon_configs(app: AppHandle) -> Result<Vec<AddonConfig>, String> {
-    let store = app.store(super::SETTINGS_STORE_FILE).map_err(|e| e.to_string())?;
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
     Ok(load_addon_configs(&store))
 }
 
 #[command]
 pub async fn save_addon_configs(
     app: AppHandle,
-    provider: State<'_, StremioAddonTransport>,
+    provider: State<'_, AddonTransport>,
     configs: Vec<AddonConfig>,
-) -> Result<(), String> {
-    let store = app.store(super::SETTINGS_STORE_FILE).map_err(|e| e.to_string())?;
+) -> Result<Vec<AddonConfig>, String> {
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
 
     let mut normalized = Vec::with_capacity(configs.len());
     for mut config in configs {
@@ -89,7 +97,7 @@ pub async fn save_addon_configs(
     save_addon_configs_to_store(&store, &normalized);
     store.save().map_err(|e| e.to_string())?;
     provider.clear_cache();
-    Ok(())
+    Ok(normalized)
 }
 
 #[command]
