@@ -1,6 +1,6 @@
 [package]
 name = "stremera"
-version = "0.3.0"
+version = "0.3.1"
 description = "A Stremio Alternative"
 authors = ["you"]
 edition = "2021"
