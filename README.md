@@ -30,7 +30,9 @@ Local signed builds can also use:
 - `TAURI_SIGNING_PRIVATE_KEY_PATH`
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 
-The release workflow publishes signed updater artifacts and the Windows installer from tags like `v0.3.1`.
+The release workflow publishes signed updater artifacts and the Windows installer from tags like `v0.3.2`.
+
+Windows NSIS builds include an installer hook that migrates legacy Streamy installs onto the Stremera executable and recreates visible shortcuts during in-app updates.
 
 `bun run tauri:build` loads the encrypted key file from `TAURI_SIGNING_PRIVATE_KEY_PATH` into the env var Tauri expects before invoking the build. Use `bun run tauri:build:unsigned` only when you intentionally want a local installer without updater artifacts.
 
