@@ -374,6 +374,64 @@ fn config_cache_segment(config_url: &str) -> String {
     format!("cfg:{:016x}", hasher.finish())
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamResolution {
+    #[serde(rename = "4k")]
+    P2160,
+    #[serde(rename = "1080p")]
+    P1080,
+    #[serde(rename = "720p")]
+    P720,
+    #[default]
+    #[serde(rename = "sd")]
+    Sd,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum StreamDeliveryKind {
+    #[default]
+    Torrent,
+    Cached,
+    Http,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamPresentation {
+    pub source_name: String,
+    pub stream_title: String,
+    pub resolution: StreamResolution,
+    pub delivery_kind: StreamDeliveryKind,
+    pub delivery_label: String,
+    pub is_instantly_playable: bool,
+    pub hdr_label: Option<String>,
+    pub audio_label: Option<String>,
+    pub codec_label: Option<String>,
+    pub multi_audio_label: Option<String>,
+    pub size_label: Option<String>,
+    pub is_batch: bool,
+}
+
+impl Default for StreamPresentation {
+    fn default() -> Self {
+        Self {
+            source_name: "Unknown".to_string(),
+            stream_title: "Unknown".to_string(),
+            resolution: StreamResolution::Sd,
+            delivery_kind: StreamDeliveryKind::Torrent,
+            delivery_label: "Torrent".to_string(),
+            is_instantly_playable: false,
+            hdr_label: None,
+            audio_label: None,
+            codec_label: None,
+            multi_audio_label: None,
+            size_label: None,
+            is_batch: false,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TorrentioStream {
     pub name: Option<String>,
@@ -400,9 +458,15 @@ pub struct TorrentioStream {
     /// Stable backend-derived identity for release families that can be reused across nearby episodes.
     #[serde(skip_deserializing, default)]
     pub stream_family: Option<String>,
+    /// Canonical backend-issued identity for selection, history, and recovery flows.
+    #[serde(rename = "streamKey", skip_deserializing, default)]
+    pub stream_key: String,
     /// Short user-facing explanation from the backend coordinator for why this stream ranks here.
     #[serde(skip_deserializing, default)]
     pub recommendation_reasons: Vec<String>,
+    /// Backend-prepared presentation facts so the UI can render without reparsing raw stream text.
+    #[serde(skip_deserializing, default)]
+    pub presentation: StreamPresentation,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -430,8 +494,9 @@ const DEBRID_STREAMS_MAX: usize = 15;
 const TORRENT_STREAMS_MAX: usize = 20;
 /// Final merged max in custom config mode.
 const TOTAL_STREAMS_MAX: usize = 35;
-/// Per-request timeout for fallback probes against `/stream/...` endpoints.
-const FALLBACK_STREAM_REQUEST_TIMEOUT_SECS: u64 = 6;
+/// Per-request timeout for root fallback probes against `/stream/...` endpoints.
+/// These probes are only a rescue path for path-configured addons and should fail fast.
+const FALLBACK_STREAM_REQUEST_TIMEOUT_SECS: u64 = 4;
 
 struct CachedStreams {
     streams: Vec<TorrentioStream>,
@@ -896,9 +961,9 @@ impl AddonTransport {
             // If requesting a specific episode and we already have targeted matches,
             // keep a smaller tail of low-confidence generic packs to reduce noise.
             if let (Some(s), Some(e)) = (req_season, req_episode) {
-                let has_targeted_match = streams
-                    .iter()
-                    .any(|stream| stream_episode_match_kind(stream, s, e) != StreamEpisodeMatchKind::None);
+                let has_targeted_match = streams.iter().any(|stream| {
+                    stream_episode_match_kind(stream, s, e) != StreamEpisodeMatchKind::None
+                });
 
                 if has_targeted_match {
                     let mut generic_batch_seen = 0u32;
@@ -1243,7 +1308,9 @@ mod tests {
             size_bytes: None,
             source_name: None,
             stream_family: None,
+            stream_key: String::new(),
             recommendation_reasons: Vec::new(),
+            presentation: StreamPresentation::default(),
         };
         assert!(stream_contains_batch(&stream));
     }
@@ -1262,7 +1329,9 @@ mod tests {
             size_bytes: None,
             source_name: None,
             stream_family: None,
+            stream_key: String::new(),
             recommendation_reasons: Vec::new(),
+            presentation: StreamPresentation::default(),
         };
         assert!(stream_matches_episode(&stream, 3, 7));
     }
@@ -1281,7 +1350,9 @@ mod tests {
             size_bytes: None,
             source_name: None,
             stream_family: None,
+            stream_key: String::new(),
             recommendation_reasons: Vec::new(),
+            presentation: StreamPresentation::default(),
         };
 
         assert_eq!(
@@ -1304,7 +1375,9 @@ mod tests {
             size_bytes: None,
             source_name: None,
             stream_family: None,
+            stream_key: String::new(),
             recommendation_reasons: Vec::new(),
+            presentation: StreamPresentation::default(),
         };
 
         assert_eq!(
@@ -1328,7 +1401,9 @@ mod tests {
             size_bytes: None,
             source_name: None,
             stream_family: None,
+            stream_key: String::new(),
             recommendation_reasons: Vec::new(),
+            presentation: StreamPresentation::default(),
         }
     }
 

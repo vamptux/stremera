@@ -1,11 +1,18 @@
 import type { QueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import {
+  clearLegacyStorageFeatureKeys,
+  markLegacyStorageFeatureComplete,
+  readLegacyStorageFeature,
+  type LegacyStorageReadResult,
+} from '@/lib/legacy-storage';
 
 export const APP_UPDATE_STATE_QUERY_KEY = ['app-update-state'] as const;
 export const APP_VERSION_QUERY_KEY = ['appVersion'] as const;
 const APP_UPDATE_STATUS_EVENT = 'app-update-status';
 const LAST_NOTIFIED_VERSION_KEY = 'stremera:last-notified-app-update-version';
+const APP_UPDATE_LEGACY_STORAGE_FEATURE = 'app-update-last-notified-version';
 
 export interface AppUpdateHandle {
   version: string;
@@ -35,29 +42,27 @@ export interface AppUpdateState {
 let activeInstallPromise: Promise<void> | null = null;
 let activeCheckPromise: Promise<AppUpdateHandle | null> | null = null;
 
-function readLocalStorageValue(key: string): string | null {
-  if (typeof window === 'undefined') return null;
-
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
+function readLegacyLastNotifiedVersion(): LegacyStorageReadResult<string> {
+  return readLegacyStorageFeature(APP_UPDATE_LEGACY_STORAGE_FEATURE, (storage) => {
+    try {
+      const version = storage.getItem(LAST_NOTIFIED_VERSION_KEY);
+      return {
+        hasLegacyData: version !== null,
+        value: version?.trim() || null,
+      };
+    } catch {
+      return {
+        hasLegacyData: true,
+        value: null,
+      };
+    }
+  });
 }
 
-function writeLocalStorageValue(key: string, value: string | null) {
-  if (typeof window === 'undefined') return;
-
-  try {
-    if (value === null) {
-      window.localStorage.removeItem(key);
-      return;
-    }
-
-    window.localStorage.setItem(key, value);
-  } catch {
-    // Ignore storage access failures in restricted/sandboxed contexts.
-  }
+function clearLegacyLastNotifiedVersion() {
+  clearLegacyStorageFeatureKeys(APP_UPDATE_LEGACY_STORAGE_FEATURE, [
+    LAST_NOTIFIED_VERSION_KEY,
+  ]);
 }
 
 function createInitialAppUpdateState(): AppUpdateState {
@@ -98,12 +103,43 @@ export function isTauriDesktopRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
-export function getLastNotifiedAppUpdateVersion(): string | null {
-  return readLocalStorageValue(LAST_NOTIFIED_VERSION_KEY);
+export async function getLastNotifiedAppUpdateVersion(): Promise<string | null> {
+  if (!isTauriDesktopRuntime()) return null;
+
+  try {
+    const legacyVersionRead = readLegacyLastNotifiedVersion();
+    if (legacyVersionRead.hasLegacyData && legacyVersionRead.value) {
+      const importedVersion = await invoke<string | null>('import_legacy_last_notified_app_update_version', {
+        version: legacyVersionRead.value,
+      });
+      clearLegacyLastNotifiedVersion();
+      return importedVersion;
+    }
+
+    if (legacyVersionRead.hasLegacyData) {
+      clearLegacyLastNotifiedVersion();
+    } else {
+      markLegacyStorageFeatureComplete(APP_UPDATE_LEGACY_STORAGE_FEATURE);
+    }
+
+    return await invoke<string | null>('get_last_notified_app_update_version');
+  } catch {
+    return null;
+  }
 }
 
-export function setLastNotifiedAppUpdateVersion(version: string | null) {
-  writeLocalStorageValue(LAST_NOTIFIED_VERSION_KEY, version);
+export async function setLastNotifiedAppUpdateVersion(version: string | null): Promise<string | null> {
+  if (!isTauriDesktopRuntime()) return null;
+
+  try {
+    const savedVersion = await invoke<string | null>('save_last_notified_app_update_version', {
+      version,
+    });
+    clearLegacyLastNotifiedVersion();
+    return savedVersion;
+  } catch {
+    return null;
+  }
 }
 
 export async function getCurrentAppVersion(): Promise<string | null> {
@@ -120,7 +156,7 @@ export async function checkForAppUpdate(): Promise<AppUpdateHandle | null> {
 
   const update = await invoke<AppUpdateHandle | null>('check_for_app_update');
   if (!update) {
-    setLastNotifiedAppUpdateVersion(null);
+    await setLastNotifiedAppUpdateVersion(null);
   }
   if (!update) return null;
 

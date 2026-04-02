@@ -1,6 +1,7 @@
 import {
   api,
   type BestResolvedStream,
+  type PreparedPlaybackStream,
   type ResolvedStream,
   type TorrentioStream,
 } from '@/lib/api';
@@ -8,9 +9,14 @@ import {
   buildStreamRankingOptions,
   type StreamRankingTarget,
 } from '@/lib/stream-ranking';
-import { isHttpStreamUrl } from '@/lib/stream-selector-utils';
+import type { PlaybackStreamOutcome } from '@/lib/playback-stream-health';
 
 type StreamMediaType = 'movie' | 'series' | 'anime';
+
+function isHttpStreamUrl(url?: string | null): boolean {
+  const normalized = url?.trim().toLowerCase() ?? '';
+  return normalized.startsWith('http://') || normalized.startsWith('https://');
+}
 
 interface ResolveRankedBestStreamOptions {
   mediaType: StreamMediaType;
@@ -21,6 +27,24 @@ interface ResolveRankedBestStreamOptions {
   absoluteEpisode?: number;
   rankingTarget?: StreamRankingTarget;
   bypassCache?: boolean;
+}
+
+interface RecoverPlaybackStreamOptions {
+  mediaType: StreamMediaType;
+  mediaId: string;
+  streamSeason?: number;
+  streamEpisode?: number;
+  absoluteSeason?: number;
+  absoluteEpisode?: number;
+  streamLookupId?: string;
+  failedStreamUrl?: string;
+  failedStreamFormat?: string;
+  failedSourceName?: string;
+  failedStreamFamily?: string;
+  failedStreamKey?: string;
+  preparedBackupStream?: PreparedPlaybackStream;
+  outcome: Exclude<PlaybackStreamOutcome, 'verified'>;
+  rankingTarget?: StreamRankingTarget;
 }
 
 export async function resolveRankedBestStream({
@@ -42,6 +66,49 @@ export async function resolveRankedBestStream({
 
   return api.resolveBestStream(mediaType, streamLookupId, streamSeason, streamEpisode, absoluteEpisode, {
     bypassCache,
+    ...rankingOptions,
+  });
+}
+
+export async function recoverPlaybackStream({
+  mediaType,
+  mediaId,
+  streamSeason,
+  streamEpisode,
+  absoluteSeason,
+  absoluteEpisode,
+  streamLookupId,
+  failedStreamUrl,
+  failedStreamFormat,
+  failedSourceName,
+  failedStreamFamily,
+  failedStreamKey,
+  preparedBackupStream,
+  outcome,
+  rankingTarget,
+}: RecoverPlaybackStreamOptions): Promise<BestResolvedStream | null> {
+  const rankingOptions = buildStreamRankingOptions(
+    rankingTarget ?? {
+      mediaId,
+      mediaType,
+    },
+  );
+
+  return api.recoverPlaybackStream({
+    mediaType,
+    mediaId,
+    streamSeason,
+    streamEpisode,
+    absoluteSeason,
+    absoluteEpisode,
+    streamLookupId,
+    failedStreamUrl,
+    failedStreamFormat,
+    failedSourceName,
+    failedStreamFamily,
+    failedStreamKey,
+    preparedBackupStream,
+    outcome,
     ...rankingOptions,
   });
 }

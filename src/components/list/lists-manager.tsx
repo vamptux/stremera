@@ -236,7 +236,11 @@ function SortableItemRow({ item, listId, viewMode }: SortableItemRowProps) {
           <p className='text-[11px] font-medium text-zinc-300 truncate leading-tight'>
             {item.title}
           </p>
-          <p className='text-[10px] text-zinc-600 capitalize mt-0.5'>{item.year?.split('-')[0]}</p>
+          {item.displayYear && (
+            <p className='text-[10px] text-zinc-600 capitalize mt-0.5'>
+              {item.displayYear}
+            </p>
+          )}
         </div>
       </div>
     );
@@ -293,10 +297,12 @@ function SortableItemRow({ item, listId, viewMode }: SortableItemRowProps) {
         </p>
         <div className='flex items-center gap-1.5 mt-0.5'>
           <span className='text-[10px] text-zinc-500 capitalize'>{item.type}</span>
-          {item.year && (
+          {item.displayYear && (
             <>
               <span className='text-zinc-700 text-[10px]'>·</span>
-              <span className='text-[10px] text-zinc-500'>{item.year.split('-')[0]}</span>
+              <span className='text-[10px] text-zinc-500'>
+                {item.displayYear}
+              </span>
             </>
           )}
         </div>

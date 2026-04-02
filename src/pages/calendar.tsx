@@ -23,21 +23,11 @@ interface CalendarEvent {
   type: 'movie' | 'episode';
 }
 
-function parseMovieReleaseDate(value?: string): Date | null {
+function parseScheduleDate(value?: string): Date | null {
   if (!value) return null;
-  const normalized = value.trim();
 
-  const explicitDateMatch = normalized.match(/\b\d{4}-\d{2}-\d{2}\b/);
-  if (explicitDateMatch) {
-    const parsed = parseISO(explicitDateMatch[0]);
-    return isValid(parsed) ? parsed : null;
-  }
-
-  const yearMatch = normalized.match(/\b(19|20)\d{2}\b/);
-  if (!yearMatch) return null;
-  const yearNum = Number(yearMatch[0]);
-  if (!Number.isFinite(yearNum)) return null;
-  return new Date(yearNum, 0, 1);
+  const parsed = parseISO(value);
+  return isValid(parsed) ? parsed : null;
 }
 
 export function Calendar() {
@@ -164,7 +154,7 @@ export function Calendar() {
       if (!item) continue;
 
       if (item.type === 'movie') {
-        const releaseDate = parseMovieReleaseDate(item.year);
+        const releaseDate = parseScheduleDate(item.releaseDate);
         if (releaseDate && releaseDate.getFullYear() >= currentYear) {
           allEvents.push({
             id: item.id,
@@ -180,22 +170,20 @@ export function Calendar() {
 
       if (item.type === 'series' && item.episodes) {
         item.episodes.forEach(ep => {
-          if (ep.released) {
-            const date = parseISO(ep.released);
-            if (isValid(date)) {
-              allEvents.push({
-                id: ep.id,
-                mediaId: item.id,
-                title: ep.title || `Episode ${ep.episode}`,
-                seriesTitle: item.title,
-                season: ep.season,
-                episode: ep.episode,
-                date: date,
-                poster: item.poster,
-                thumbnail: ep.thumbnail,
-                type: 'episode'
-              });
-            }
+          const date = parseScheduleDate(ep.releaseDate || ep.released);
+          if (date) {
+            allEvents.push({
+              id: ep.id,
+              mediaId: item.id,
+              title: ep.title || `Episode ${ep.episode}`,
+              seriesTitle: item.title,
+              season: ep.season,
+              episode: ep.episode,
+              date: date,
+              poster: item.poster,
+              thumbnail: ep.thumbnail,
+              type: 'episode'
+            });
           }
         });
       }

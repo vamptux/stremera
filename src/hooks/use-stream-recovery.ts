@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, type MutableRefObject } from 'react';
 import { type PlaybackStreamOutcome } from '@/lib/playback-stream-health';
-import { resolveRankedBestStream } from '@/lib/stream-resolution';
+import { recoverPlaybackStream } from '@/lib/stream-resolution';
 
 interface StreamFallback {
   url: string;
@@ -19,6 +19,7 @@ interface UseStreamRecoveryOptions {
   title?: string;
   resolveSeason?: number;
   resolveEpisode?: number;
+  absoluteSeason?: number;
   absoluteEpisode?: number;
   streamLookupId?: string;
   currentTimeRef: MutableRefObject<number>;
@@ -28,6 +29,7 @@ interface UseStreamRecoveryOptions {
   activeStreamFormatRef: MutableRefObject<string | undefined>;
   activeStreamSourceNameRef: MutableRefObject<string | undefined>;
   activeStreamFamilyRef: MutableRefObject<string | undefined>;
+  selectedStreamKeyRef: MutableRefObject<string | undefined>;
   errorRef: MutableRefObject<string | null>;
   stopLoading: (makeTransparent?: boolean) => void;
   setError: (value: string | null) => void;
@@ -47,21 +49,6 @@ interface UseStreamRecoveryResult {
   recoverFromSlowStartup: (sourceUrl: string) => Promise<boolean>;
 }
 
-function normalizeStreamResolveMediaType(
-  mediaType?: string,
-  mediaId?: string,
-): 'movie' | 'series' | 'anime' | null {
-  const normalizedType = mediaType?.trim().toLowerCase();
-  if (!normalizedType) return null;
-  if (normalizedType === 'movie') return 'movie';
-  if (normalizedType === 'anime') return 'anime';
-  if (normalizedType === 'series') {
-    if (mediaId?.trim().toLowerCase().startsWith('kitsu:')) return 'anime';
-    return 'series';
-  }
-  return null;
-}
-
 export function useStreamRecovery({
   activeStreamUrl,
   preparedBackupStream,
@@ -72,6 +59,7 @@ export function useStreamRecovery({
   title,
   resolveSeason,
   resolveEpisode,
+  absoluteSeason,
   absoluteEpisode,
   streamLookupId,
   currentTimeRef,
@@ -81,6 +69,7 @@ export function useStreamRecovery({
   activeStreamFormatRef,
   activeStreamSourceNameRef,
   activeStreamFamilyRef,
+  selectedStreamKeyRef,
   errorRef,
   stopLoading,
   setError,
@@ -94,7 +83,6 @@ export function useStreamRecovery({
   const startupWatchdogTimerRef = useRef<NodeJS.Timeout | null>(null);
   const startupWatchdogCancelledRef = useRef(false);
   const startupRecoveryAttemptedForRef = useRef<Set<string>>(new Set());
-  const preparedBackupConsumedRef = useRef(false);
 
   const clearRecoveryTimers = useCallback(() => {
     if (startupWatchdogTimerRef.current) {
@@ -116,16 +104,24 @@ export function useStreamRecovery({
 
   useEffect(() => {
     startupRecoveryAttemptedForRef.current.clear();
-    preparedBackupConsumedRef.current = false;
-  }, [mediaId, resolveSeason, resolveEpisode]);
+  }, [absoluteEpisode, absoluteSeason, mediaId, resolveSeason, resolveEpisode]);
 
   const recoverFromSlowStartup = useCallback(
     async (sourceUrl: string) => {
-      const effectiveMediaType = normalizeStreamResolveMediaType(mediaType, mediaId);
+      const effectiveMediaType = mediaType?.trim().toLowerCase();
       if (startupWatchdogCancelledRef.current) return false;
       if (playbackStartedRef.current) return false;
       if (isHistoryResume) return false;
-      if (isOffline || !effectiveMediaType || !mediaId || !sourceUrl) return false;
+      if (
+        isOffline ||
+        !mediaId ||
+        !sourceUrl ||
+        (effectiveMediaType !== 'movie' &&
+          effectiveMediaType !== 'series' &&
+          effectiveMediaType !== 'anime')
+      ) {
+        return false;
+      }
       if (startupRecoveryAttemptedForRef.current.has(sourceUrl)) return false;
 
       startupRecoveryAttemptedForRef.current.add(sourceUrl);
@@ -135,34 +131,21 @@ export function useStreamRecovery({
 
       try {
         if (startupWatchdogCancelledRef.current || playbackStartedRef.current) return false;
-        reportStreamFailure('startup-timeout', sourceUrl);
-
-        const backupStream = preparedBackupStream;
-        const backupStreamUrl = backupStream?.url?.trim();
-        if (
-          backupStream &&
-          !preparedBackupConsumedRef.current &&
-          backupStreamUrl &&
-          backupStreamUrl !== sourceUrl &&
-          lastStreamUrlRef.current === sourceUrl
-        ) {
-          preparedBackupConsumedRef.current = true;
-          activeStreamFormatRef.current = backupStream.format;
-          activeStreamSourceNameRef.current = backupStream.sourceName;
-          activeStreamFamilyRef.current = backupStream.streamFamily;
-          setResolveStatus('Prepared stream stalled, switching to backup candidate...');
-          setActiveStreamUrl(backupStreamUrl);
-          return true;
-        }
-
-        const resolved = await resolveRankedBestStream({
+        const resolved = await recoverPlaybackStream({
           mediaType: effectiveMediaType,
           mediaId,
           streamLookupId: streamLookupId || mediaId,
           streamSeason: resolveSeason,
           streamEpisode: resolveEpisode,
+          absoluteSeason,
           absoluteEpisode: absoluteEpisode ?? resolveEpisode,
-          bypassCache: true,
+          failedStreamUrl: sourceUrl,
+          failedStreamFormat: activeStreamFormatRef.current,
+          failedSourceName: activeStreamSourceNameRef.current,
+          failedStreamFamily: activeStreamFamilyRef.current,
+          failedStreamKey: selectedStreamKeyRef.current,
+          preparedBackupStream,
+          outcome: 'startup-timeout',
           rankingTarget: {
             mediaId,
             mediaType: effectiveMediaType,
@@ -198,6 +181,7 @@ export function useStreamRecovery({
       activeStreamFormatRef,
       activeStreamFamilyRef,
       activeStreamSourceNameRef,
+      absoluteSeason,
       isHistoryResume,
       isOffline,
       lastStreamUrlRef,
@@ -209,12 +193,12 @@ export function useStreamRecovery({
       absoluteEpisode,
       resolveEpisode,
       resolveSeason,
+      selectedStreamKeyRef,
       setActiveStreamUrl,
       setError,
       setIsResolving,
       setResolveStatus,
       streamLookupId,
-      reportStreamFailure,
     ],
   );
 

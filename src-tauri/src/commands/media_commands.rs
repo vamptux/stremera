@@ -1,4 +1,6 @@
 use super::{
+    episode_navigation::{build_source_episode_coordinates, SourceEpisodeCoordinates},
+    media_normalization::normalize_media_details,
     normalize_cinemeta_type, normalize_non_empty, normalize_stream_media_type,
     playback_state::{PlaybackEpisodeMappingSnapshot, PlaybackStateService},
 };
@@ -48,6 +50,55 @@ pub struct MediaEpisodesPage {
     pub has_more: bool,
 }
 
+fn fallback_episode_lookup_id(media_id: &str, episodes: &[Episode]) -> String {
+    episodes
+        .iter()
+        .find_map(|episode| episode.imdb_id.as_deref())
+        .and_then(normalize_non_empty)
+        .unwrap_or_else(|| media_id.to_string())
+}
+
+fn source_coordinates_from_mapping(
+    mapping: PlaybackEpisodeMappingSnapshot,
+) -> SourceEpisodeCoordinates {
+    SourceEpisodeCoordinates {
+        lookup_id: mapping.source_lookup_id,
+        season: mapping.source_season,
+        episode: mapping.source_episode,
+        aniskip_episode: mapping.aniskip_episode,
+    }
+}
+
+pub(crate) fn enrich_episode_stream_targets(
+    app: &AppHandle,
+    playback_state: &PlaybackStateService,
+    media_type: &str,
+    media_id: &str,
+    fallback_lookup_id: &str,
+    episodes: &mut [Episode],
+) -> Result<(), String> {
+    for episode in episodes.iter_mut() {
+        let source = if let Some(mapping) = playback_state.get_episode_mapping(
+            app,
+            media_type,
+            media_id,
+            episode.season,
+            episode.episode,
+        )? {
+            source_coordinates_from_mapping(mapping)
+        } else {
+            build_source_episode_coordinates(episode, fallback_lookup_id)
+        };
+
+        episode.stream_lookup_id = Some(source.lookup_id);
+        episode.stream_season = Some(source.season);
+        episode.stream_episode = Some(source.episode);
+        episode.aniskip_episode = Some(source.aniskip_episode);
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn fetch_media_details_inner(
     cinemeta_provider: &Cinemeta,
     kitsu_provider: &Kitsu,
@@ -58,7 +109,8 @@ pub(crate) async fn fetch_media_details_inner(
     if id.starts_with("kitsu:") {
         return kitsu_provider
             .get_details_with_options(id, include_episodes)
-            .await;
+            .await
+            .map(normalize_media_details);
     }
 
     let media_type = normalize_cinemeta_type(media_type)
@@ -66,6 +118,7 @@ pub(crate) async fn fetch_media_details_inner(
     cinemeta_provider
         .get_details(media_type, id.to_string())
         .await
+        .map(normalize_media_details)
 }
 
 #[command]
@@ -81,7 +134,7 @@ pub async fn get_media_details(
     let id = normalize_non_empty(&id).ok_or_else(|| "Media ID is required.".to_string())?;
     let include_episodes = include_episodes.unwrap_or(true);
 
-    let details = fetch_media_details_inner(
+    let mut details = fetch_media_details_inner(
         &cinemeta_provider,
         &kitsu_provider,
         &media_type,
@@ -90,13 +143,21 @@ pub async fn get_media_details(
     )
     .await?;
 
-    if let Some(episodes) = details.episodes.as_ref() {
+    if let Some(episodes) = details.episodes.as_mut() {
         let fallback_lookup_id = details.imdb_id.as_deref().unwrap_or(id.as_str());
         playback_state.cache_episode_mappings(
             &app,
             &media_type,
             &id,
             Some(fallback_lookup_id),
+            episodes,
+        )?;
+        enrich_episode_stream_targets(
+            &app,
+            playback_state.inner(),
+            &media_type,
+            &id,
+            fallback_lookup_id,
             episodes,
         )?;
     }
@@ -142,7 +203,24 @@ pub async fn get_media_episodes(
         .get_episodes_page(&id, season, page, page_size)
         .await?;
 
-    playback_state.cache_episode_mappings(&app, &media_type, &id, Some(&id), &episodes)?;
+    let mut episodes = super::media_normalization::normalize_episode_metadata_list(episodes);
+    let fallback_lookup_id = fallback_episode_lookup_id(&id, &episodes);
+
+    playback_state.cache_episode_mappings(
+        &app,
+        &media_type,
+        &id,
+        Some(&fallback_lookup_id),
+        &episodes,
+    )?;
+    enrich_episode_stream_targets(
+        &app,
+        playback_state.inner(),
+        &media_type,
+        &id,
+        &fallback_lookup_id,
+        &mut episodes,
+    )?;
 
     Ok(MediaEpisodesPage {
         episodes,
@@ -156,20 +234,19 @@ pub async fn get_media_episodes(
     })
 }
 
-#[command]
 #[allow(clippy::too_many_arguments)]
-pub async fn get_episode_stream_mapping(
+pub(crate) async fn resolve_episode_stream_mapping_inner(
     app: AppHandle,
-    playback_state: State<'_, PlaybackStateService>,
-    cinemeta_provider: State<'_, Cinemeta>,
-    kitsu_provider: State<'_, Kitsu>,
-    media_type: String,
-    id: String,
+    playback_state: &PlaybackStateService,
+    cinemeta_provider: &Cinemeta,
+    kitsu_provider: &Kitsu,
+    media_type: &str,
+    id: &str,
     canonical_season: u32,
     canonical_episode: u32,
 ) -> Result<Option<EpisodeStreamMapping>, String> {
-    let id = normalize_non_empty(&id).ok_or_else(|| "Media ID is required.".to_string())?;
-    let media_type = normalize_stream_media_type(&media_type)
+    let id = normalize_non_empty(id).ok_or_else(|| "Media ID is required.".to_string())?;
+    let media_type = normalize_stream_media_type(media_type)
         .ok_or_else(|| "Invalid media type for episode mapping lookup.".to_string())?;
 
     if media_type == "movie" {
@@ -187,7 +264,7 @@ pub async fn get_episode_stream_mapping(
     }
 
     let details =
-        fetch_media_details_inner(&cinemeta_provider, &kitsu_provider, &media_type, &id, true)
+        fetch_media_details_inner(cinemeta_provider, kitsu_provider, &media_type, &id, true)
             .await?;
 
     if let Some(episodes) = details.episodes.as_ref() {

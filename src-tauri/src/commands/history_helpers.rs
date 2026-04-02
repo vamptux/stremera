@@ -8,6 +8,7 @@ const WATCH_PROGRESS_NEAR_COMPLETION_RATIO: f64 = 0.97;
 const WATCH_PROGRESS_NEAR_COMPLETION_REMAINING_SECS: f64 = 30.0;
 const WATCH_PROGRESS_NEAR_COMPLETION_MIN_DURATION_SECS: f64 = 60.0;
 const WATCH_PROGRESS_MIN_RESUME_POSITION_SECS: f64 = 5.0;
+const WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO: f64 = 0.95;
 const WATCH_PROGRESS_LOW_CONFIDENCE_EARLY_POSITION_SECS: f64 = 90.0;
 const WATCH_PROGRESS_LOW_CONFIDENCE_PROGRESS_RATIO: f64 = 0.08;
 const WATCH_PROGRESS_BETTER_RESUME_POSITION_DELTA_SECS: f64 = 45.0;
@@ -45,6 +46,7 @@ pub(crate) fn normalize_watch_progress_type(type_: &str) -> Option<String> {
 pub(crate) fn sanitize_watch_progress(mut progress: WatchProgress) -> Option<WatchProgress> {
     progress.id = progress.id.trim().to_string();
     progress.type_ = normalize_watch_progress_type(&progress.type_)?;
+    progress.resume_start_time = None;
 
     if progress.absolute_season.is_none() {
         progress.absolute_season = progress.season;
@@ -344,6 +346,25 @@ fn has_meaningful_resume_position(item: &WatchProgress) -> bool {
     item.position >= WATCH_PROGRESS_MIN_RESUME_POSITION_SECS
 }
 
+pub(crate) fn playable_resume_start_time(item: &WatchProgress) -> Option<f64> {
+    if !item.position.is_finite() || item.position < WATCH_PROGRESS_MIN_RESUME_POSITION_SECS {
+        return None;
+    }
+
+    if item.duration.is_finite()
+        && item.duration > 0.0
+        && item.position / item.duration >= WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO
+    {
+        return None;
+    }
+
+    Some(item.position)
+}
+
+pub(crate) fn annotate_resume_start_time(item: &mut WatchProgress) {
+    item.resume_start_time = playable_resume_start_time(item);
+}
+
 fn watch_progress_ratio(item: &WatchProgress) -> f64 {
     if item.duration > 0.0 {
         (item.position / item.duration).clamp(0.0, 1.0)
@@ -553,7 +574,9 @@ fn merge_watch_progress_from_donor(
         && !same_source
         && donor_source_priority > target_source_priority;
     let can_merge_missing_source_metadata = donor_has_source_binding
-        && (!target_has_source_binding || same_source || donor_source_priority > target_source_priority);
+        && (!target_has_source_binding
+            || same_source
+            || donor_source_priority > target_source_priority);
 
     merge_watch_progress_coordinates(target, donor);
 
@@ -601,7 +624,11 @@ pub(crate) fn choose_watch_history_entry_with_source_health(
     let mut donors = items;
     donors.sort_by(|left, right| {
         watch_progress_quality_score(&chosen, right, source_health_priorities)
-            .cmp(&watch_progress_quality_score(&chosen, left, source_health_priorities))
+            .cmp(&watch_progress_quality_score(
+                &chosen,
+                left,
+                source_health_priorities,
+            ))
             .then_with(|| right.last_watched.cmp(&left.last_watched))
     });
 
@@ -672,12 +699,7 @@ pub(crate) fn choose_exact_watch_progress_entry(
     episode: Option<u32>,
 ) -> Option<WatchProgress> {
     choose_exact_watch_progress_entry_with_source_health(
-        items,
-        media_id,
-        media_type,
-        season,
-        episode,
-        None,
+        items, media_id, media_type, season, episode, None,
     )
 }
 
@@ -710,13 +732,5 @@ pub(crate) fn choose_exact_watch_progress_entry_with_source_health(
 }
 
 pub(crate) fn is_continue_watching_candidate(item: &WatchProgress) -> bool {
-    if item.position < WATCH_PROGRESS_MIN_RESUME_POSITION_SECS {
-        return false;
-    }
-
-    if item.duration <= 0.0 {
-        return true;
-    }
-
-    item.position / item.duration < 0.95
+    playable_resume_start_time(item).is_some()
 }

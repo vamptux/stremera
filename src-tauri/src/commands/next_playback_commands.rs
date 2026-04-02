@@ -4,13 +4,13 @@ use super::{
     normalize_stream_media_type, BEST_STREAM_MAX_CANDIDATES, SETTINGS_STORE_FILE,
 };
 use crate::providers::{
-    cinemeta::Cinemeta, kitsu::Kitsu, realdebrid::RealDebrid, addons::AddonTransport,
+    addons::AddonTransport, cinemeta::Cinemeta, kitsu::Kitsu, realdebrid::RealDebrid,
 };
 use tauri::{command, AppHandle, State};
 use tauri_plugin_store::StoreExt;
 
 use super::episode_navigation::{self, NextPlaybackPlan, PreparedPlaybackStream};
-use super::media_commands::fetch_media_details_inner;
+use super::media_commands::{enrich_episode_stream_targets, fetch_media_details_inner};
 use super::playback_state::PlaybackStateService;
 use super::stream_fetcher::{fetch_ranked_streams, StreamQueryRequest, StreamRankingScope};
 use super::stream_resolver::{
@@ -41,34 +41,44 @@ pub async fn prepare_next_playback_plan(
         return Ok(None);
     }
 
-    let details =
+    let mut details =
         fetch_media_details_inner(&cinemeta_provider, &kitsu_provider, &media_type, &id, true)
             .await?;
-    let Some(episodes) = details.episodes.as_ref() else {
-        return Ok(None);
-    };
-
-    let fallback_lookup_id = details.imdb_id.as_deref().unwrap_or(id.as_str());
-    playback_state.cache_episode_mappings(
-        &app,
-        &media_type,
-        &id,
-        Some(fallback_lookup_id),
-        episodes,
-    )?;
-
-    let fallback_lookup_id = current_stream_lookup_id
+    let episode_mapping_fallback_lookup_id = details.imdb_id.clone().unwrap_or_else(|| id.clone());
+    let next_plan_fallback_lookup_id = current_stream_lookup_id
         .and_then(|value| normalize_non_empty(&value))
         .or_else(|| details.imdb_id.clone())
         .unwrap_or_else(|| id.clone());
 
-    let Some(mut plan) = episode_navigation::build_next_playback_plan(
-        episodes,
-        current_season,
-        current_episode,
-        &media_type,
-        &fallback_lookup_id,
-    ) else {
+    let Some(mut plan) = ({
+        let Some(episodes) = details.episodes.as_mut() else {
+            return Ok(None);
+        };
+
+        playback_state.cache_episode_mappings(
+            &app,
+            &media_type,
+            &id,
+            Some(episode_mapping_fallback_lookup_id.as_str()),
+            episodes,
+        )?;
+        enrich_episode_stream_targets(
+            &app,
+            playback_state.inner(),
+            &media_type,
+            &id,
+            episode_mapping_fallback_lookup_id.as_str(),
+            episodes,
+        )?;
+
+        episode_navigation::build_next_playback_plan(
+            episodes,
+            current_season,
+            current_episode,
+            &media_type,
+            &next_plan_fallback_lookup_id,
+        )
+    }) else {
         return Ok(None);
     };
 

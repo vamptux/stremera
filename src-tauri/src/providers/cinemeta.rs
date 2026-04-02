@@ -1,4 +1,6 @@
-use super::{build_provider_http_client, Episode, MediaDetails, MediaItem, Provider};
+use super::{
+    build_provider_http_client, normalize_media_year, Episode, MediaDetails, MediaItem, Provider,
+};
 use futures_util::future::join_all;
 use reqwest::Client;
 use serde::Deserialize;
@@ -6,6 +8,7 @@ use std::collections::HashSet;
 use urlencoding::encode;
 
 const BASE_URL: &str = "https://v3-cinemeta.strem.io";
+const DISCOVER_PAGE_SKIPS: [Option<u32>; 2] = [None, Some(50)];
 
 pub struct Cinemeta {
     client: Client,
@@ -24,7 +27,7 @@ impl Cinemeta {
     ) -> Result<Vec<MediaItem>, String> {
         // Anime is surfaced through Cinemeta "series" catalogs using genre=Anime by default.
         let effective_genre = genre.or_else(|| Some("Anime".to_string()));
-        self.get_catalog("series", "top", effective_genre, None)
+        self.get_discover_catalog("series", "top", effective_genre)
             .await
     }
 
@@ -33,13 +36,12 @@ impl Cinemeta {
         type_: &str,
         catalog_id: &str,
         genre: Option<String>,
-        _skip: Option<u32>,
+        skip: Option<u32>,
     ) -> Result<Vec<MediaItem>, String> {
-        // NOTE: Cinemeta's `?skip=N` query parameter does NOT return different items —
-        // the API consistently returns the same fixed set of ~40-50 items regardless of
-        // the skip offset. This was verified by live testing. Therefore we always fetch
-        // a single page per catalog endpoint (no pagination loop).
-        self.fetch_catalog_page(type_, catalog_id, &genre).await
+        // Cinemeta ignores query-string pagination, but it does honour Stremio-style
+        // path extras (`/skip=50.json` or `/genre=Anime&skip=50.json`) for browse catalogs.
+        self.fetch_catalog_page(type_, catalog_id, &genre, skip)
+            .await
     }
 
     /// Fetch from *both* `top` and `imdbRating` catalogs in parallel and merge the
@@ -58,35 +60,47 @@ impl Cinemeta {
             "imdbRating"
         };
 
-        let genre_clone = genre.clone();
-        let (primary_res, secondary_res) = tokio::join!(
-            self.fetch_catalog_page(type_, primary_catalog, &genre),
-            self.fetch_catalog_page(type_, secondary_catalog, &genre_clone),
-        );
-
         let mut all_items: Vec<MediaItem> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
 
-        // Primary catalog first (preserves user's feed preference ordering)
-        for item in primary_res? {
-            if seen.insert(item.id.clone()) {
-                all_items.push(item);
+        let mut requests = Vec::with_capacity(DISCOVER_PAGE_SKIPS.len() * 2);
+        for skip in DISCOVER_PAGE_SKIPS {
+            requests.push((primary_catalog, genre.clone(), skip));
+        }
+        for skip in DISCOVER_PAGE_SKIPS {
+            requests.push((secondary_catalog, genre.clone(), skip));
+        }
+
+        let results = join_all(
+            requests
+                .into_iter()
+                .map(|(catalog_id, genre, skip)| async move {
+                    self.fetch_catalog_page(type_, catalog_id, &genre, skip)
+                        .await
+                }),
+        )
+        .await;
+        let mut had_success = false;
+        let mut last_error: Option<String> = None;
+
+        for result in results {
+            match result {
+                Ok(items) => {
+                    had_success = true;
+                    for item in items {
+                        if seen.insert(item.id.clone()) {
+                            all_items.push(item);
+                        }
+                    }
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                }
             }
         }
 
-        // Append secondary catalog items for additional content
-        match secondary_res {
-            Ok(items) => {
-                for item in items {
-                    if seen.insert(item.id.clone()) {
-                        all_items.push(item);
-                    }
-                }
-            }
-            Err(_e) => {
-                #[cfg(debug_assertions)]
-                eprintln!("Secondary catalog fetch failed (non-fatal): {}", _e);
-            }
+        if !had_success {
+            return Err(last_error.unwrap_or_else(|| "Cinemeta discover failed.".to_string()));
         }
 
         Ok(all_items)
@@ -111,8 +125,9 @@ impl Cinemeta {
         type_: &str,
         catalog_id: &str,
         genre: &Option<String>,
+        skip: Option<u32>,
     ) -> Result<Vec<MediaItem>, String> {
-        let url = Self::build_catalog_url(type_, catalog_id, genre.as_deref());
+        let url = Self::build_catalog_url(type_, catalog_id, genre.as_deref(), skip);
 
         #[cfg(debug_assertions)]
         eprintln!("Fetching Cinemeta Catalog: {}", url);
@@ -120,18 +135,30 @@ impl Cinemeta {
         self.fetch_catalog_items_from_url(&url).await
     }
 
-    fn build_catalog_url(type_: &str, catalog_id: &str, genre: Option<&str>) -> String {
-        if let Some(genre_name) = genre {
-            format!(
-                "{}/catalog/{}/{}/genre={}.json",
-                BASE_URL,
-                type_,
-                catalog_id,
-                encode(genre_name)
-            )
-        } else {
-            format!("{}/catalog/{}/{}.json", BASE_URL, type_, catalog_id)
+    fn build_catalog_url(
+        type_: &str,
+        catalog_id: &str,
+        genre: Option<&str>,
+        skip: Option<u32>,
+    ) -> String {
+        let mut url = format!("{}/catalog/{}/{}", BASE_URL, type_, catalog_id);
+
+        let extras = match (genre, skip.filter(|value| *value > 0)) {
+            (Some(genre_name), Some(skip)) => {
+                Some(format!("genre={}&skip={}", encode(genre_name), skip))
+            }
+            (Some(genre_name), None) => Some(format!("genre={}", encode(genre_name))),
+            (None, Some(skip)) => Some(format!("skip={}", skip)),
+            (None, None) => None,
+        };
+
+        if let Some(extras) = extras {
+            url.push('/');
+            url.push_str(&extras);
         }
+
+        url.push_str(".json");
+        url
     }
 
     fn build_search_catalog_url(type_: &str, catalog_id: &str, query: &str) -> String {
@@ -217,9 +244,13 @@ impl Cinemeta {
                 backdrop: m.background,
                 logo: m.logo,
                 description: m.description,
-                year: m.year,
+                year: normalize_media_year(m.year, m.release_info),
+                primary_year: None,
+                display_year: None,
                 type_: m.type_,
                 relation_role: None,
+                relation_context_label: None,
+                relation_preferred_season: None,
             })
             .collect()
     }
@@ -296,8 +327,8 @@ struct Meta {
     logo: Option<String>,
     #[serde(default)]
     description: Option<String>,
-    // releaseInfo and year both exist in response, causing duplicate field error if aliased.
-    // We'll trust 'year' is present.
+    #[serde(rename = "releaseInfo", default)]
+    release_info: Option<String>,
     year: Option<String>,
     #[serde(alias = "imdbRating")]
     rating: Option<String>,
@@ -392,7 +423,10 @@ impl Provider for Cinemeta {
             poster: m.poster,
             backdrop: m.background,
             logo: m.logo,
-            year: m.year,
+            year: normalize_media_year(m.year, m.release_info),
+            primary_year: None,
+            display_year: None,
+            release_date: None,
             type_: m.type_,
             description: m.description,
             rating: m.rating,
@@ -417,14 +451,20 @@ impl Provider for Cinemeta {
                         season: v.season,
                         episode: v.episode,
                         released: v.released,
+                        release_date: None,
                         overview: v.overview,
                         thumbnail: v.thumbnail,
                         imdb_id: None,
                         imdb_season: None,
                         imdb_episode: None,
+                        stream_lookup_id: None,
+                        stream_season: None,
+                        stream_episode: None,
+                        aniskip_episode: None,
                     })
                     .collect()
             }),
+            season_years: None,
             relations: None,
         })
     }

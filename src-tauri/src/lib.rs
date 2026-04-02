@@ -1,16 +1,17 @@
 mod commands;
 pub mod downloader;
+mod operational_log;
 pub mod providers;
 
 use commands::playback_state::PlaybackStateService;
 use commands::PendingAppUpdate;
 use downloader::DownloadManager;
+use providers::addons::AddonTransport;
 use providers::cinemeta::Cinemeta;
 use providers::kitsu::Kitsu;
 use providers::netflix::Netflix;
 use providers::realdebrid::RealDebrid;
 use providers::skip_times::SkipTimesProvider;
-use providers::addons::AddonTransport;
 use tauri::Manager;
 use tauri_plugin_store::Builder as StoreBuilder;
 
@@ -60,20 +61,23 @@ pub fn run() {
             commands::app_update_commands::install_app_update,
             commands::stream_commands::resolve_stream,
             commands::stream_commands::resolve_best_stream,
+            commands::stream_commands::recover_playback_stream,
             commands::stream_commands::get_streams,
-            commands::stream_commands::get_streams_for_addon,
+            commands::stream_commands::get_stream_selector_data,
             commands::get_trending_movies,
             commands::get_trending_series,
             commands::get_trending_anime,
-            commands::browse_commands::get_multi_genre_catalog,
-            commands::get_cinemeta_catalog,
-            commands::get_cinemeta_discover,
-            commands::search_media,
+            commands::search_commands::query_search_catalog,
+            commands::search_history_commands::get_search_history,
+            commands::search_history_commands::import_search_history_entries,
+            commands::search_history_commands::push_search_history_entry,
+            commands::search_history_commands::remove_search_history_entry,
+            commands::search_history_commands::clear_search_history,
             commands::media_commands::get_media_details,
             commands::media_commands::get_media_episodes,
-            commands::media_commands::get_episode_stream_mapping,
             commands::media_commands::get_kitsu_anime_metadata,
             commands::next_playback_commands::prepare_next_playback_plan,
+            commands::history_playback_commands::build_history_playback_plan,
             commands::get_rd_user,
             commands::rd_verify_token,
             commands::rd_logout,
@@ -92,16 +96,27 @@ pub fn run() {
             commands::playback_preferences_commands::save_playback_language_preferences,
             commands::playback_preferences_commands::get_playback_language_preferences,
             commands::playback_preferences_commands::get_effective_playback_language_preferences,
+            commands::playback_preferences_commands::infer_track_language_preference,
+            commands::playback_preferences_commands::resolve_preferred_track_selection,
             commands::playback_preferences_commands::save_playback_language_preference_outcome,
             commands::config_commands::save_debrid_config,
             commands::config_commands::get_debrid_config,
+            commands::config_commands::get_app_ui_preferences,
+            commands::config_commands::save_app_ui_preferences,
+            commands::config_commands::import_legacy_app_ui_preferences,
+            commands::config_commands::get_last_notified_app_update_version,
+            commands::config_commands::save_last_notified_app_update_version,
+            commands::config_commands::import_legacy_last_notified_app_update_version,
+            commands::config_commands::get_profile_preferences,
+            commands::config_commands::save_profile_preferences,
+            commands::config_commands::import_legacy_profile_preferences,
+            commands::config_commands::get_stream_selector_preferences,
+            commands::config_commands::save_stream_selector_preferences,
+            commands::config_commands::import_legacy_stream_selector_preferences,
             commands::library_commands::add_to_library,
             commands::library_commands::remove_from_library,
             commands::library_commands::get_library,
             commands::library_commands::check_library,
-            commands::get_netflix_catalog,
-            commands::get_kitsu_catalog,
-            commands::search_kitsu,
             commands::list_commands::create_list,
             commands::list_commands::delete_list,
             commands::list_commands::rename_list,

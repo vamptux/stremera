@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, type MutableRefObject } from 'react';
 import { command, setProperty } from 'tauri-plugin-libmpv-api';
 import { api } from '@/lib/api';
+import { getPlayableResumeStartTime } from '@/lib/history-playback';
 
 const RESUME_SEEK_MAX_ATTEMPTS = 6;
 const RESUME_SEEK_RETRY_DELAY_MS = 220;
@@ -225,11 +226,11 @@ export function usePlayerResumeController({
     void api
       .getWatchProgress(mediaId, mediaType, absoluteSeason, absoluteEpisode)
       .then((progress) => {
-        if (cancelled || !progress?.position || progress.position <= 0) {
+        const candidate = getPlayableResumeStartTime(progress);
+
+        if (cancelled || !candidate) {
           return;
         }
-
-        const candidate = progress.position;
         const currentResume = resumeTimeRef.current || 0;
         const shouldUpgradeResume =
           currentResume <= 0 || candidate >= currentResume + RESUME_FETCH_UPGRADE_MIN_DELTA_SECS;

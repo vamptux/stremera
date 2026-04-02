@@ -1,42 +1,21 @@
 use super::config_store::get_trimmed_store_string;
 use super::{
+    language::{
+        infer_track_preferred_language,
+        normalize_language_token as normalize_backend_language_token,
+        resolve_preferred_track_selection as resolve_track_language_selection,
+        TrackLanguageCandidate, TrackLanguageSelectionResolution,
+    },
     normalize_non_empty, normalize_stream_media_type, now_unix_millis,
-    playback_state::PlaybackStateService, PlaybackLanguagePreferences, SETTINGS_STORE_FILE,
+    playback_state::PlaybackStateService,
+    PlaybackLanguagePreferences, SETTINGS_STORE_FILE,
 };
 use serde_json::json;
 use tauri::{command, AppHandle, State};
 use tauri_plugin_store::StoreExt;
 
-fn canonicalize_language_pref_token(value: &str) -> Option<&'static str> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "en" | "eng" | "english" => Some("en"),
-        "ja" | "jpn" | "japanese" => Some("ja"),
-        "es" | "spa" | "spanish" => Some("es"),
-        "fr" | "fra" | "fre" | "french" => Some("fr"),
-        "de" | "deu" | "ger" | "german" => Some("de"),
-        "it" | "ita" | "italian" => Some("it"),
-        "pt" | "por" | "portuguese" => Some("pt"),
-        "ko" | "kor" | "korean" => Some("ko"),
-        "zh" | "zho" | "chi" | "chinese" => Some("zh"),
-        _ => None,
-    }
-}
-
 pub(crate) fn sanitize_language_pref(value: Option<String>, allow_off: bool) -> Option<String> {
-    let normalized = value
-        .map(|candidate| candidate.trim().to_ascii_lowercase())
-        .filter(|candidate| !candidate.is_empty())?;
-
-    if allow_off && normalized == "off" {
-        return Some(normalized);
-    }
-
-    let primary = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .find(|segment| !segment.is_empty())
-        .unwrap_or(normalized.as_str());
-
-    canonicalize_language_pref_token(primary).map(str::to_string)
+    normalize_backend_language_token(value.as_deref(), allow_off)
 }
 
 #[command]
@@ -103,6 +82,29 @@ pub async fn get_effective_playback_language_preferences(
         media_type.as_deref(),
         defaults,
     )
+}
+
+#[command]
+pub async fn infer_track_language_preference(
+    track: TrackLanguageCandidate,
+) -> Result<Option<String>, String> {
+    Ok(infer_track_preferred_language(
+        track.lang.as_deref(),
+        track.title.as_deref(),
+    ))
+}
+
+#[command]
+pub async fn resolve_preferred_track_selection(
+    tracks: Vec<TrackLanguageCandidate>,
+    preferred_language: Option<String>,
+    selected_track_id: Option<i64>,
+) -> Result<TrackLanguageSelectionResolution, String> {
+    Ok(resolve_track_language_selection(
+        &tracks,
+        preferred_language.as_deref(),
+        selected_track_id,
+    ))
 }
 
 #[command]

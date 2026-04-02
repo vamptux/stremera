@@ -5,28 +5,10 @@ export interface Track {
   title?: string;
   selected?: boolean;
   external?: boolean;
+  defaultTrack?: boolean;
+  forced?: boolean;
+  hearingImpaired?: boolean;
 }
-
-const LANGUAGE_ALIASES: Record<string, string[]> = {
-  en: ['en', 'eng', 'english'],
-  ja: ['ja', 'jpn', 'japanese'],
-  es: ['es', 'spa', 'spanish'],
-  fr: ['fr', 'fra', 'fre', 'french'],
-  de: ['de', 'deu', 'ger', 'german'],
-  it: ['it', 'ita', 'italian'],
-  pt: ['pt', 'por', 'portuguese'],
-  ko: ['ko', 'kor', 'korean'],
-  zh: ['zh', 'zho', 'chi', 'chinese'],
-};
-
-const LANGUAGE_ALIAS_TO_CANONICAL = Object.entries(LANGUAGE_ALIASES).reduce<Record<string, string>>(
-  (acc, [canonical, aliases]) => {
-    acc[canonical] = canonical;
-    for (const alias of aliases) acc[alias] = canonical;
-    return acc;
-  },
-  {},
-);
 
 const TRACK_TYPE_SORT_ORDER: Readonly<Record<Track['type'], number>> = {
   audio: 0,
@@ -36,97 +18,6 @@ const TRACK_TYPE_SORT_ORDER: Readonly<Record<Track['type'], number>> = {
 
 export function normalizeLanguageToken(value?: string | null): string {
   return (value ?? '').trim().toLowerCase();
-}
-
-function tokenizeLanguageMeta(value?: string | null): string[] {
-  const normalized = normalizeLanguageToken(value);
-  if (!normalized) return [];
-  return normalized
-    .replace(/\([^)]*\)|\[[^\]]*\]|\{[^}]*\}/g, ' ')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .split(/\s+/)
-    .filter(Boolean);
-}
-
-function canonicalizeLanguage(value?: string | null): string {
-  const normalized = normalizeLanguageToken(value);
-  if (!normalized) return '';
-  return LANGUAGE_ALIAS_TO_CANONICAL[normalized] ?? normalized;
-}
-
-function languageCandidates(preferred: string): string[] {
-  const normalized = normalizeLanguageToken(preferred);
-  if (!normalized) return [];
-  const canonical = canonicalizeLanguage(normalized);
-  const directAliases = LANGUAGE_ALIASES[canonical] ?? [];
-  const set = new Set<string>([canonical, normalized, ...directAliases]);
-
-  // Recover from persisted values that include extra metadata in one string.
-  for (const token of tokenizeLanguageMeta(normalized)) {
-    const tokenCanonical = canonicalizeLanguage(token);
-    if (!tokenCanonical || tokenCanonical === token) continue;
-    set.add(tokenCanonical);
-    for (const alias of LANGUAGE_ALIASES[tokenCanonical] ?? []) set.add(alias);
-  }
-
-  return Array.from(set).filter(Boolean);
-}
-
-export function inferTrackPreferredLanguage(track: Track): string | undefined {
-  const langTokens = [normalizeLanguageToken(track.lang), ...tokenizeLanguageMeta(track.lang)];
-  for (const token of langTokens) {
-    const canonical = LANGUAGE_ALIAS_TO_CANONICAL[token];
-    if (canonical) return canonical;
-  }
-
-  const titleTokens = tokenizeLanguageMeta(track.title);
-  for (const token of titleTokens) {
-    const canonical = LANGUAGE_ALIAS_TO_CANONICAL[token];
-    if (canonical) return canonical;
-  }
-
-  return undefined;
-}
-
-export function findTrackByLanguage(tracks: Track[], preferredLanguage: string): Track | null {
-  const candidates = languageCandidates(preferredLanguage);
-  if (!candidates.length) return null;
-
-  let bestTrack: Track | null = null;
-  let bestScore = -1;
-
-  for (const track of tracks) {
-    const lang = normalizeLanguageToken(track.lang);
-    const titleTokens = tokenizeLanguageMeta(track.title);
-    const titleTokenSet = new Set(titleTokens);
-    let score = 0;
-
-    for (const candidate of candidates) {
-      if (!candidate) continue;
-      if (lang === candidate) score = Math.max(score, 120);
-      else if (lang.startsWith(`${candidate}-`)) score = Math.max(score, 100);
-      if (titleTokenSet.has(candidate)) score = Math.max(score, 80);
-    }
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestTrack = track;
-    }
-  }
-
-  return bestScore > 0 ? bestTrack : null;
-}
-
-export function trackMatchesPreferredLanguage(track: Track | null, preferredLanguage: string): boolean {
-  if (!track) return false;
-  const preferred = normalizeLanguageToken(preferredLanguage);
-  if (!preferred) return false;
-
-  const lang = normalizeLanguageToken(track.lang);
-  if (lang === preferred || lang.startsWith(`${preferred}-`)) return true;
-
-  const tokens = tokenizeLanguageMeta(track.title);
-  return tokens.includes(preferred);
 }
 
 function normalizeTrackType(value: unknown): Track['type'] | null {
@@ -154,6 +45,9 @@ function normalizeTrackCandidate(rawTrack: unknown): Track | null {
     lang: normalizedLang || undefined,
     selected: !!candidate.selected,
     external: !!candidate.external,
+    defaultTrack: !!candidate.defaultTrack,
+    forced: !!candidate.forced,
+    hearingImpaired: !!candidate.hearingImpaired,
   };
 }
 
@@ -165,6 +59,9 @@ function mergeTrackVariants(existing: Track, next: Track): Track {
     lang: next.lang || existing.lang,
     selected: !!(existing.selected || next.selected),
     external: !!(existing.external || next.external),
+    defaultTrack: !!(existing.defaultTrack || next.defaultTrack),
+    forced: !!(existing.forced || next.forced),
+    hearingImpaired: !!(existing.hearingImpaired || next.hearingImpaired),
   };
 }
 
@@ -207,7 +104,10 @@ export function areTrackListsEqual(left: readonly Track[], right: readonly Track
       leftTrack.lang !== rightTrack.lang ||
       leftTrack.title !== rightTrack.title ||
       !!leftTrack.selected !== !!rightTrack.selected ||
-      !!leftTrack.external !== !!rightTrack.external
+      !!leftTrack.external !== !!rightTrack.external ||
+      !!leftTrack.defaultTrack !== !!rightTrack.defaultTrack ||
+      !!leftTrack.forced !== !!rightTrack.forced ||
+      !!leftTrack.hearingImpaired !== !!rightTrack.hearingImpaired
     ) {
       return false;
     }

@@ -1,13 +1,18 @@
 import { useEffect, useRef } from 'react';
-import { type PlaybackLanguagePreferences } from '@/lib/api';
-import {
-  findTrackByLanguage,
-  normalizeLanguageToken,
-  trackMatchesPreferredLanguage,
-  type Track,
-} from '@/lib/player-track-utils';
+import { api, type PlaybackLanguagePreferences, type TrackLanguageCandidate } from '@/lib/api';
+import { normalizeLanguageToken, type Track } from '@/lib/player-track-utils';
+
+const MAX_AUTO_APPLY_ATTEMPTS_PER_FINGERPRINT = 2;
+
+type TrackPreferenceKind = 'audio' | 'sub';
+
+interface TrackAutoApplyAttemptState {
+  fingerprint: string | null;
+  count: number;
+}
 
 interface UseAutoApplyTrackPreferencesArgs {
+  hasPlaybackStarted: boolean;
   isLoading: boolean;
   resetKey: string;
   playbackLanguagePreferences?: PlaybackLanguagePreferences;
@@ -18,14 +23,53 @@ interface UseAutoApplyTrackPreferencesArgs {
     type: 'audio' | 'sub',
     id: number | 'no',
     options?: { silent?: boolean; persistPreference?: boolean },
-  ) => Promise<void> | void;
+  ) => Promise<boolean> | boolean;
 }
 
-function asPromise(result: Promise<void> | void): Promise<void> {
+function asPromise<T>(result: Promise<T> | T): Promise<T> {
   return Promise.resolve(result);
 }
 
+function buildTrackAutoApplyFingerprint(preferredLanguage: string, tracks: Track[]): string {
+  const trackFingerprint = tracks
+    .map((track) => {
+      const normalizedLanguage = normalizeLanguageToken(track.lang);
+      const normalizedTitle = track.title?.trim().toLowerCase() ?? '';
+      return [
+        track.id,
+        normalizedLanguage,
+        normalizedTitle,
+        track.selected ? '1' : '0',
+        track.defaultTrack ? '1' : '0',
+        track.forced ? '1' : '0',
+        track.hearingImpaired ? '1' : '0',
+      ].join(':');
+    })
+    .join('|');
+
+  return `${preferredLanguage}::${trackFingerprint}`;
+}
+
+function resetTrackAutoApplyAttempts(): Record<TrackPreferenceKind, TrackAutoApplyAttemptState> {
+  return {
+    audio: { fingerprint: null, count: 0 },
+    sub: { fingerprint: null, count: 0 },
+  };
+}
+
+function toTrackLanguageCandidate(track: Track): TrackLanguageCandidate {
+  return {
+    id: track.id,
+    lang: track.lang,
+    title: track.title,
+    defaultTrack: track.defaultTrack,
+    forced: track.forced,
+    hearingImpaired: track.hearingImpaired,
+  };
+}
+
 export function useAutoApplyTrackPreferences({
+  hasPlaybackStarted,
   isLoading,
   resetKey,
   playbackLanguagePreferences,
@@ -34,19 +78,47 @@ export function useAutoApplyTrackPreferences({
   trackSwitching,
   setTrack,
 }: UseAutoApplyTrackPreferencesArgs) {
-  const autoAppliedTrackPrefsRef = useRef<{ audio: boolean; sub: boolean }>({
-    audio: false,
-    sub: false,
+  const autoAppliedTrackPrefsRef = useRef<Record<TrackPreferenceKind, string | null>>({
+    audio: null,
+    sub: null,
   });
   const autoApplyingTrackPrefsRef = useRef<{ audio: boolean; sub: boolean }>({
     audio: false,
     sub: false,
   });
+  const autoApplyAttemptStateRef = useRef<
+    Record<TrackPreferenceKind, TrackAutoApplyAttemptState>
+  >(resetTrackAutoApplyAttempts());
   const preferenceFingerprintRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    autoAppliedTrackPrefsRef.current = { audio: false, sub: false };
+  const resetAutoApplyState = () => {
+    autoAppliedTrackPrefsRef.current = { audio: null, sub: null };
     autoApplyingTrackPrefsRef.current = { audio: false, sub: false };
+    autoApplyAttemptStateRef.current = resetTrackAutoApplyAttempts();
+  };
+
+  const hasReachedAttemptLimit = (type: TrackPreferenceKind, fingerprint: string) => {
+    const state = autoApplyAttemptStateRef.current[type];
+    return (
+      state.fingerprint === fingerprint &&
+      state.count >= MAX_AUTO_APPLY_ATTEMPTS_PER_FINGERPRINT
+    );
+  };
+
+  const recordAttempt = (type: TrackPreferenceKind, fingerprint: string) => {
+    const state = autoApplyAttemptStateRef.current[type];
+    autoApplyAttemptStateRef.current[type] =
+      state.fingerprint === fingerprint
+        ? { fingerprint, count: state.count + 1 }
+        : { fingerprint, count: 1 };
+  };
+
+  const markApplied = (type: TrackPreferenceKind, fingerprint: string) => {
+    autoAppliedTrackPrefsRef.current[type] = fingerprint;
+  };
+
+  useEffect(() => {
+    resetAutoApplyState();
   }, [resetKey]);
 
   useEffect(() => {
@@ -65,8 +137,7 @@ export function useAutoApplyTrackPreferences({
     }
 
     preferenceFingerprintRef.current = nextFingerprint;
-    autoAppliedTrackPrefsRef.current = { audio: false, sub: false };
-    autoApplyingTrackPrefsRef.current = { audio: false, sub: false };
+    resetAutoApplyState();
   }, [
     playbackLanguagePreferences?.preferredAudioLanguage,
     playbackLanguagePreferences?.preferredSubtitleLanguage,
@@ -74,31 +145,59 @@ export function useAutoApplyTrackPreferences({
 
   useEffect(() => {
     const audioPref = normalizeLanguageToken(playbackLanguagePreferences?.preferredAudioLanguage);
-    if (isLoading) return;
+    if (isLoading || !hasPlaybackStarted) return;
     if (!audioPref) return;
-    if (autoAppliedTrackPrefsRef.current.audio || autoApplyingTrackPrefsRef.current.audio) return;
     if (trackSwitching.audio || trackSwitching.sub) return;
     if (audioTracks.length === 0) return;
 
-    const selectedAudio = audioTracks.find((track) => !!track.selected) ?? null;
-    if (trackMatchesPreferredLanguage(selectedAudio, audioPref)) {
-      autoAppliedTrackPrefsRef.current.audio = true;
-      return;
-    }
+    const fingerprint = buildTrackAutoApplyFingerprint(audioPref, audioTracks);
+    if (autoAppliedTrackPrefsRef.current.audio === fingerprint) return;
+    if (autoApplyingTrackPrefsRef.current.audio) return;
+    if (hasReachedAttemptLimit('audio', fingerprint)) return;
 
-    const match = findTrackByLanguage(audioTracks, audioPref);
-    if (!match) {
-      autoAppliedTrackPrefsRef.current.audio = true;
-      return;
-    }
-
+    let cancelled = false;
     autoApplyingTrackPrefsRef.current.audio = true;
-    void asPromise(setTrack('audio', match.id, { silent: true })).finally(() => {
+    recordAttempt('audio', fingerprint);
+
+    void api
+      .resolvePreferredTrackSelection(
+        audioTracks.map(toTrackLanguageCandidate),
+        audioPref,
+        audioTracks.find((track) => !!track.selected)?.id,
+      )
+      .then(async (resolution) => {
+        if (cancelled) return;
+
+        if (resolution.selectedMatches) {
+          markApplied('audio', fingerprint);
+          return;
+        }
+
+        if (typeof resolution.matchedTrackId !== 'number') {
+          return;
+        }
+
+        const switched = await asPromise(
+          setTrack('audio', resolution.matchedTrackId, { silent: true }),
+        );
+        if (cancelled) return;
+        if (switched) {
+          markApplied('audio', fingerprint);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (cancelled) return;
+        autoApplyingTrackPrefsRef.current.audio = false;
+      });
+
+    return () => {
+      cancelled = true;
       autoApplyingTrackPrefsRef.current.audio = false;
-      autoAppliedTrackPrefsRef.current.audio = true;
-    });
+    };
   }, [
     audioTracks,
+    hasPlaybackStarted,
     isLoading,
     playbackLanguagePreferences?.preferredAudioLanguage,
     setTrack,
@@ -110,47 +209,81 @@ export function useAutoApplyTrackPreferences({
     const subtitlePref = normalizeLanguageToken(
       playbackLanguagePreferences?.preferredSubtitleLanguage,
     );
-    if (isLoading) return;
+    if (isLoading || !hasPlaybackStarted) return;
     if (!subtitlePref) return;
     if (autoApplyingTrackPrefsRef.current.audio) return;
-    if (autoAppliedTrackPrefsRef.current.sub || autoApplyingTrackPrefsRef.current.sub) return;
     if (trackSwitching.audio || trackSwitching.sub) return;
+
+    const fingerprint = buildTrackAutoApplyFingerprint(subtitlePref, subTracks);
+    if (autoAppliedTrackPrefsRef.current.sub === fingerprint) return;
+    if (autoApplyingTrackPrefsRef.current.sub) return;
+    if (hasReachedAttemptLimit('sub', fingerprint)) return;
 
     if (subtitlePref === 'off') {
       const hasSelectedSubtitle = subTracks.some((track) => !!track.selected);
       if (!hasSelectedSubtitle) {
-        autoAppliedTrackPrefsRef.current.sub = true;
+        markApplied('sub', fingerprint);
         return;
       }
 
       autoApplyingTrackPrefsRef.current.sub = true;
-      void asPromise(setTrack('sub', 'no', { silent: true })).finally(() => {
-        autoApplyingTrackPrefsRef.current.sub = false;
-        autoAppliedTrackPrefsRef.current.sub = true;
-      });
+      recordAttempt('sub', fingerprint);
+      void asPromise(setTrack('sub', 'no', { silent: true }))
+        .then((switched) => {
+          if (switched) {
+            markApplied('sub', fingerprint);
+          }
+        })
+        .finally(() => {
+          autoApplyingTrackPrefsRef.current.sub = false;
+        });
       return;
     }
 
     if (subTracks.length === 0) return;
 
-    const selectedSubtitle = subTracks.find((track) => !!track.selected) ?? null;
-    if (trackMatchesPreferredLanguage(selectedSubtitle, subtitlePref)) {
-      autoAppliedTrackPrefsRef.current.sub = true;
-      return;
-    }
-
-    const match = findTrackByLanguage(subTracks, subtitlePref);
-    if (!match) {
-      autoAppliedTrackPrefsRef.current.sub = true;
-      return;
-    }
-
+    let cancelled = false;
     autoApplyingTrackPrefsRef.current.sub = true;
-    void asPromise(setTrack('sub', match.id, { silent: true })).finally(() => {
+    recordAttempt('sub', fingerprint);
+
+    void api
+      .resolvePreferredTrackSelection(
+        subTracks.map(toTrackLanguageCandidate),
+        subtitlePref,
+        subTracks.find((track) => !!track.selected)?.id,
+      )
+      .then(async (resolution) => {
+        if (cancelled) return;
+
+        if (resolution.selectedMatches) {
+          markApplied('sub', fingerprint);
+          return;
+        }
+
+        if (typeof resolution.matchedTrackId !== 'number') {
+          return;
+        }
+
+        const switched = await asPromise(
+          setTrack('sub', resolution.matchedTrackId, { silent: true }),
+        );
+        if (cancelled) return;
+        if (switched) {
+          markApplied('sub', fingerprint);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (cancelled) return;
+        autoApplyingTrackPrefsRef.current.sub = false;
+      });
+
+    return () => {
+      cancelled = true;
       autoApplyingTrackPrefsRef.current.sub = false;
-      autoAppliedTrackPrefsRef.current.sub = true;
-    });
+    };
   }, [
+    hasPlaybackStarted,
     isLoading,
     playbackLanguagePreferences?.preferredSubtitleLanguage,
     setTrack,

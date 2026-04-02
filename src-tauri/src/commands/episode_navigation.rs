@@ -37,6 +37,43 @@ pub(crate) struct NextPlaybackPlan {
     pub backup_stream: Option<PreparedPlaybackStream>,
 }
 
+pub(crate) fn build_source_episode_coordinates(
+    episode: &Episode,
+    fallback_lookup_id: &str,
+) -> SourceEpisodeCoordinates {
+    SourceEpisodeCoordinates {
+        lookup_id: episode
+            .stream_lookup_id
+            .clone()
+            .or_else(|| episode.imdb_id.clone())
+            .unwrap_or_else(|| fallback_lookup_id.to_string()),
+        season: episode
+            .stream_season
+            .or(episode.imdb_season)
+            .unwrap_or(episode.season),
+        episode: episode
+            .stream_episode
+            .or(episode.imdb_episode)
+            .unwrap_or(episode.episode),
+        aniskip_episode: episode
+            .aniskip_episode
+            .or(episode.stream_episode)
+            .or(episode.imdb_episode)
+            .unwrap_or(episode.episode),
+    }
+}
+
+pub(crate) fn build_episode_lookup_key(
+    media_type: &str,
+    source: &SourceEpisodeCoordinates,
+    absolute_episode: u32,
+) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        media_type, source.lookup_id, source.season, source.episode, absolute_episode
+    )
+}
+
 fn find_next_episode_candidate(
     episodes: &[Episode],
     current_season: u32,
@@ -77,19 +114,10 @@ pub(crate) fn build_next_playback_plan(
     fallback_lookup_id: &str,
 ) -> Option<NextPlaybackPlan> {
     let next_episode = find_next_episode_candidate(episodes, current_season, current_episode)?;
-    let stream_lookup_id = next_episode
-        .imdb_id
-        .clone()
-        .unwrap_or_else(|| fallback_lookup_id.to_string());
-    let stream_season = next_episode.imdb_season.unwrap_or(next_episode.season);
-    let stream_episode = next_episode.imdb_episode.unwrap_or(next_episode.episode);
+    let source = build_source_episode_coordinates(&next_episode, fallback_lookup_id);
     let absolute_season = next_episode.season;
     let absolute_episode = next_episode.episode;
-    let aniskip_episode = next_episode.imdb_episode.unwrap_or(next_episode.episode);
-    let lookup_key = format!(
-        "{}:{}:{}:{}:{}",
-        media_type, stream_lookup_id, stream_season, stream_episode, absolute_episode
-    );
+    let lookup_key = build_episode_lookup_key(media_type, &source, absolute_episode);
 
     Some(NextPlaybackPlan {
         canonical: CanonicalEpisodeIdentity {
@@ -97,12 +125,7 @@ pub(crate) fn build_next_playback_plan(
             season: absolute_season,
             episode: absolute_episode,
         },
-        source: SourceEpisodeCoordinates {
-            lookup_id: stream_lookup_id,
-            season: stream_season,
-            episode: stream_episode,
-            aniskip_episode,
-        },
+        source,
         lookup_key,
         primary_stream: None,
         backup_stream: None,
@@ -121,11 +144,16 @@ mod tests {
             season,
             episode,
             released: None,
+            release_date: None,
             overview: None,
             thumbnail: None,
             imdb_id: Some("tt123".to_string()),
             imdb_season: Some(season),
             imdb_episode: Some(episode),
+            stream_lookup_id: None,
+            stream_season: None,
+            stream_episode: None,
+            aniskip_episode: None,
         }
     }
 
@@ -137,5 +165,22 @@ mod tests {
 
         assert_eq!(plan.canonical.episode, 3);
         assert_eq!(plan.source.episode, 3);
+    }
+
+    #[test]
+    fn plan_prefers_backend_normalized_episode_coordinates() {
+        let mut episodes = vec![episode(1, 1), episode(1, 2)];
+        episodes[1].stream_lookup_id = Some("tt999".to_string());
+        episodes[1].stream_season = Some(4);
+        episodes[1].stream_episode = Some(12);
+        episodes[1].aniskip_episode = Some(13);
+
+        let plan = build_next_playback_plan(&episodes, 1, 1, "anime", "tt123")
+            .expect("next playback plan");
+
+        assert_eq!(plan.source.lookup_id, "tt999");
+        assert_eq!(plan.source.season, 4);
+        assert_eq!(plan.source.episode, 12);
+        assert_eq!(plan.source.aniskip_episode, 13);
     }
 }

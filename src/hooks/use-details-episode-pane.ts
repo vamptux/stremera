@@ -11,16 +11,6 @@ import { type LocalSeasonEntry } from '@/components/details-season-switcher';
 const EPISODE_FETCH_PAGE_SIZE = 50;
 const EPISODE_DISPLAY_PAGE_SIZE = 4;
 
-function parseYearFromText(value?: string | null): number | null {
-  if (!value) return null;
-
-  const match = value.match(/\b(19|20)\d{2}\b/);
-  if (!match) return null;
-
-  const parsed = Number(match[0]);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function isSeriesLikeHistoryEntryType(value?: string | null): boolean {
   const normalized = value?.trim().toLowerCase();
   return normalized === 'series' || normalized === 'anime';
@@ -143,43 +133,20 @@ export function useDetailsEpisodePane({
     syncPagedSeasonSelection(nextSeason);
   }, [seasons, selectedSeasonHint, shouldUsePagedEpisodes]);
 
+  const seasonYears = shouldUsePagedEpisodes ? pagedEpisodesData?.seasonYears : item?.seasonYears;
+
   const seasonYearLabelMap = useMemo(() => {
     const map = new Map<number, string>();
 
-    Object.entries(pagedEpisodesData?.seasonYears ?? {}).forEach(([seasonKey, label]) => {
+    Object.entries(seasonYears ?? {}).forEach(([seasonKey, label]) => {
       const seasonNumber = Number(seasonKey);
       if (Number.isFinite(seasonNumber) && typeof label === 'string' && label.trim().length > 0) {
         map.set(seasonNumber, label.trim());
       }
     });
 
-    const episodesForYearInference = shouldUsePagedEpisodes
-      ? (pagedEpisodesData?.episodes ?? [])
-      : (item?.episodes ?? []);
-    const yearsBySeason = new Map<number, Set<number>>();
-
-    episodesForYearInference.forEach((episode) => {
-      const year = parseYearFromText(episode.released);
-      if (!year) return;
-
-      const existing = yearsBySeason.get(episode.season) ?? new Set<number>();
-      existing.add(year);
-      yearsBySeason.set(episode.season, existing);
-    });
-
-    yearsBySeason.forEach((years, seasonNumber) => {
-      if (map.has(seasonNumber) || years.size === 0) return;
-
-      const sorted = Array.from(years).sort((left, right) => left - right);
-      const label =
-        sorted.length > 1 && sorted[0] !== sorted[sorted.length - 1]
-          ? `${sorted[0]}-${sorted[sorted.length - 1]}`
-          : `${sorted[0]}`;
-      map.set(seasonNumber, label);
-    });
-
     return map;
-  }, [item, pagedEpisodesData?.episodes, pagedEpisodesData?.seasonYears, shouldUsePagedEpisodes]);
+  }, [seasonYears]);
 
   const localSeasonEntries = useMemo(
     () =>

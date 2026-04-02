@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, type PlaybackLanguagePreferences } from '@/lib/api';
 import {
-  inferTrackPreferredLanguage,
-  normalizeLanguageToken,
-  type Track,
-} from '@/lib/player-track-utils';
+  api,
+  type PlaybackLanguagePreferences,
+  type TrackLanguageCandidate,
+} from '@/lib/api';
+import { normalizeLanguageToken, type Track } from '@/lib/player-track-utils';
 import { useAutoApplyTrackPreferences } from '@/hooks/use-auto-apply-track-preferences';
 
 interface UsePlayerTrackPreferencesArgs {
@@ -26,11 +26,36 @@ interface UsePlayerTrackPreferencesArgs {
     type: 'audio' | 'sub',
     id: number | 'no',
     options?: { silent?: boolean; persistPreference?: boolean },
-  ) => Promise<void> | void;
+  ) => Promise<boolean> | boolean;
 }
 
 interface UsePlayerTrackPreferencesResult {
   persistSelectedTrackPreference: (type: 'audio' | 'sub', id: number | 'no') => void;
+  playbackLanguagePreferences: PlaybackLanguagePreferences;
+}
+
+function toTrackLanguageCandidate(track: Track): TrackLanguageCandidate {
+  return {
+    id: track.id,
+    lang: track.lang,
+    title: track.title,
+    defaultTrack: track.defaultTrack,
+    forced: track.forced,
+    hearingImpaired: track.hearingImpaired,
+  };
+}
+
+function normalizeStoredPreference(value?: string | null): string | undefined {
+  return normalizeLanguageToken(value) || undefined;
+}
+
+async function inferTrackLanguagePreference(track: Track | null): Promise<string | undefined> {
+  if (!track) {
+    return undefined;
+  }
+
+  const inferred = await api.inferTrackLanguagePreference(toTrackLanguageCandidate(track));
+  return normalizeStoredPreference(inferred);
 }
 
 export function usePlayerTrackPreferences({
@@ -66,18 +91,27 @@ export function usePlayerTrackPreferences({
   const savePlaybackPrefsQueueRef = useRef(Promise.resolve());
   const lastRecordedTrackOutcomeRef = useRef<string | null>(null);
 
+  const autoApplyPlaybackLanguagePreferences: PlaybackLanguagePreferences = {
+    preferredAudioLanguage:
+      normalizeStoredPreference(globalPlaybackLanguagePreferences?.preferredAudioLanguage) ??
+      normalizeStoredPreference(effectivePlaybackLanguagePreferences?.preferredAudioLanguage),
+    preferredSubtitleLanguage:
+      normalizeStoredPreference(globalPlaybackLanguagePreferences?.preferredSubtitleLanguage) ??
+      normalizeStoredPreference(effectivePlaybackLanguagePreferences?.preferredSubtitleLanguage),
+  };
+
   useEffect(() => {
     if (!globalPlaybackLanguagePreferences) {
       return;
     }
 
     globalPlaybackPrefsRef.current = {
-      preferredAudioLanguage:
-        normalizeLanguageToken(globalPlaybackLanguagePreferences.preferredAudioLanguage) ||
-        undefined,
-      preferredSubtitleLanguage:
-        normalizeLanguageToken(globalPlaybackLanguagePreferences.preferredSubtitleLanguage) ||
-        undefined,
+      preferredAudioLanguage: normalizeStoredPreference(
+        globalPlaybackLanguagePreferences.preferredAudioLanguage,
+      ),
+      preferredSubtitleLanguage: normalizeStoredPreference(
+        globalPlaybackLanguagePreferences.preferredSubtitleLanguage,
+      ),
     };
     globalPlaybackPrefsHydratedRef.current = true;
   }, [
@@ -92,11 +126,11 @@ export function usePlayerTrackPreferences({
         preferredAudioLanguage:
           patch.preferredAudioLanguage === undefined
             ? undefined
-            : normalizeLanguageToken(patch.preferredAudioLanguage) || undefined,
+            : normalizeStoredPreference(patch.preferredAudioLanguage),
         preferredSubtitleLanguage:
           patch.preferredSubtitleLanguage === undefined
             ? undefined
-            : normalizeLanguageToken(patch.preferredSubtitleLanguage) || undefined,
+            : normalizeStoredPreference(patch.preferredSubtitleLanguage),
       };
 
       const saveTask = async () => {
@@ -106,10 +140,10 @@ export function usePlayerTrackPreferences({
           ]);
           const fresh = cached ?? (await api.getPlaybackLanguagePreferences());
           globalPlaybackPrefsRef.current = {
-            preferredAudioLanguage:
-              normalizeLanguageToken(fresh?.preferredAudioLanguage) || undefined,
-            preferredSubtitleLanguage:
-              normalizeLanguageToken(fresh?.preferredSubtitleLanguage) || undefined,
+            preferredAudioLanguage: normalizeStoredPreference(fresh?.preferredAudioLanguage),
+            preferredSubtitleLanguage: normalizeStoredPreference(
+              fresh?.preferredSubtitleLanguage,
+            ),
           };
           globalPlaybackPrefsHydratedRef.current = true;
         }
@@ -125,10 +159,10 @@ export function usePlayerTrackPreferences({
         );
 
         globalPlaybackPrefsRef.current = {
-          preferredAudioLanguage:
-            normalizeLanguageToken(savedPreferences?.preferredAudioLanguage) || undefined,
-          preferredSubtitleLanguage:
-            normalizeLanguageToken(savedPreferences?.preferredSubtitleLanguage) || undefined,
+          preferredAudioLanguage: normalizeStoredPreference(savedPreferences?.preferredAudioLanguage),
+          preferredSubtitleLanguage: normalizeStoredPreference(
+            savedPreferences?.preferredSubtitleLanguage,
+          ),
         };
 
         queryClient.setQueryData(
@@ -150,9 +184,10 @@ export function usePlayerTrackPreferences({
     (type: 'audio' | 'sub', id: number | 'no') => {
       if (type === 'audio') {
         const selectedAudio = audioTracks.find((track) => track.id === id);
-        const pref = inferTrackPreferredLanguage(selectedAudio ?? { id: -1, type: 'audio' });
-        if (!pref) return;
-        void savePlaybackPreferencesPatch({ preferredAudioLanguage: pref });
+        void inferTrackLanguagePreference(selectedAudio ?? null).then((preferredAudioLanguage) => {
+          if (!preferredAudioLanguage) return;
+          void savePlaybackPreferencesPatch({ preferredAudioLanguage });
+        });
         return;
       }
 
@@ -162,17 +197,19 @@ export function usePlayerTrackPreferences({
       }
 
       const selectedSubtitle = subTracks.find((track) => track.id === id);
-      const pref = inferTrackPreferredLanguage(selectedSubtitle ?? { id: -1, type: 'sub' });
-      if (!pref) return;
-      void savePlaybackPreferencesPatch({ preferredSubtitleLanguage: pref });
+      void inferTrackLanguagePreference(selectedSubtitle ?? null).then((preferredSubtitleLanguage) => {
+        if (!preferredSubtitleLanguage) return;
+        void savePlaybackPreferencesPatch({ preferredSubtitleLanguage });
+      });
     },
     [audioTracks, savePlaybackPreferencesPatch, subTracks],
   );
 
   useAutoApplyTrackPreferences({
+    hasPlaybackStarted,
     isLoading,
     resetKey,
-    playbackLanguagePreferences: effectivePlaybackLanguagePreferences,
+    playbackLanguagePreferences: autoApplyPlaybackLanguagePreferences,
     audioTracks,
     subTracks,
     trackSwitching,
@@ -188,40 +225,48 @@ export function usePlayerTrackPreferences({
       return;
     }
 
-    const preferredAudioLanguage = activeAudioTrack
-      ? inferTrackPreferredLanguage(activeAudioTrack)
-      : undefined;
-    const preferredSubtitleLanguage = subtitlesOff
-      ? 'off'
-      : activeSubTrack
-        ? inferTrackPreferredLanguage(activeSubTrack)
-        : undefined;
+    let cancelled = false;
 
-    if (!preferredAudioLanguage && preferredSubtitleLanguage === undefined) {
-      return;
-    }
+    void Promise.all([
+      inferTrackLanguagePreference(activeAudioTrack ?? null),
+      subtitlesOff
+        ? Promise.resolve('off')
+        : inferTrackLanguagePreference(activeSubTrack ?? null),
+    ]).then(([preferredAudioLanguage, preferredSubtitleLanguage]) => {
+      if (cancelled) {
+        return;
+      }
 
-    const fingerprint = [
-      activeStreamUrl ?? '',
-      preferredAudioLanguage ?? '',
-      preferredSubtitleLanguage ?? '',
-    ].join('|');
+      if (!preferredAudioLanguage && preferredSubtitleLanguage === undefined) {
+        return;
+      }
 
-    if (lastRecordedTrackOutcomeRef.current === fingerprint) {
-      return;
-    }
+      const fingerprint = [
+        activeStreamUrl ?? '',
+        preferredAudioLanguage ?? '',
+        preferredSubtitleLanguage ?? '',
+      ].join('|');
 
-    lastRecordedTrackOutcomeRef.current = fingerprint;
-    void api
-      .savePlaybackLanguagePreferenceOutcome(
-        mediaId,
-        mediaType ?? 'series',
-        preferredAudioLanguage,
-        preferredSubtitleLanguage,
-      )
-      .catch(() => {
-        // Title-scoped playback preference memory is best-effort only.
-      });
+      if (lastRecordedTrackOutcomeRef.current === fingerprint) {
+        return;
+      }
+
+      lastRecordedTrackOutcomeRef.current = fingerprint;
+      void api
+        .savePlaybackLanguagePreferenceOutcome(
+          mediaId,
+          mediaType ?? 'series',
+          preferredAudioLanguage,
+          preferredSubtitleLanguage,
+        )
+        .catch(() => {
+          // Title-scoped playback preference memory is best-effort only.
+        });
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, [
     activeAudioTrack,
     activeStreamUrl,
@@ -236,5 +281,6 @@ export function usePlayerTrackPreferences({
 
   return {
     persistSelectedTrackPreference,
+    playbackLanguagePreferences: autoApplyPlaybackLanguagePreferences,
   };
 }

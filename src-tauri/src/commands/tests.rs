@@ -13,7 +13,7 @@ use super::streaming_helpers::{
     stream_source_priority,
 };
 use super::*;
-use crate::providers::addons::TorrentioStream;
+use crate::providers::addons::{StreamPresentation, StreamResolution, TorrentioStream};
 use std::collections::{HashMap, HashSet};
 
 fn mk_watch_progress(id: &str, type_: &str, last_watched: u64) -> WatchProgress {
@@ -39,6 +39,7 @@ fn mk_watch_progress(id: &str, type_: &str, last_watched: u64) -> WatchProgress 
         last_stream_key: None,
         source_name: None,
         stream_family: None,
+        resume_start_time: None,
     }
 }
 
@@ -64,7 +65,9 @@ fn mk_stream(
         size_bytes: None,
         source_name: None,
         stream_family: None,
+        stream_key: String::new(),
         recommendation_reasons: Vec::new(),
+        presentation: StreamPresentation::default(),
     }
 }
 
@@ -210,6 +213,29 @@ fn prepare_addon_streams_filters_labels_and_dedupes() {
     assert_eq!(prepared[0].source_name.as_deref(), Some("TestSource"));
     assert_eq!(prepared[0].info_hash.as_deref(), Some("abc"));
     assert!(prepared[0].stream_family.is_some());
+}
+
+#[test]
+fn prepare_addon_streams_populates_stream_presentation() {
+    let stream = mk_stream(
+        Some("Show Complete Season Pack"),
+        Some("2160p HDR10+ AV1 Dual Audio 1.4 GB"),
+        Some("https://example.com/video.mkv"),
+        None,
+        Some("Show.S01E01-E12.2160p.HDR10+.mkv"),
+    );
+
+    let prepared = prepare_addon_streams(vec![stream], "TestSource");
+    assert_eq!(prepared.len(), 1);
+
+    let presentation = &prepared[0].presentation;
+    assert_eq!(presentation.source_name, "Show Complete Season Pack");
+    assert_eq!(presentation.resolution, StreamResolution::P2160);
+    assert_eq!(presentation.hdr_label.as_deref(), Some("HDR10+"));
+    assert_eq!(presentation.codec_label.as_deref(), Some("AV1"));
+    assert_eq!(presentation.multi_audio_label.as_deref(), Some("DUAL"));
+    assert_eq!(presentation.size_label.as_deref(), Some("1.4GB"));
+    assert!(presentation.is_batch);
 }
 
 #[test]

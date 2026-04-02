@@ -1,7 +1,9 @@
+use super::media_normalization::build_display_year;
 use super::{
     normalize_non_empty, MediaItem, LIBRARY_INDEX_KEY, LIBRARY_ITEM_PREFIX, LIBRARY_MAP_KEY,
     WATCH_STATUS_INDEX_KEY, WATCH_STATUS_ITEM_PREFIX, WATCH_STATUS_MAP_KEY,
 };
+use crate::providers::extract_primary_year;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
@@ -23,7 +25,13 @@ pub(super) fn normalize_library_item(mut item: MediaItem) -> Option<MediaItem> {
     item.logo = item.logo.and_then(|s| normalize_non_empty(&s));
     item.description = item.description.and_then(|s| normalize_non_empty(&s));
     item.year = item.year.and_then(|s| normalize_non_empty(&s));
+    item.primary_year = extract_primary_year(item.year.as_deref());
+    item.display_year = build_display_year(item.year.as_deref());
     item.relation_role = item.relation_role.and_then(|s| normalize_non_empty(&s));
+    item.relation_context_label = item
+        .relation_context_label
+        .and_then(|s| normalize_non_empty(&s));
+    item.relation_preferred_season = item.relation_preferred_season.filter(|value| *value > 0);
 
     Some(item)
 }
@@ -33,6 +41,8 @@ fn choose_library_field(incoming: Option<String>, existing: Option<String>) -> O
 }
 
 pub(super) fn merge_library_item(existing: MediaItem, incoming: MediaItem) -> MediaItem {
+    let year = choose_library_field(incoming.year, existing.year);
+
     MediaItem {
         id: existing.id,
         title: incoming.title,
@@ -40,9 +50,24 @@ pub(super) fn merge_library_item(existing: MediaItem, incoming: MediaItem) -> Me
         backdrop: choose_library_field(incoming.backdrop, existing.backdrop),
         logo: choose_library_field(incoming.logo, existing.logo),
         description: choose_library_field(incoming.description, existing.description),
-        year: choose_library_field(incoming.year, existing.year),
+        year: year.clone(),
+        primary_year: incoming
+            .primary_year
+            .or(existing.primary_year)
+            .or_else(|| extract_primary_year(year.as_deref())),
+        display_year: incoming
+            .display_year
+            .or(existing.display_year)
+            .or_else(|| build_display_year(year.as_deref())),
         type_: incoming.type_,
         relation_role: choose_library_field(incoming.relation_role, existing.relation_role),
+        relation_context_label: choose_library_field(
+            incoming.relation_context_label,
+            existing.relation_context_label,
+        ),
+        relation_preferred_season: incoming
+            .relation_preferred_season
+            .or(existing.relation_preferred_season),
     }
 }
 

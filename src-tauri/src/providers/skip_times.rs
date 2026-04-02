@@ -95,7 +95,8 @@ fn normalize_skip_segments(
     for mut segment in normalized_segments {
         if let Some(previous_segment) = merged_segments.last_mut() {
             if segment.type_ == previous_segment.type_
-                && segment.start_time <= previous_segment.end_time + SKIP_SEGMENT_OVERLAP_EPSILON_SECS
+                && segment.start_time
+                    <= previous_segment.end_time + SKIP_SEGMENT_OVERLAP_EPSILON_SECS
             {
                 previous_segment.end_time = previous_segment.end_time.max(segment.end_time);
                 continue;
@@ -284,6 +285,7 @@ impl SkipTimesProvider {
         imdb_id: &str,
         season: u32,
         episode: u32,
+        duration_hint: Option<f64>,
     ) -> Vec<SkipSegment> {
         let url = format!(
             "https://api.introdb.app/segments?imdb_id={}&season={}&episode={}",
@@ -327,26 +329,26 @@ impl SkipTimesProvider {
         if let Some(intro) = body.intro {
             segments.push(SkipSegment {
                 type_: "intro".to_string(),
-                start_time: intro.start_sec as f64,
-                end_time: intro.end_sec as f64,
+                start_time: intro.start_sec,
+                end_time: intro.end_sec,
             });
         }
         if let Some(recap) = body.recap {
             segments.push(SkipSegment {
                 type_: "recap".to_string(),
-                start_time: recap.start_sec as f64,
-                end_time: recap.end_sec as f64,
+                start_time: recap.start_sec,
+                end_time: recap.end_sec,
             });
         }
         if let Some(outro) = body.outro {
             segments.push(SkipSegment {
                 type_: "outro".to_string(),
-                start_time: outro.start_sec as f64,
-                end_time: outro.end_sec as f64,
+                start_time: outro.start_sec,
+                end_time: outro.end_sec,
             });
         }
 
-        normalize_skip_segments(segments, None)
+        normalize_skip_segments(segments, duration_hint)
     }
 }
 
@@ -391,13 +393,13 @@ struct IntroDbSegmentsResponse {
 
 #[derive(Deserialize)]
 struct IntroDbSegment {
-    start_sec: u32,
-    end_sec: u32,
+    start_sec: f64,
+    end_sec: f64,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_skip_segments, SkipSegment};
+    use super::{normalize_skip_segments, IntroDbSegmentsResponse, SkipSegment};
 
     #[test]
     fn normalize_skip_segments_clamps_duration_and_merges_adjacent_entries() {
@@ -475,5 +477,25 @@ mod tests {
                 },
             ],
         );
+    }
+
+    #[test]
+    fn introdb_segments_response_accepts_fractional_second_values() {
+        let response: IntroDbSegmentsResponse = serde_json::from_str(
+            r#"{
+                "intro": { "start_sec": 2.5, "end_sec": 58.75 },
+                "recap": null,
+                "outro": { "start_sec": 1201.125, "end_sec": 1260.5 }
+            }"#,
+        )
+        .expect("fractional introdb response should parse");
+
+        let intro = response.intro.expect("intro segment");
+        let outro = response.outro.expect("outro segment");
+
+        assert_eq!(intro.start_sec, 2.5);
+        assert_eq!(intro.end_sec, 58.75);
+        assert_eq!(outro.start_sec, 1201.125);
+        assert_eq!(outro.end_sec, 1260.5);
     }
 }

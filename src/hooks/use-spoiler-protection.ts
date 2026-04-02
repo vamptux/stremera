@@ -1,31 +1,25 @@
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 
-const SPOILER_STORAGE_KEY = 'streamy_spoiler_protection';
+import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 
 /**
  * Global spoiler protection toggle.
  * When enabled, episode thumbnails and descriptions are blurred/hidden for
  * episodes the user hasn't watched yet (beyond their furthest progress point).
  *
- * State is persisted to localStorage so it survives page reloads.
+ * State is persisted through backend-managed desktop settings.
  */
 export function useSpoilerProtection() {
-  const [spoilerProtection, setSpoilerProtectionState] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(SPOILER_STORAGE_KEY) === 'true';
-    } catch {
-      return false;
-    }
-  });
+  const { preferences, updatePreferences, isLoading, isSaving } = useAppUiPreferences();
 
   const setSpoilerProtection = useCallback((enabled: boolean) => {
-    setSpoilerProtectionState(enabled);
-    try {
-      localStorage.setItem(SPOILER_STORAGE_KEY, enabled ? 'true' : 'false');
-    } catch {
-      // localStorage unavailable in restricted contexts — state still works in memory
-    }
-  }, []);
+    void updatePreferences({ spoilerProtection: enabled });
+  }, [updatePreferences]);
 
-  return { spoilerProtection, setSpoilerProtection };
+  return {
+    spoilerProtection: preferences.spoilerProtection,
+    setSpoilerProtection,
+    isLoading,
+    isSaving,
+  };
 }

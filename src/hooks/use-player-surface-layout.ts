@@ -1,4 +1,4 @@
-import { useEffect, useState, type RefObject } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import { setVideoMarginRatio, type VideoMarginRatio } from 'tauri-plugin-libmpv-api';
 
 const PLAYER_SIDEBAR_WIDTH_PX = 60;
@@ -7,6 +7,19 @@ const PLAYER_TITLEBAR_HEIGHT_PX = 32;
 function clampMarginRatio(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(0.98, value));
+}
+
+function normalizeMarginRatioPart(value?: number): number {
+  return Math.round((value ?? 0) * 10000) / 10000;
+}
+
+function serializeVideoMarginRatio(ratio: VideoMarginRatio): string {
+  return [
+    normalizeMarginRatioPart(ratio.left),
+    normalizeMarginRatioPart(ratio.right),
+    normalizeMarginRatioPart(ratio.top),
+    normalizeMarginRatioPart(ratio.bottom),
+  ].join('|');
 }
 
 function buildVideoMarginRatio(
@@ -79,6 +92,11 @@ export function usePlayerSurfaceLayout({
   showDownloadModal,
 }: UsePlayerSurfaceLayoutArgs) {
   const [layoutVersion, setLayoutVersion] = useState(0);
+  const lastAppliedMarginFingerprintRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    lastAppliedMarginFingerprintRef.current = null;
+  }, [activeStreamUrl, mpvSurfaceReady]);
 
   useEffect(() => {
     if (typeof ResizeObserver === 'undefined') return;
@@ -119,6 +137,24 @@ export function usePlayerSurfaceLayout({
 
     let cancelled = false;
 
+    const applyMarginRatio = async (ratio: VideoMarginRatio) => {
+      const fingerprint = serializeVideoMarginRatio(ratio);
+      if (lastAppliedMarginFingerprintRef.current === fingerprint) {
+        return;
+      }
+
+      lastAppliedMarginFingerprintRef.current = fingerprint;
+
+      try {
+        await setVideoMarginRatio(ratio);
+      } catch (error) {
+        if (lastAppliedMarginFingerprintRef.current === fingerprint) {
+          lastAppliedMarginFingerprintRef.current = null;
+        }
+        throw error;
+      }
+    };
+
     const applyVideoMargins = async () => {
       const containerRect = playerContainerRef.current?.getBoundingClientRect();
       if (!containerRect || containerRect.width <= 0 || containerRect.height <= 0) {
@@ -137,7 +173,7 @@ export function usePlayerSurfaceLayout({
 
       if (shouldCollapseVideoSurface) {
         if (cancelled) return;
-        await setVideoMarginRatio(
+        await applyMarginRatio(
           buildVideoMarginRatio(containerRect.width, containerRect.height, {
             leftPx: 0,
             rightPx: Math.max(0, containerRect.width - 16),
@@ -170,7 +206,7 @@ export function usePlayerSurfaceLayout({
       });
 
       if (cancelled) return;
-      await setVideoMarginRatio(nextMargins);
+      await applyMarginRatio(nextMargins);
     };
 
     void applyVideoMargins().catch(() => {

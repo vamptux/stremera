@@ -1,13 +1,29 @@
 use super::config_store::{
-    get_effective_debrid_provider, get_effective_rd_token, load_addon_configs, normalize_addon_url,
-    normalize_debrid_provider, resolve_addon_configs, save_addon_configs_to_store, AddonConfig,
-    AddonManifest, DebridConfig,
+    app_ui_preferences_initialized, apply_app_ui_preferences_patch, get_effective_debrid_provider,
+    get_effective_rd_token, load_addon_configs, load_app_ui_preferences,
+    load_last_notified_app_update_version, load_profile_preferences,
+    load_stream_selector_preferences, normalize_addon_url, normalize_debrid_provider,
+    profile_preferences_initialized, resolve_addon_configs, sanitize_app_ui_preferences,
+    sanitize_profile_preferences, sanitize_stream_selector_preferences,
+    save_addon_configs_to_store, save_app_ui_preferences_to_store,
+    save_last_notified_app_update_version_to_store, save_profile_preferences_to_store,
+    save_stream_selector_preferences_to_store, stream_selector_preferences_initialized,
+    AddonConfig, AddonManifest, AppUiPreferences, AppUiPreferencesPatch, DebridConfig,
+    LocalProfile, ProfilePreferences, ProfileViewMode, StreamSelectorPreferences,
 };
 use crate::providers::addons::AddonTransport;
+use serde::Serialize;
 use serde_json::json;
 use std::time::Duration;
 use tauri::{command, AppHandle, State};
 use tauri_plugin_store::StoreExt;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamSelectorPreferencesState {
+    pub preferences: StreamSelectorPreferences,
+    pub initialized: bool,
+}
 
 #[command]
 pub async fn save_debrid_config(
@@ -59,6 +75,192 @@ pub async fn get_debrid_config(app: AppHandle) -> Result<DebridConfig, String> {
     };
 
     Ok(DebridConfig { provider, api_key })
+}
+
+#[command]
+pub async fn get_app_ui_preferences(app: AppHandle) -> Result<AppUiPreferences, String> {
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
+    Ok(load_app_ui_preferences(&store))
+}
+
+#[command]
+pub async fn save_app_ui_preferences(
+    app: AppHandle,
+    patch: AppUiPreferencesPatch,
+) -> Result<AppUiPreferences, String> {
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
+    let preferences = apply_app_ui_preferences_patch(load_app_ui_preferences(&store), patch);
+
+    save_app_ui_preferences_to_store(&store, &preferences);
+    store.save().map_err(|e| e.to_string())?;
+
+    Ok(preferences)
+}
+
+#[command]
+pub async fn import_legacy_app_ui_preferences(
+    app: AppHandle,
+    preferences: AppUiPreferences,
+) -> Result<AppUiPreferences, String> {
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
+
+    if app_ui_preferences_initialized(&store) {
+        return Ok(load_app_ui_preferences(&store));
+    }
+
+    let preferences = sanitize_app_ui_preferences(preferences);
+
+    save_app_ui_preferences_to_store(&store, &preferences);
+    store.save().map_err(|e| e.to_string())?;
+
+    Ok(preferences)
+}
+
+#[command]
+pub async fn get_last_notified_app_update_version(
+    app: AppHandle,
+) -> Result<Option<String>, String> {
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
+    Ok(load_last_notified_app_update_version(&store))
+}
+
+#[command]
+pub async fn save_last_notified_app_update_version(
+    app: AppHandle,
+    version: Option<String>,
+) -> Result<Option<String>, String> {
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
+
+    save_last_notified_app_update_version_to_store(&store, version);
+    store.save().map_err(|e| e.to_string())?;
+
+    Ok(load_last_notified_app_update_version(&store))
+}
+
+#[command]
+pub async fn import_legacy_last_notified_app_update_version(
+    app: AppHandle,
+    version: Option<String>,
+) -> Result<Option<String>, String> {
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
+
+    if load_last_notified_app_update_version(&store).is_some() {
+        return Ok(load_last_notified_app_update_version(&store));
+    }
+
+    save_last_notified_app_update_version_to_store(&store, version);
+    store.save().map_err(|e| e.to_string())?;
+
+    Ok(load_last_notified_app_update_version(&store))
+}
+
+#[command]
+pub async fn get_profile_preferences(app: AppHandle) -> Result<ProfilePreferences, String> {
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
+    Ok(load_profile_preferences(&store))
+}
+
+#[command]
+pub async fn save_profile_preferences(
+    app: AppHandle,
+    profile: LocalProfile,
+    view_mode: ProfileViewMode,
+) -> Result<ProfilePreferences, String> {
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
+    let preferences = sanitize_profile_preferences(ProfilePreferences { profile, view_mode });
+
+    save_profile_preferences_to_store(&store, &preferences);
+    store.save().map_err(|e| e.to_string())?;
+
+    Ok(preferences)
+}
+
+#[command]
+pub async fn import_legacy_profile_preferences(
+    app: AppHandle,
+    profile: LocalProfile,
+    view_mode: ProfileViewMode,
+) -> Result<ProfilePreferences, String> {
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
+
+    if profile_preferences_initialized(&store) {
+        return Ok(load_profile_preferences(&store));
+    }
+
+    let preferences = sanitize_profile_preferences(ProfilePreferences { profile, view_mode });
+
+    save_profile_preferences_to_store(&store, &preferences);
+    store.save().map_err(|e| e.to_string())?;
+
+    Ok(preferences)
+}
+
+#[command]
+pub async fn get_stream_selector_preferences(
+    app: AppHandle,
+) -> Result<StreamSelectorPreferencesState, String> {
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
+    Ok(StreamSelectorPreferencesState {
+        preferences: load_stream_selector_preferences(&store),
+        initialized: stream_selector_preferences_initialized(&store),
+    })
+}
+
+#[command]
+pub async fn save_stream_selector_preferences(
+    app: AppHandle,
+    preferences: StreamSelectorPreferences,
+) -> Result<StreamSelectorPreferences, String> {
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
+    let preferences = sanitize_stream_selector_preferences(preferences);
+
+    save_stream_selector_preferences_to_store(&store, &preferences);
+    store.save().map_err(|e| e.to_string())?;
+
+    Ok(preferences)
+}
+
+#[command]
+pub async fn import_legacy_stream_selector_preferences(
+    app: AppHandle,
+    preferences: StreamSelectorPreferences,
+) -> Result<StreamSelectorPreferences, String> {
+    let store = app
+        .store(super::SETTINGS_STORE_FILE)
+        .map_err(|e| e.to_string())?;
+
+    if stream_selector_preferences_initialized(&store) {
+        return Ok(load_stream_selector_preferences(&store));
+    }
+
+    let preferences = sanitize_stream_selector_preferences(preferences);
+
+    save_stream_selector_preferences_to_store(&store, &preferences);
+    store.save().map_err(|e| e.to_string())?;
+
+    Ok(preferences)
 }
 
 #[command]

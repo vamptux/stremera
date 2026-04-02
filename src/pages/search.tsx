@@ -1,5 +1,5 @@
 import { useLocation, useSearchParams, useNavigate } from 'react-router-dom';
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type MediaItem, getErrorMessage } from '@/lib/api';
 import { MediaCard, MediaCardSkeleton } from '@/components/media-card';
 import {
@@ -15,7 +15,6 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import {
   areStringArraysEqual,
-  getPrimaryYear,
   normalizeSearchYearRange,
   parseGenresParam,
   parseSearchYearParam,
@@ -23,10 +22,9 @@ import {
 } from '@/lib/search-page-state';
 import {
   buildSearchHistoryKey,
-  clearSearchHistory,
-  loadSearchHistory,
-  pushSearchHistoryEntry,
-  removeSearchHistoryEntry,
+  clearLegacySearchHistory,
+  markLegacySearchHistoryMigrationComplete,
+  readLegacySearchHistory,
   type SearchHistoryEntry,
 } from '@/lib/search-history';
 import {
@@ -37,11 +35,13 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ScrollArea } from '@/components/ui/scroll-area';
-
-type MediaType = 'movie' | 'series' | 'anime';
-type ProviderId = 'cinemeta' | 'netflix' | 'hbo' | 'disney' | 'prime' | 'apple' | 'kitsu';
-type DiscoverFeed = 'popular' | 'featured' | 'trending' | 'airing' | 'rating';
-type SortOption = 'default' | 'title-asc' | 'title-desc' | 'year-desc' | 'year-asc';
+import {
+  useSearchResults,
+  type SearchDiscoverFeed as DiscoverFeed,
+  type SearchMediaType as MediaType,
+  type SearchProviderId as ProviderId,
+  type SearchSortOption as SortOption,
+} from '@/hooks/use-search-results';
 
 const PROVIDERS: { id: ProviderId; name: string; short: string; color: string; types: MediaType[] }[] = [
   { id: 'cinemeta', name: 'All Sources',  short: 'All',      color: 'bg-zinc-700',    types: ['movie', 'series', 'anime'] },
@@ -93,83 +93,6 @@ const SORT_OPTIONS: { id: SortOption; label: string }[] = [
   { id: 'title-asc',  label: 'Title A-Z' },
   { id: 'title-desc', label: 'Title Z-A' },
 ];
-
-const CINEMETA_PAGE_SIZE = 50;
-const KITSU_PAGE_SIZE   = 20;
-const NETFLIX_PAGE_SIZE = 100;
-const SEARCH_RESULT_CAP = 2000;
-const SEARCH_AUTO_PREFETCH_RESULT_TARGET = 120;
-const SEARCH_AUTO_PREFETCH_PAGE_LIMIT = 2;
-const LOW_SIGNAL_PAGE_STREAK_LIMIT = 2;
-
-interface SearchPageParam {
-  skip: number;
-  lowSignalStreak: number;
-}
-
-function getMinimumUsefulPageSize(pageSize: number): number {
-  return Math.max(3, Math.floor(pageSize / 4));
-}
-
-function resolveSearchPageParam(value: unknown): SearchPageParam {
-  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
-    return { skip: value, lowSignalStreak: 0 };
-  }
-
-  if (value && typeof value === 'object') {
-    const candidate = value as Partial<SearchPageParam>;
-    const skip =
-      typeof candidate.skip === 'number' && Number.isFinite(candidate.skip) && candidate.skip >= 0
-        ? candidate.skip
-        : 0;
-    const lowSignalStreak =
-      typeof candidate.lowSignalStreak === 'number' &&
-      Number.isFinite(candidate.lowSignalStreak) &&
-      candidate.lowSignalStreak >= 0
-        ? candidate.lowSignalStreak
-        : 0;
-
-    return { skip, lowSignalStreak };
-  }
-
-  return { skip: 0, lowSignalStreak: 0 };
-}
-
-function countFetchedItems(pages: MediaItem[][]): number {
-  return pages.reduce((sum, page) => sum + page.length, 0);
-}
-
-function countUniqueNewItems(lastPage: MediaItem[], previousPages: MediaItem[][]): number {
-  if (lastPage.length === 0) return 0;
-
-  const previousIds = new Set<string>();
-  for (const page of previousPages) {
-    for (const item of page) {
-      previousIds.add(item.id);
-    }
-  }
-
-  return lastPage.reduce((count, item) => (previousIds.has(item.id) ? count : count + 1), 0);
-}
-
-// Verified skip-pagination support per provider (live-tested 2026-03).
-//
-// • cinemeta  — skip param is non-functional; the same first page is always
-//               returned regardless of offset. Confirmed by live testing.
-//               Must NOT be in this set.
-//
-// • netflix / hbo / disney / prime / apple
-//             — Stremio catalog addon honours skip= path segments.
-//               A 404 response signals end-of-catalog; dedup in the Rust
-//               Netflix provider + frontend id-dedup makes this safe even for
-//               mirrors that ignore skip.
-//
-// • kitsu     — Natively supports skip in all browse catalog endpoints.
-//
-// Update this set whenever a provider's skip behaviour changes.
-const PROVIDERS_WITH_SKIP_PAGINATION = new Set<ProviderId>([
-  'netflix', 'hbo', 'disney', 'prime', 'apple', 'kitsu',
-]);
 
 function parseSortParam(value: string | null): SortOption {
   return SORT_OPTIONS.some((option) => option.id === value)
@@ -253,7 +176,6 @@ export function Search() {
 
   const [query,          setQuery]          = useState(urlQuery);
   const debouncedQuery = useDebounce(query, 500);
-  // Faster debounce for autocomplete suggestions — fires before the main search
   const suggestionDebounce = useDebounce(query, 250);
   const [activeType,     setActiveType]     = useState<MediaType>(parsedUrlType);
   const [activeProvider, setActiveProvider] = useState<ProviderId>(parsedUrlProvider);
@@ -265,7 +187,6 @@ export function Search() {
   const [yearTo,         setYearTo]         = useState<number | null>(normalizedUrlYears.yearTo);
   const [genreSearch, setGenreSearch] = useState('');
   const [genrePopoverOpen, setGenrePopoverOpen] = useState(false);
-  const [recentSearches, setRecentSearches] = useState<SearchHistoryEntry[]>([]);
   // Suggestion state — shows a live dropdown while the user is typing
   const [suggestFocused, setSuggestFocused] = useState(false);
   const suggestContainerRef = useRef<HTMLDivElement>(null);
@@ -273,11 +194,13 @@ export function Search() {
 
   const isOnline        = useOnlineStatus();
   const navigate        = useNavigate();
+  const queryClient     = useQueryClient();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const hasInitializedBrowseScrollRef = useRef(false);
   const restoredScrollTopRef = useRef(0);
   const currentRoute = `${location.pathname}${location.search}`;
   const scrollStorageKey = `search-scroll:${currentRoute}`;
+  const [hasImportedLegacySearchHistory, setHasImportedLegacySearchHistory] = useState(false);
 
   const updateYearRange = useCallback((nextYearFrom: number | null, nextYearTo: number | null) => {
     const normalizedRange = normalizeSearchYearRange(nextYearFrom, nextYearTo);
@@ -285,16 +208,77 @@ export function Search() {
     setYearTo(normalizedRange.yearTo);
   }, []);
 
+  const { data: recentSearches = [], isSuccess: isSearchHistoryReady } = useQuery({
+    queryKey: ['search-history'],
+    queryFn: api.getSearchHistory,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const legacySearchHistoryRead = useMemo(() => readLegacySearchHistory(), []);
+  const legacyRecentSearches = useMemo(
+    () => legacySearchHistoryRead.value ?? [],
+    [legacySearchHistoryRead.value],
+  );
+
   // ── Recent searches ─────────────────────────────────────────────────────
   useEffect(() => {
-    setRecentSearches(loadSearchHistory());
-  }, []);
+    if (hasImportedLegacySearchHistory || !isSearchHistoryReady) {
+      return;
+    }
 
-  const addToRecent = useCallback((q: string) => {
+    if (recentSearches.length > 0) {
+      clearLegacySearchHistory();
+      setHasImportedLegacySearchHistory(true);
+      return;
+    }
+
+    if (!legacySearchHistoryRead.hasLegacyData) {
+      markLegacySearchHistoryMigrationComplete();
+      setHasImportedLegacySearchHistory(true);
+      return;
+    }
+
+    if (legacyRecentSearches.length === 0) {
+      clearLegacySearchHistory();
+      setHasImportedLegacySearchHistory(true);
+      return;
+    }
+
+    let cancelled = false;
+
+    void api
+      .importSearchHistoryEntries(legacyRecentSearches)
+      .then((importedEntries) => {
+        if (cancelled) return;
+        queryClient.setQueryData<SearchHistoryEntry[]>(['search-history'], importedEntries);
+        clearLegacySearchHistory();
+        setHasImportedLegacySearchHistory(true);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHasImportedLegacySearchHistory(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    hasImportedLegacySearchHistory,
+    isSearchHistoryReady,
+    legacyRecentSearches,
+    legacySearchHistoryRead.hasLegacyData,
+    queryClient,
+    recentSearches.length,
+  ]);
+
+  const addToRecent = useCallback(async (q: string) => {
     if (!q.trim()) return;
+
     const normalizedYears = normalizeSearchYearRange(yearFrom, yearTo);
-    setRecentSearches((prev) => {
-      return pushSearchHistoryEntry(prev, {
+
+    try {
+      const nextEntries = await api.pushSearchHistoryEntry({
         query: q,
         mediaType: activeType,
         provider: activeProvider,
@@ -304,18 +288,33 @@ export function Search() {
         yearFrom: normalizedYears.yearFrom,
         yearTo: normalizedYears.yearTo,
       });
-    });
-  }, [activeFeed, activeGenres, activeProvider, activeSort, activeType, yearFrom, yearTo]);
+      queryClient.setQueryData<SearchHistoryEntry[]>(['search-history'], nextEntries);
+    } catch {
+      // Search history persistence is best-effort only.
+    }
+  }, [activeFeed, activeGenres, activeProvider, activeSort, activeType, queryClient, yearFrom, yearTo]);
 
-  const clearRecent = () => {
-    setRecentSearches([]);
-    clearSearchHistory();
-  };
+  const clearRecent = useCallback(() => {
+    clearLegacySearchHistory();
 
-  const removeRecent = (entry: SearchHistoryEntry, e: React.MouseEvent) => {
+    void api
+      .clearSearchHistory()
+      .then(() => {
+        queryClient.setQueryData<SearchHistoryEntry[]>(['search-history'], []);
+      })
+      .catch(() => undefined);
+  }, [queryClient]);
+
+  const removeRecent = useCallback((entry: SearchHistoryEntry, e: React.MouseEvent) => {
     e.stopPropagation();
-    setRecentSearches((prev) => removeSearchHistoryEntry(prev, entry));
-  };
+
+    void api
+      .removeSearchHistoryEntry(entry)
+      .then((nextEntries) => {
+        queryClient.setQueryData<SearchHistoryEntry[]>(['search-history'], nextEntries);
+      })
+      .catch(() => undefined);
+  }, [queryClient]);
 
   const applyRecentSearch = useCallback((entry: SearchHistoryEntry) => {
     const nextType = resolveUrlType(entry.mediaType ?? null);
@@ -400,6 +399,16 @@ export function Search() {
     }
   };
 
+  const handleProviderChange = useCallback((provider: ProviderId) => {
+    setActiveProvider(provider);
+
+    if (provider !== 'cinemeta') {
+      setActiveGenres([]);
+      setGenrePopoverOpen(false);
+      setGenreSearch('');
+    }
+  }, []);
+
   const toggleGenre = (genre: string) => {
     setActiveGenres(prev =>
       prev.includes(genre) ? prev.filter(g => g !== genre) : [...prev, genre]
@@ -414,6 +423,16 @@ export function Search() {
 
   const hasActiveFilters = activeGenres.length > 0 || activeSort !== 'default'
     || yearFrom !== null || yearTo !== null;
+
+  useEffect(() => {
+    if (activeType === 'anime' || activeProvider === 'cinemeta' || activeGenres.length === 0) {
+      return;
+    }
+
+    setActiveGenres([]);
+    setGenrePopoverOpen(false);
+    setGenreSearch('');
+  }, [activeGenres.length, activeProvider, activeType]);
 
   // ── Click-outside: close suggestions when user clicks elsewhere ──────
   useEffect(() => {
@@ -439,17 +458,33 @@ export function Search() {
     scrollEl.scrollTo({ top: 0, behavior: 'smooth' });
   }, [debouncedQuery, activeType, activeProvider, activeFeed, activeGenres, activeSort]);
 
-  // ── Live suggestion query (250 ms debounce \u2014 outruns main 500 ms search) ─
-  const { data: rawSuggestions = [] } = useQuery({
-    queryKey: ['suggestions', suggestionDebounce.trim(), activeType],
-    queryFn: () => runSearchRequest(suggestionDebounce),
-    enabled: isOnline && suggestFocused && suggestionDebounce.trim().length >= 2,
-    staleTime: 1000 * 60 * 2,
-    // Keep previous results to avoid flickering between keystrokes
-    placeholderData: (prev) => prev,
+  const {
+    results,
+    suggestions,
+    isLoading,
+    isFetching,
+    isFetchingNextPage,
+    isError,
+    errorObj,
+    hasNextPage,
+    fetchNextPage,
+    supportsInfiniteScroll,
+    showEndMsg,
+  } = useSearchResults({
+    query: debouncedQuery,
+    suggestionQuery: suggestionDebounce,
+    activeType,
+    activeProvider,
+    activeFeed,
+    activeGenres,
+    yearFrom,
+    yearTo,
+    activeSort,
+    isOnline,
+    suggestFocused,
+    restoredScrollTopRef,
   });
 
-  const suggestions = useMemo(() => rawSuggestions.slice(0, 6), [rawSuggestions]);
   const showSuggestions = suggestFocused && query.trim().length >= 2 && suggestions.length > 0;
 
   const handleSuggestionSelect = useCallback((item: MediaItem) => {
@@ -501,245 +536,14 @@ export function Search() {
     };
   }, [scrollStorageKey]);
 
-  // ── Fetch helpers ──────────────────────────────────────────────────────
-
-  // Determines whether the current provider supports real skip-based pagination.
-  // See the module-level PROVIDERS_WITH_SKIP_PAGINATION constant for the
-  // verified behaviour of each provider.
-  const providerSupportsPagination =
-    activeType === 'anime' || PROVIDERS_WITH_SKIP_PAGINATION.has(activeProvider);
-  const normalizedActiveGenres = useMemo(
-    () => [...activeGenres].sort((left, right) => left.localeCompare(right)),
-    [activeGenres],
-  );
-  const resolvedBrowseCatalogId = useMemo(() => {
-    if (activeType === 'anime') {
-      return (KITSU_FEEDS.find((feed) => feed.id === activeFeed) ?? KITSU_FEEDS[0]).catalogId;
-    }
-
-    return (
-      CINEMETA_FEEDS.find((feed) => feed.id === (activeFeed as 'popular' | 'featured')) ??
-      CINEMETA_FEEDS[0]
-    ).catalogId;
-  }, [activeFeed, activeType]);
-
-  const runSearchRequest = useCallback(
-    (rawQuery: string) => {
-      const normalizedQuery = rawQuery.trim();
-      if (activeType === 'anime') {
-        return api.searchKitsu(normalizedQuery);
-      }
-
-      return api.searchMedia(normalizedQuery, activeType);
-    },
-    [activeType],
-  );
-
-  // Fetches content for a given genre and optional skip offset.
-  // For Cinemeta: uses the discover endpoint (merges top + imdbRating) — no skip.
-  // For Kitsu / streaming providers: supports real skip-based pagination.
-  const fetchForGenre = useCallback(async (genre: string | null, skip?: number): Promise<MediaItem[]> => {
-    const pageSkip = typeof skip === 'number' && skip > 0 ? skip : undefined;
-
-    if (activeType === 'anime') {
-      return api.getKitsuCatalog(resolvedBrowseCatalogId, genre || undefined, pageSkip);
-    }
-
-    if (activeProvider === 'cinemeta' || genre) {
-      // Use the discover endpoint (merges both catalogs) for initial load.
-      // For subsequent pages (skip > 0), Cinemeta can't paginate anyway,
-      // so return empty to signal "all loaded".
-      if (pageSkip) return [];
-      return api.getCinemetaDiscover(activeType, resolvedBrowseCatalogId, genre || undefined);
-    }
-
-    const catalogMap: Record<string, string> = {
-      netflix: 'nfx', hbo: 'hbm', disney: 'dnp', prime: 'amp', apple: 'atp',
-    };
-    return api.getNetflixCatalog(catalogMap[activeProvider] ?? 'nfx', activeType, pageSkip);
-  }, [activeProvider, activeType, resolvedBrowseCatalogId]);
-
-  // ── Mode: are we in multi-genre OR mode? ──────────────────────────────
-  // Multi-genre discover mode fetches one backend-shaped batch per page.
-  // Single/no genre or search: use useInfiniteQuery for infinite scroll.
-  const isMultiGenreMode = activeGenres.length > 1 && !debouncedQuery;
-
-  const multiGenrePageSize = activeType === 'anime' ? KITSU_PAGE_SIZE : NETFLIX_PAGE_SIZE;
-  const multiGenreSupportsPagination = isMultiGenreMode && activeType === 'anime';
-
-  // ── Mode A: infinite query (search / 0-1 genres) ──────────────────────
-  const singleApiGenre = activeGenres[0] ?? null;
-
-  // Page size thresholds used by getNextPageParam to decide if more data exists.
-  // These should match what the backend actually returns per batch.
-  const pageSize = activeType === 'anime' ? KITSU_PAGE_SIZE
-    : (activeProvider !== 'cinemeta' && !singleApiGenre) ? NETFLIX_PAGE_SIZE
-    : CINEMETA_PAGE_SIZE;
-
-  const {
-    data: infiniteData,
-    isLoading: infiniteLoading,
-    isFetching: infiniteFetching,
-    isFetchingNextPage,
-    fetchNextPage,
-    hasNextPage,
-    isError: infiniteError,
-    error: infiniteErrorObj,
-  } = useInfiniteQuery({
-    queryKey: ['search', debouncedQuery, activeType, activeProvider, singleApiGenre, activeFeed],
-    queryFn: ({ pageParam }) => {
-      const resolvedPageParam = resolveSearchPageParam(pageParam);
-      if (debouncedQuery) {
-        return runSearchRequest(debouncedQuery);
-      }
-      return fetchForGenre(singleApiGenre, resolvedPageParam.skip);
-    },
-    getNextPageParam: (lastPage, allPages, lastPageParam) => {
-      // Search results aren't paginated
-      if (debouncedQuery) return undefined;
-      // Cinemeta / non-paginatable providers: all content comes in the first batch
-      if (!providerSupportsPagination) return undefined;
-      // Empty or very small page → no more data
-      const minimumUsefulPageSize = getMinimumUsefulPageSize(pageSize);
-      if (lastPage.length === 0 || lastPage.length < minimumUsefulPageSize) return undefined;
-      // Check for genuine new items and stop if multiple pages in a row add too little.
-      const uniqueNew = countUniqueNewItems(lastPage, allPages.slice(0, -1));
-      if (uniqueNew === 0) return undefined;
-      const previousPageParam = resolveSearchPageParam(lastPageParam);
-      const nextLowSignalStreak =
-        uniqueNew < minimumUsefulPageSize ? previousPageParam.lowSignalStreak + 1 : 0;
-      if (nextLowSignalStreak >= LOW_SIGNAL_PAGE_STREAK_LIMIT) return undefined;
-      // Safety cap
-      const totalFetched = countFetchedItems(allPages);
-      if (totalFetched >= SEARCH_RESULT_CAP) return undefined;
-      return {
-        skip: totalFetched,
-        lowSignalStreak: nextLowSignalStreak,
-      };
-    },
-    initialPageParam: { skip: 0, lowSignalStreak: 0 },
-    staleTime: 1000 * 60 * 5,
-    enabled: isOnline && !isMultiGenreMode,
-  });
-
-  const {
-    data: multiGenreData,
-    isLoading: multiGenreLoading,
-    isFetching: multiGenreFetching,
-    isFetchingNextPage: multiGenreIsFetchingNextPage,
-    fetchNextPage: fetchNextMultiGenrePage,
-    hasNextPage: multiGenreHasNextPage,
-    isError: multiGenreError,
-    error: multiGenreErrorObj,
-  } = useInfiniteQuery({
-    queryKey: [
-      'multi-genre-catalog',
-      activeType,
-      activeProvider,
-      activeFeed,
-      normalizedActiveGenres.join('|'),
-    ],
-    queryFn: ({ pageParam }) =>
-      api.getMultiGenreCatalog(
-        activeType,
-        resolvedBrowseCatalogId,
-        normalizedActiveGenres,
-        pageParam,
-      ),
-    initialPageParam: 0,
-    getNextPageParam: (lastPage, allPages) => {
-      if (!multiGenreSupportsPagination || !lastPage.hasMore) {
-        return undefined;
-      }
-
-      return allPages.length * multiGenrePageSize;
-    },
-    staleTime: 1000 * 60 * 5,
-    enabled: isOnline && isMultiGenreMode,
-  });
-
-  // ── Auto-prefetch: eagerly load more content right after initial data arrives ──
-  useEffect(() => {
-    if (isMultiGenreMode || !providerSupportsPagination) return;
-    if (!infiniteData || infiniteFetching || isFetchingNextPage || !hasNextPage) return;
-    if (restoredScrollTopRef.current > 0) return;
-    const pagesLoaded = infiniteData.pages.length;
-    if (pagesLoaded >= SEARCH_AUTO_PREFETCH_PAGE_LIMIT) return;
-    // Keep an initial scroll buffer, but stop before long sessions silently snowball.
-    const totalItems = countFetchedItems(infiniteData.pages);
-    if (totalItems < SEARCH_AUTO_PREFETCH_RESULT_TARGET) {
-      void fetchNextPage();
-    }
-  }, [
-    isMultiGenreMode,
-    providerSupportsPagination,
-    infiniteData,
-    infiniteFetching,
-    isFetchingNextPage,
-    hasNextPage,
-    fetchNextPage,
-  ]);
-
-  // ── Raw results (deduplicated) ─────────────────────────────────────────
-  const rawResults = useMemo<MediaItem[]>(() => {
-    const seen = new Set<string>();
-    const out: MediaItem[] = [];
-
-    if (isMultiGenreMode) {
-      // Flatten backend-shaped batches and guard against cross-page overlap.
-      for (const page of multiGenreData?.pages ?? []) {
-        for (const item of page.items) {
-          if (!seen.has(item.id)) { seen.add(item.id); out.push(item); }
-        }
-      }
-    } else {
-      // Flatten infinite pages
-      for (const page of infiniteData?.pages ?? []) {
-        for (const item of page) {
-          if (!seen.has(item.id)) { seen.add(item.id); out.push(item); }
-        }
-      }
-    }
-
-    return out;
-  }, [isMultiGenreMode, multiGenreData?.pages, infiniteData?.pages]);
-
-  // ── Client-side post-filters: year range + sort ────────────────────────
-  // NOTE: Genre is now handled by the API (parallel calls), not client-side text matching.
-  const filteredResults = useMemo<MediaItem[]>(() => {
-    let items = rawResults;
-
-    if (yearFrom !== null || yearTo !== null) {
-      items = items.filter(item => {
-        const y = getPrimaryYear(item.year);
-        if (y === null) return true; // keep items with no year info rather than hiding them
-        if (yearFrom !== null && y < yearFrom) return false;
-        if (yearTo   !== null && y > yearTo)   return false;
-        return true;
-      });
-    }
-
-    if (activeSort !== 'default') {
-      items = [...items].sort((a, b) => {
-        if (activeSort === 'title-asc') return (a.title ?? '').localeCompare(b.title ?? '');
-        if (activeSort === 'title-desc') return (b.title ?? '').localeCompare(a.title ?? '');
-        const ya = getPrimaryYear(a.year) ?? 0;
-        const yb = getPrimaryYear(b.year) ?? 0;
-        if (activeSort === 'year-desc') return yb - ya;
-        if (activeSort === 'year-asc')  return ya - yb;
-        return 0;
-      });
-    }
-
-    return items;
-  }, [rawResults, yearFrom, yearTo, activeSort]);
-
   // ── Infinite scroll sentinel ───────────────────────────────────────────
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (isMultiGenreMode || !providerSupportsPagination) return;
+    if (!supportsInfiniteScroll) return;
+
     const el = sentinelRef.current;
     if (!el) return;
+
     const obs = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting && hasNextPage && !isFetchingNextPage) {
@@ -748,9 +552,10 @@ export function Search() {
       },
       { rootMargin: '800px', root: scrollContainerRef.current },
     );
+
     obs.observe(el);
     return () => obs.disconnect();
-  }, [isMultiGenreMode, providerSupportsPagination, hasNextPage, isFetchingNextPage, fetchNextPage]);
+  }, [supportsInfiniteScroll, hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   // ── Derived UI state ───────────────────────────────────────────────────
   const currentGenres  = activeType === 'anime' ? ANIME_GENRES : GENRES;
@@ -759,33 +564,22 @@ export function Search() {
     if (!normalizedGenreSearch) return currentGenres;
     return currentGenres.filter((genre) => genre.toLowerCase().includes(normalizedGenreSearch));
   }, [currentGenres, genreSearch]);
-  const supportsGenre  = !debouncedQuery;
-  const supportsFeed   = supportsGenre && (activeType === 'anime' || activeProvider === 'cinemeta');
+  const canUseGenreFilters = activeType === 'anime' || activeProvider === 'cinemeta';
+  const supportsBrowseControls = !trimmedDebouncedQuery;
+  const supportsGenreFilters = supportsBrowseControls && canUseGenreFilters;
+  const supportsFeed = supportsBrowseControls && canUseGenreFilters;
   const activeFeedLabel = activeType === 'anime'
     ? (KITSU_FEEDS.find(f => f.id === activeFeed)?.label ?? 'Trending')
     : (CINEMETA_FEEDS.find(f => f.id === activeFeed)?.label ?? 'Popular');
+  const kitsuBrowseNotice = useMemo(() => {
+    if (activeType !== 'anime' || trimmedDebouncedQuery) {
+      return null;
+    }
+
+    return `${activeFeedLabel} anime browse currently loads a single verified Kitsu page for reliability. Use search when you need a wider catalog.`;
+  }, [activeFeedLabel, activeType, trimmedDebouncedQuery]);
   const activeSortLabel = SORT_OPTIONS.find(s => s.id === activeSort)?.label ?? 'Default';
-
-  const isLoading = isMultiGenreMode
-    ? multiGenreLoading
-    : infiniteLoading;
-  const isFetching = isMultiGenreMode
-    ? multiGenreFetching
-    : infiniteFetching;
-  const isError = isMultiGenreMode
-    ? multiGenreError
-    : infiniteError;
-  const errorObj = isMultiGenreMode
-    ? multiGenreErrorObj
-    : infiniteErrorObj;
-
-  const pagesLoaded  = infiniteData?.pages?.length ?? 0;
-  const totalFetched = infiniteData?.pages ? countFetchedItems(infiniteData.pages) : 0;
-  // Show "All titles loaded" only when there genuinely were multiple pages of content
-  // For non-paginatable providers (Cinemeta), never show since there's only one batch
-  const showEndMsg = !isMultiGenreMode && providerSupportsPagination && !hasNextPage && pagesLoaded > 1;
-  const showSearchCapMsg = showEndMsg && totalFetched >= SEARCH_RESULT_CAP;
-  const showSkeleton = !isError && (isLoading || (isFetching && !isFetchingNextPage && rawResults.length === 0));
+  const showSkeleton = !isError && (isLoading || (isFetching && !isFetchingNextPage && results.length === 0));
 
   return (
     <div className="h-screen flex flex-col pt-5 container max-w-[1800px] mx-auto px-4 sm:px-6 md:pl-24 lg:px-8 lg:pl-28">
@@ -882,7 +676,10 @@ export function Search() {
                           {item.title}
                         </p>
                         <p className="text-[11px] text-zinc-500 mt-0.5">
-                          {[item.year?.split('-')[0], item.type === 'series' ? 'Series' : item.type === 'movie' ? 'Movie' : 'Anime']
+                          {[
+                            item.displayYear,
+                            item.type === 'series' ? 'Series' : item.type === 'movie' ? 'Movie' : 'Anime',
+                          ]
                             .filter(Boolean).join(' · ')}
                         </p>
                       </div>
@@ -952,7 +749,7 @@ export function Search() {
           )}
 
           {/* Genre */}
-          {supportsGenre && (
+          {supportsGenreFilters && (
             <Popover open={genrePopoverOpen} onOpenChange={(open) => { setGenrePopoverOpen(open); if (!open) setGenreSearch(''); }}>
               <PopoverTrigger asChild>
                 <Button variant="ghost"
@@ -1020,7 +817,7 @@ export function Search() {
           )}
 
           {/* Source (non-anime only, discover mode) */}
-          {supportsGenre && activeType !== 'anime' && (
+          {supportsBrowseControls && activeType !== 'anime' && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost"
@@ -1035,7 +832,7 @@ export function Search() {
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="bg-zinc-950/95 border-white/10 backdrop-blur-md rounded-md min-w-[140px] p-1.5">
                 {PROVIDERS.filter(p => p.types.includes(activeType)).map(p => (
-                  <DropdownMenuItem key={p.id} onClick={() => setActiveProvider(p.id)}
+                  <DropdownMenuItem key={p.id} onClick={() => handleProviderChange(p.id)}
                     className={cn("gap-2.5 rounded-md cursor-pointer text-[13px] py-2", activeProvider === p.id && 'bg-white/10 font-medium')}
                   >
                     {activeProvider === p.id ? <Check className="h-4 w-4 opacity-60 shrink-0" /> : <div className="w-4 shrink-0" />}
@@ -1047,7 +844,7 @@ export function Search() {
           )}
 
           {/* Year — compact popover with From/To */}
-          {supportsGenre && (
+          {supportsBrowseControls && (
             <Popover>
               <PopoverTrigger asChild>
                 <Button variant="ghost"
@@ -1198,30 +995,25 @@ export function Search() {
               <p className="font-medium text-red-400/80">Failed to load content</p>
               <p className="text-sm opacity-50">{getErrorMessage(errorObj)}</p>
             </div>
-          ) : filteredResults.length > 0 ? (
+          ) : results.length > 0 ? (
             <>
               {/* Result count bar */}
               <div className="flex items-center justify-between mb-3 px-1">
                 <span className="flex items-center gap-1.5 flex-wrap text-[12px] text-zinc-400">
-                  {debouncedQuery ? (
+                  {trimmedDebouncedQuery ? (
                     <>
-                      {filteredResults.length} results for &ldquo;{debouncedQuery}&rdquo;
+                      {results.length} results for &ldquo;{trimmedDebouncedQuery}&rdquo;
                       {activeType === 'anime' && ' in Anime'}
-                    </>
-                  ) : isMultiGenreMode ? (
-                    <>
-                      <span>{filteredResults.length} titles</span>
-                      <span className="opacity-40">— union of:</span>
-                      {activeGenres.map(g => (
-                        <Badge key={g} variant="outline" className="text-[10px] px-1.5 py-0 border-white/15">{g}</Badge>
-                      ))}
+
+                {kitsuBrowseNotice && (
+                  <div className="mb-3 rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[12px] leading-relaxed text-amber-100/80">
+                    {kitsuBrowseNotice}
+                  </div>
+                )}
                     </>
                   ) : (
                     <>
-                      {filteredResults.length} titles
-                      {rawResults.length !== filteredResults.length && (
-                        <span className="opacity-40 ml-0.5">of {rawResults.length} fetched</span>
-                      )}
+                      {results.length} titles
                       {supportsFeed && (
                         <span className="inline-flex items-center gap-1 text-zinc-400">
                           <span className="opacity-30 text-xs">·</span>
@@ -1244,11 +1036,11 @@ export function Search() {
               </div>
 
               <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-2.5">
-                {filteredResults.map(item => <MediaCard key={item.id} item={item} />)}
+                {results.map(item => <MediaCard key={item.id} item={item} />)}
               </div>
 
               {/* Infinite scroll sentinel (paginatable providers only) */}
-              {!isMultiGenreMode && providerSupportsPagination && (
+              {supportsInfiniteScroll && (
                 <div ref={sentinelRef} className="h-1 w-full mt-4" />
               )}
               {isFetchingNextPage && (
@@ -1257,44 +1049,19 @@ export function Search() {
                 </div>
               )}
               {showEndMsg && (
-                <p className="text-center text-xs text-zinc-600 py-6">
-                  {showSearchCapMsg
-                    ? `Showing top ${SEARCH_RESULT_CAP} results — refine your search for more`
-                    : 'All titles loaded'}
-                </p>
-              )}
-              {isMultiGenreMode && multiGenreSupportsPagination && (
-                <div className="flex justify-center py-6">
-                  <Button
-                    variant="outline"
-                    className="bg-white/[0.03] border-white/[0.08] hover:bg-white/[0.08] hover:border-white/20 text-white"
-                    disabled={!multiGenreHasNextPage || multiGenreIsFetchingNextPage}
-                    onClick={() => void fetchNextMultiGenrePage()}
-                  >
-                    {multiGenreIsFetchingNextPage
-                      ? 'Loading…'
-                      : multiGenreHasNextPage
-                        ? `Load more (${multiGenrePageSize} per genre)`
-                        : 'All genre results loaded'}
-                  </Button>
-                </div>
-              )}
-              {isMultiGenreMode && multiGenreIsFetchingNextPage && (
-                <div className="flex justify-center py-8">
-                  <Loader2 className="h-5 w-5 animate-spin text-white/30" />
-                </div>
+                <p className="text-center text-xs text-zinc-600 py-6">All titles loaded</p>
               )}
             </>
           ) : (
             <div className="flex flex-col items-center justify-center h-64 text-muted-foreground gap-1">
               <Filter className="h-10 w-10 mb-3 opacity-20" />
               <p className="font-medium">
-                {debouncedQuery ? `No results for \u201c${debouncedQuery}\u201d` : 'No content available'}
+                {trimmedDebouncedQuery ? `No results for \u201c${trimmedDebouncedQuery}\u201d` : 'No content available'}
               </p>
               <p className="text-sm opacity-50 mt-0.5">
-                {hasActiveFilters && !debouncedQuery
+                {hasActiveFilters && !trimmedDebouncedQuery
                   ? 'Try removing some filters'
-                  : debouncedQuery
+                  : trimmedDebouncedQuery
                     ? activeType === 'anime'
                       ? 'Try a different term or check the spelling'
                       : 'Try a different term or switch category'

@@ -1,7 +1,5 @@
 use crate::providers::{
     cinemeta::Cinemeta,
-    kitsu::Kitsu,
-    netflix::Netflix,
     realdebrid::{RealDebrid, UserInfo},
     MediaItem, Provider,
 };
@@ -14,21 +12,25 @@ use tauri::{command, AppHandle, Manager, State};
 use tauri_plugin_store::StoreExt;
 
 pub(crate) mod app_update_commands;
-pub(crate) mod browse_commands;
 pub(crate) mod config_commands;
 mod config_store;
 pub(crate) mod download_commands;
 mod episode_navigation;
 mod history_helpers;
+pub(crate) mod history_playback_commands;
+mod language;
 pub(crate) mod library_commands;
 pub(crate) mod list_commands;
 mod list_helpers;
 pub(crate) mod media_commands;
+mod media_normalization;
 pub(crate) mod next_playback_commands;
 pub(crate) mod playback_preferences_commands;
 pub(crate) mod playback_state;
 pub(crate) mod playback_state_commands;
 mod resume_store;
+pub(crate) mod search_commands;
+pub(crate) mod search_history_commands;
 mod startup_migrations;
 mod store_helpers;
 pub(crate) mod stream_commands;
@@ -47,6 +49,7 @@ use list_helpers::{
     list_item_store_key, list_meta_key, load_lists_order, UserList, UserListWithItems,
     LISTS_ORDER_KEY,
 };
+use media_normalization::normalize_media_items;
 use playback_state::PlaybackStateService;
 pub(crate) use startup_migrations::run_startup_migrations;
 use store_helpers::{
@@ -79,6 +82,7 @@ pub struct WatchProgress {
     pub last_stream_key: Option<String>,
     pub source_name: Option<String>,
     pub stream_family: Option<String>,
+    pub resume_start_time: Option<f64>,
 }
 
 const LIBRARY_INDEX_KEY: &str = "library_index";
@@ -87,18 +91,18 @@ const LIBRARY_ITEM_PREFIX: &str = "library_item:";
 const WATCH_STATUS_INDEX_KEY: &str = "watch_status_index";
 const WATCH_STATUS_MAP_KEY: &str = "statuses";
 const WATCH_STATUS_ITEM_PREFIX: &str = "watch_status:";
-/// Timeout for the first (highest-ranked) stream candidate. A tighter bound is appropriate
-/// because the best candidate is usually a cached/direct URL that resolves quickly; if it
-/// doesn't respond within this window, fallbacks are more likely to succeed.
-const BEST_STREAM_FIRST_CANDIDATE_TIMEOUT_SECS: u64 = 12;
-/// Timeout for second- and third-ranked stream candidates. Fallback streams may need a
-/// full RealDebrid resolution cycle, so they get the full window.
-const BEST_STREAM_CANDIDATE_TIMEOUT_SECS: u64 = 14;
+/// Timeout for the first (highest-ranked) stream candidate. Cached/direct URLs should resolve
+/// quickly in the happy path, so fail fast here and move on when the best candidate stalls.
+const BEST_STREAM_FIRST_CANDIDATE_TIMEOUT_SECS: u64 = 8;
+/// Timeout for lower-ranked recovery candidates. These may still require a debrid resolution hop,
+/// but keeping the window tighter avoids long failure chains when multiple candidates are bad.
+const BEST_STREAM_CANDIDATE_TIMEOUT_SECS: u64 = 10;
 const BEST_STREAM_MAX_CANDIDATES: usize = 8;
 const MAX_SEARCH_QUERY_CHARS: usize = 120;
 const SETTINGS_STORE_FILE: &str = "settings.json";
 const LIBRARY_STORE_FILE: &str = "library.json";
 const LISTS_STORE_FILE: &str = "lists.json";
+const SEARCH_HISTORY_STORE_FILE: &str = "search_history.json";
 const WATCH_STATUS_STORE_FILE: &str = "watch_status.json";
 
 pub(crate) struct PendingAppUpdate(pub(crate) Mutex<Option<tauri_plugin_updater::Update>>);
@@ -170,7 +174,10 @@ pub async fn get_trending_movies(
     provider: State<'_, Cinemeta>,
     genre: Option<String>,
 ) -> Result<Vec<MediaItem>, String> {
-    provider.get_trending("movie".to_string(), genre).await
+    provider
+        .get_trending("movie".to_string(), genre)
+        .await
+        .map(normalize_media_items)
 }
 
 #[command]
@@ -178,7 +185,10 @@ pub async fn get_trending_series(
     provider: State<'_, Cinemeta>,
     genre: Option<String>,
 ) -> Result<Vec<MediaItem>, String> {
-    provider.get_trending("series".to_string(), genre).await
+    provider
+        .get_trending("series".to_string(), genre)
+        .await
+        .map(normalize_media_items)
 }
 
 #[command]
@@ -186,68 +196,10 @@ pub async fn get_trending_anime(
     provider: State<'_, Cinemeta>,
     genre: Option<String>,
 ) -> Result<Vec<MediaItem>, String> {
-    provider.get_anime_trending(genre).await
-}
-
-#[command]
-pub async fn get_cinemeta_catalog(
-    provider: State<'_, Cinemeta>,
-    media_type: String,
-    catalog_id: String,
-    genre: Option<String>,
-    skip: Option<u32>,
-) -> Result<Vec<MediaItem>, String> {
-    let media_type = normalize_cinemeta_type(&media_type)
-        .ok_or_else(|| "Invalid media type. Expected movie or series.".to_string())?;
-    let catalog_id = normalize_cinemeta_catalog(&catalog_id)
-        .ok_or_else(|| "Invalid Cinemeta catalog.".to_string())?;
-    let genre = genre.and_then(|g| normalize_non_empty(&g));
-
     provider
-        .get_catalog(&media_type, &catalog_id, genre, skip)
+        .get_anime_trending(genre)
         .await
-}
-
-/// Browse-optimised variant that merges both `top` and `imdbRating` catalogs in
-/// parallel for maximum content (~70-90 unique items vs ~40-50 from one catalog).
-#[command]
-pub async fn get_cinemeta_discover(
-    provider: State<'_, Cinemeta>,
-    media_type: String,
-    catalog_id: String,
-    genre: Option<String>,
-) -> Result<Vec<MediaItem>, String> {
-    let media_type = normalize_cinemeta_type(&media_type)
-        .ok_or_else(|| "Invalid media type. Expected movie or series.".to_string())?;
-    let catalog_id = normalize_cinemeta_catalog(&catalog_id)
-        .ok_or_else(|| "Invalid Cinemeta catalog.".to_string())?;
-    let genre = genre.and_then(|g| normalize_non_empty(&g));
-
-    provider
-        .get_discover_catalog(&media_type, &catalog_id, genre)
-        .await
-}
-
-#[command]
-pub async fn search_media(
-    provider: State<'_, Cinemeta>,
-    query: String,
-    media_type: Option<String>,
-) -> Result<Vec<MediaItem>, String> {
-    let Some(query) = normalize_query(&query) else {
-        return Ok(Vec::new());
-    };
-
-    let media_type = match media_type.as_deref() {
-        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "movie" => Some("movie"),
-            "series" => Some("series"),
-            _ => return Err("Invalid media type for search. Expected movie or series.".to_string()),
-        },
-        None => None,
-    };
-
-    provider.search_with_media_type(&query, media_type).await
+        .map(normalize_media_items)
 }
 
 #[command]
@@ -322,42 +274,6 @@ pub async fn rd_logout(
     Ok(())
 }
 
-#[command]
-pub async fn get_netflix_catalog(
-    provider: State<'_, Netflix>,
-    catalog_id: String,
-    media_type: String,
-    skip: Option<u32>,
-) -> Result<Vec<MediaItem>, String> {
-    provider.get_catalog(&catalog_id, &media_type, skip).await
-}
-
-#[command]
-pub async fn get_kitsu_catalog(
-    provider: State<'_, Kitsu>,
-    catalog_id: String,
-    genre: Option<String>,
-    skip: Option<u32>,
-) -> Result<Vec<MediaItem>, String> {
-    let catalog_id =
-        normalize_non_empty(&catalog_id).ok_or_else(|| "Catalog ID is required.".to_string())?;
-    let genre = genre.and_then(|g| normalize_non_empty(&g));
-
-    provider.get_anime_catalog(&catalog_id, genre, skip).await
-}
-
-#[command]
-pub async fn search_kitsu(
-    provider: State<'_, Kitsu>,
-    query: String,
-) -> Result<Vec<MediaItem>, String> {
-    let Some(query) = normalize_query(&query) else {
-        return Ok(Vec::new());
-    };
-
-    provider.search_anime(&query).await
-}
-
 // ─── Skip Times ──────────────────────────────────────────────────────────────
 
 /// Fetch skippable segment data for an episode.
@@ -380,6 +296,7 @@ pub async fn get_skip_times(
 ) -> Result<Vec<crate::providers::skip_times::SkipSegment>, String> {
     let ep = episode.unwrap_or(1);
     let duration_val = duration.unwrap_or(0.0);
+    let duration_hint = duration.filter(|value| value.is_finite() && *value > 0.0);
 
     let is_anime = media_type == "anime" || id.starts_with("kitsu:");
 
@@ -408,7 +325,9 @@ pub async fn get_skip_times(
         });
 
         if let Some(iid) = effective_imdb {
-            let segments = skip_provider.get_introdb_segments(iid, s, ep).await;
+            let segments = skip_provider
+                .get_introdb_segments(iid, s, ep, duration_hint)
+                .await;
             return Ok(segments);
         }
     }

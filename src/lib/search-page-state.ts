@@ -53,9 +53,3 @@ export function areStringArraysEqual(left: string[], right: string[]): boolean {
   if (left.length !== right.length) return false;
   return left.every((value, index) => value === right[index]);
 }
-
-export function getPrimaryYear(value?: string): number | null {
-  if (!value) return null;
-  const parsed = Number.parseInt(value.split('-')[0] ?? '', 10);
-  return Number.isFinite(parsed) ? parsed : null;
-}

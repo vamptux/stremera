@@ -31,40 +31,6 @@ import { resolveTrailerEmbedUrl } from '@/lib/trailer-utils';
 const EPISODE_FETCH_PAGE_SIZE = 50;
 const EPISODE_DISPLAY_PAGE_SIZE = 4;
 
-function parseYearFromText(value?: string | null): number | null {
-  if (!value) return null;
-  const match = value.match(/\b(19|20)\d{2}\b/);
-  if (!match) return null;
-  const parsed = Number(match[0]);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function normalizeFranchiseTokens(title: string): string[] {
-  const stripped = title
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    // Strip common season/type markers
-    .replace(/\b(season|part|cour|movie|ova|ona|special|specials|final|edition|arc|tv)\b/g, ' ')
-    // Strip Roman numeral suffixes (II–X) so "Attack on Titan III" still matches "Attack on Titan"
-    .replace(/\b(ii|iii|iv|vi|vii|viii|ix)\b/g, ' ')
-    // Strip trailing standalone digits 2–9 used as season numbers
-    .replace(/\b([2-9])\b/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return stripped.split(' ').filter((token) => token.length >= 3);
-}
-
-function animeRelationScore(baseTokens: string[], relationTitle: string): number {
-  if (baseTokens.length === 0) return 0;
-  const relationTokens = new Set(normalizeFranchiseTokens(relationTitle));
-  if (relationTokens.size === 0) return 0;
-  let shared = 0;
-  for (const token of baseTokens) {
-    if (relationTokens.has(token)) shared += 1;
-  }
-  return shared / baseTokens.length;
-}
-
 function formatRelationRoleLabel(role?: string | null): string | null {
   if (!role) return null;
   const trimmed = role.trim();
@@ -75,137 +41,6 @@ function formatRelationRoleLabel(role?: string | null): string | null {
     .filter(Boolean)
     .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1).toLowerCase())
     .join(' ');
-}
-
-function relationRolePriority(role?: string | null): number {
-  switch ((role ?? '').trim().toLowerCase()) {
-    case 'sequel':
-    case 'prequel':
-      return 5;
-    case 'side_story':
-    case 'spin_off':
-    case 'spinoff':
-      return 4;
-    case 'alternative_setting':
-    case 'alternative_version':
-      return 3;
-    case 'parent_story':
-    case 'full_story':
-    case 'summary':
-      return 2;
-    default:
-      return 1;
-  }
-}
-
-// Maps lowercase Roman numeral suffixes (II–X) to season numbers.
-// 'v' is intentionally excluded — it's too short and collision-prone (e.g. "Black Clover vs …").
-const ROMAN_NUMERAL_SEASON: Readonly<Record<string, number>> = {
-  ii: 2,
-  iii: 3,
-  iv: 4,
-  vi: 6,
-  vii: 7,
-  viii: 8,
-  ix: 9,
-  x: 10,
-} as const;
-
-function extractSeasonNumberFromTitle(title: string): number | null {
-  const normalized = title.toLowerCase().trim();
-
-  // "Season N" with optional separator  (e.g. "Season 2", "Season: 3")
-  const directSeason = normalized.match(/\bseason\s*[:\-\u2013]?\s*(\d{1,2})\b/);
-  if (directSeason) {
-    const parsed = Number(directSeason[1]);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
-
-  // "Nth Season"  (e.g. "2nd Season", "3rd Season")
-  const ordinalSeason = normalized.match(/\b(\d{1,2})(?:st|nd|rd|th)\s+season\b/);
-  if (ordinalSeason) {
-    const parsed = Number(ordinalSeason[1]);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
-
-  // "Part N"  (e.g. "Demon Slayer: Part 2", "Attack on Titan Final Part 3")
-  const partNumber = normalized.match(/\bpart\s+(\d{1,2})\b/);
-  if (partNumber) {
-    const parsed = Number(partNumber[1]);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
-
-  // "Part Roman"  (e.g. "Part II", "Part III")
-  const partRoman = normalized.match(/\bpart\s+(ii|iii|iv|vi|vii|viii|ix|x)\b/);
-  if (partRoman) {
-    const val = ROMAN_NUMERAL_SEASON[partRoman[1]];
-    if (val) return val;
-  }
-
-  // Roman numeral suffix  (e.g. "Sword Art Online II", "Tokyo Ghoul:re III")
-  // Must appear at the end or just before a subtitle separator to avoid false positives.
-  const romanSuffix = normalized.match(/[\s:]+\s*(ii|iii|iv|vi|vii|viii|ix|x)\s*(?:[:\-\u2013]|$)/);
-  if (romanSuffix) {
-    const val = ROMAN_NUMERAL_SEASON[romanSuffix[1]];
-    if (val) return val;
-  }
-
-  // Trailing lone digit 2–9  (e.g. "Re:Zero 2", "Overlord 4")
-  // Only match if it is the very last token after a word boundary.
-  const trailingDigit = normalized.match(/[\s:]([2-9])\s*$/);
-  if (trailingDigit) {
-    return Number(trailingDigit[1]);
-  }
-
-  return null;
-}
-
-// Returns season + optional part number for compound titles like "Season 3 Part 2".
-function extractSeasonInfoFromTitle(title: string): { season: number; part?: number } | null {
-  const normalized = title.toLowerCase().trim();
-
-  // "Season N Part M"  (e.g. "Attack on Titan Season 3 Part 2")
-  const seasonPart = normalized.match(/\bseason\s*[:\-\u2013]?\s*(\d{1,2})\s+part\s+(\d{1,2})\b/);
-  if (seasonPart) {
-    const season = Number(seasonPart[1]);
-    const part = Number(seasonPart[2]);
-    if (Number.isFinite(season) && season > 0 && Number.isFinite(part) && part > 0) {
-      return { season, part };
-    }
-  }
-
-  // "Season N Part Roman"  (e.g. "Season 3 Part II")
-  const seasonPartRoman = normalized.match(
-    /\bseason\s*[:\-\u2013]?\s*(\d{1,2})\s+part\s+(ii|iii|iv|vi|vii|viii|ix|x)\b/,
-  );
-  if (seasonPartRoman) {
-    const season = Number(seasonPartRoman[1]);
-    const part = ROMAN_NUMERAL_SEASON[seasonPartRoman[2]];
-    if (Number.isFinite(season) && season > 0 && part) {
-      return { season, part };
-    }
-  }
-
-  // Fall back to single-number extraction (no part)
-  const seasonNumber = extractSeasonNumberFromTitle(title);
-  if (seasonNumber !== null) return { season: seasonNumber };
-
-  return null;
-}
-
-function formatSeasonInfoLabel(seasonInfo: { season: number; part?: number }): string {
-  return `Season ${seasonInfo.season}${seasonInfo.part ? ` Part ${seasonInfo.part}` : ''}`;
-}
-
-function buildRelationContextLabel(relation: MediaItem): string | null {
-  const seasonInfo = extractSeasonInfoFromTitle(relation.title || '');
-  const year = parseYearFromText(relation.year);
-
-  if (!seasonInfo && year === null) return null;
-  if (!seasonInfo) return `${year}`;
-
-  const seasonLabel = formatSeasonInfoLabel(seasonInfo);
-  return year !== null ? `${seasonLabel} • ${year}` : seasonLabel;
 }
 
 type DetailsTab = 'episodes' | 'relations' | 'anime-metadata';
@@ -385,7 +220,6 @@ function DetailsContent() {
     isLoadingWatchHistory: isLoadingWatchHistoryForItem,
   });
 
-  const isAnimeLike = !!(isKitsuRoute || effectiveRouteType === 'anime' || item?.id?.startsWith('kitsu:'));
   const [activeTab, setActiveTab] = useState<DetailsTab>('episodes');
 
   const prefetchInlineDetailsTarget = useCallback(
@@ -451,7 +285,7 @@ function DetailsContent() {
     [baseRouteKey, effectiveRouteId, effectiveRouteType, resetEpisodePane, selectSeason],
   );
 
-  const intelligentRelations = useMemo(() => {
+  const relatedItems = useMemo(() => {
     const relations = item?.relations ?? [];
     if (relations.length === 0) return [];
 
@@ -461,46 +295,13 @@ function DetailsContent() {
       if (!deduped.has(relation.id)) deduped.set(relation.id, relation);
     });
 
-    const relationItems = Array.from(deduped.values());
-    if (!item) return relationItems;
-
-    const baseTokens = normalizeFranchiseTokens(item.title || '');
-
-    const scored = relationItems.map((relation) => {
-      const score = isAnimeLike ? animeRelationScore(baseTokens, relation.title || '') : 1;
-      return {
-        relation,
-        score,
-        rolePriority: relationRolePriority(relation.relationRole),
-        year: parseYearFromText(relation.year),
-      };
-    });
-
-    const strictAnimeMatches = isAnimeLike
-      ? scored.filter((entry) => {
-          const seasonInfo = extractSeasonInfoFromTitle(entry.relation.title || '');
-          const minimumScore = seasonInfo?.part ? 0.22 : 0.34;
-          return entry.score >= minimumScore;
-        })
-      : scored;
-    const effective = strictAnimeMatches.length > 0 ? strictAnimeMatches : scored;
-
-    effective.sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      if (b.rolePriority !== a.rolePriority) return b.rolePriority - a.rolePriority;
-      if (a.year !== null && b.year !== null && a.year !== b.year) return a.year - b.year;
-      if (a.year === null && b.year !== null) return 1;
-      if (a.year !== null && b.year === null) return -1;
-      return a.relation.title.localeCompare(b.relation.title);
-    });
-
-    return effective.map((entry) => entry.relation);
-  }, [item, isAnimeLike]);
+    return Array.from(deduped.values());
+  }, [item?.relations]);
 
   const hasEpisodesTab =
     item?.type === 'series' &&
     (shouldUsePagedEpisodes || !!item?.episodes?.length || seasons.length > 0);
-  const hasRelationsTab = intelligentRelations.length > 0;
+  const hasRelationsTab = relatedItems.length > 0;
   const hasAnimeMetadataTab = !!item?.id?.startsWith('kitsu:');
   const availableTabs = useMemo(() => {
     const tabs: DetailsTab[] = [];
@@ -605,7 +406,15 @@ function DetailsContent() {
 
   const openEpisodeStreamSelector = useCallback(
     async (
-      episodeInput: Pick<Episode, 'season' | 'episode' | 'imdbId' | 'imdbSeason' | 'imdbEpisode'>,
+      episodeInput: Pick<
+        Episode,
+        | 'season'
+        | 'episode'
+        | 'streamLookupId'
+        | 'streamSeason'
+        | 'streamEpisode'
+        | 'aniskipEpisode'
+      >,
       options?: {
         overview?: string;
         isCancelled?: () => boolean;
@@ -690,9 +499,10 @@ function DetailsContent() {
         {
           season: reopenSeason,
           episode: reopenEpisode,
-          imdbId: targetEpisode?.imdbId,
-          imdbSeason: targetEpisode?.imdbSeason,
-          imdbEpisode: targetEpisode?.imdbEpisode,
+          streamLookupId: targetEpisode?.streamLookupId,
+          streamSeason: targetEpisode?.streamSeason,
+          streamEpisode: targetEpisode?.streamEpisode,
+          aniskipEpisode: targetEpisode?.aniskipEpisode,
         },
         {
           overview: targetEpisode?.overview || item.description,
@@ -977,7 +787,7 @@ function DetailsContent() {
 
                 {/* Metadata Row */}
                 <div className='flex flex-wrap items-center gap-4 text-sm font-medium text-white/90'>
-                  <span>{item.year?.split('-')[0] || 'Unknown'}</span>
+                  <span>{item.displayYear ?? 'Unknown'}</span>
                   
                   {item.type === 'series' && (
                     <span>{hasEpisodesTab && seasonCount > 0 ? `${seasonCount} Seasons` : 'TV Series'}</span>
@@ -1330,7 +1140,7 @@ function DetailsContent() {
               className='mt-0 focus-visible:outline-none animate-in fade-in slide-in-from-bottom-4 duration-500'
             >
               <div className='grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6'>
-                {intelligentRelations.map((rel, i) => (
+                {relatedItems.map((rel, i) => (
                   <motion.div
                     initial={{ opacity: 0, scale: 0.9 }}
                     whileInView={{ opacity: 1, scale: 1 }}
@@ -1341,23 +1151,29 @@ function DetailsContent() {
                     <div
                       className='space-y-2'
                       onMouseEnter={() => {
-                        const preferredSeason = extractSeasonNumberFromTitle(rel.title || '');
                         const relationType = rel.id.startsWith('kitsu:') ? 'anime' : rel.type;
-                        prefetchInlineDetailsTarget(relationType, rel.id, preferredSeason);
+                        prefetchInlineDetailsTarget(
+                          relationType,
+                          rel.id,
+                          rel.relationPreferredSeason,
+                        );
                       }}
                     >
                       <MediaCard
                         item={rel}
-                        subtitle={buildRelationContextLabel(rel) ?? undefined}
+                        subtitle={rel.relationContextLabel ?? undefined}
                         onPlay={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
-                          const preferredSeason = extractSeasonNumberFromTitle(rel.title || '');
                           const relationType = rel.id.startsWith('kitsu:') ? 'anime' : rel.type;
-                          handleInlineDetailsSwitch(relationType, rel.id, preferredSeason);
+                          handleInlineDetailsSwitch(
+                            relationType,
+                            rel.id,
+                            rel.relationPreferredSeason,
+                          );
                         }}
                       />
-                      {(formatRelationRoleLabel(rel.relationRole) || buildRelationContextLabel(rel)) && (
+                      {(formatRelationRoleLabel(rel.relationRole) || rel.relationContextLabel) && (
                         <div className='flex items-center gap-1.5 pt-1.5'>
                           {formatRelationRoleLabel(rel.relationRole) && (
                             <span
@@ -1369,9 +1185,9 @@ function DetailsContent() {
                               {formatRelationRoleLabel(rel.relationRole)}
                             </span>
                           )}
-                          {buildRelationContextLabel(rel) && (
+                          {rel.relationContextLabel && (
                             <span className='text-[10px] text-zinc-500 leading-none whitespace-nowrap'>
-                              {buildRelationContextLabel(rel)}
+                              {rel.relationContextLabel}
                             </span>
                           )}
                         </div>

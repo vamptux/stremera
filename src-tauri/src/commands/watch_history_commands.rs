@@ -1,5 +1,6 @@
 use super::history_helpers::{
-    build_history_key, choose_continue_watching_entry_with_source_health,
+    annotate_resume_start_time, build_history_key,
+    choose_continue_watching_entry_with_source_health,
     choose_exact_watch_progress_entry_with_source_health,
     choose_watch_history_entry_with_source_health, continue_watching_priority_score,
     sanitize_watch_progress, should_skip_watch_progress_save,
@@ -59,6 +60,15 @@ fn build_continue_watching_entries(
     list
 }
 
+fn annotate_resume_metadata(mut item: WatchProgress) -> WatchProgress {
+    annotate_resume_start_time(&mut item);
+    item
+}
+
+fn annotate_resume_metadata_list(items: Vec<WatchProgress>) -> Vec<WatchProgress> {
+    items.into_iter().map(annotate_resume_metadata).collect()
+}
+
 #[command]
 pub async fn save_watch_progress(
     app: AppHandle,
@@ -110,9 +120,8 @@ pub async fn get_watch_history(
             .filter_map(|(_, item)| item.source_name.as_deref()),
     )?;
 
-    Ok(build_unique_watch_history_entries(
-        entries,
-        &source_health_priorities,
+    Ok(annotate_resume_metadata_list(
+        build_unique_watch_history_entries(entries, &source_health_priorities),
     ))
 }
 
@@ -129,9 +138,8 @@ pub async fn get_continue_watching(
             .filter_map(|(_, item)| item.source_name.as_deref()),
     )?;
 
-    Ok(build_continue_watching_entries(
-        entries,
-        &source_health_priorities,
+    Ok(annotate_resume_metadata_list(
+        build_continue_watching_entries(entries, &source_health_priorities),
     ))
 }
 
@@ -147,7 +155,7 @@ pub async fn get_watch_history_full(
         .collect();
 
     list.sort_by(|a, b| b.last_watched.cmp(&a.last_watched));
-    Ok(list)
+    Ok(annotate_resume_metadata_list(list))
 }
 
 #[command]
@@ -174,7 +182,7 @@ pub async fn get_watch_history_for_id(
         .collect();
 
     list.sort_by(|a, b| b.last_watched.cmp(&a.last_watched));
-    Ok(list)
+    Ok(annotate_resume_metadata_list(list))
 }
 
 #[command]
@@ -203,7 +211,8 @@ pub async fn get_watch_progress(
         season,
         episode,
         Some(&source_health_priorities),
-    ))
+    )
+    .map(annotate_resume_metadata))
 }
 
 #[command]

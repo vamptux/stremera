@@ -22,12 +22,12 @@ export function AppUpdateManager() {
         const update = await checkForUpdates();
         if (!update) return;
 
-        const lastNotifiedVersion = getLastNotifiedAppUpdateVersion();
+        const lastNotifiedVersion = await getLastNotifiedAppUpdateVersion();
         if (lastNotifiedVersion === update.version) {
           return;
         }
 
-        setLastNotifiedAppUpdateVersion(update.version);
+        await setLastNotifiedAppUpdateVersion(update.version);
 
         toast.info(`Update ${update.version} is ready`, {
           description:

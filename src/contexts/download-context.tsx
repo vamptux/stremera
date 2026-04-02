@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { api, DownloadItem, StartDownloadParams, DownloadProgressEvent, getErrorMessage } from '@/lib/api';
+import {
+  api,
+  getErrorMessage,
+  type DownloadItem,
+  type DownloadProgressEvent,
+  type StartDownloadParams,
+} from '@/lib/api';
 import { DownloadContext } from '@/contexts/download-context-core';
 import { toast } from 'sonner';
 
@@ -8,6 +14,12 @@ const isDev = import.meta.env.DEV;
 
 export function DownloadProvider({ children }: { children: React.ReactNode }) {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
+
+  const refetchDownloads = useCallback(async () => {
+    const items = await api.getDownloads();
+    setDownloads(items);
+    return items;
+  }, []);
 
   // Initial fetch
   useEffect(() => {
@@ -64,114 +76,97 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const startDownload = useCallback(async (params: StartDownloadParams) => {
-    try {
-      const id = await api.startDownload(params);
-      const newDownload: DownloadItem = {
-        id,
-        title: params.title,
-        url: params.url,
-        filePath: params.filePath,
-        fileName: params.fileName,
-        totalSize: 0,
-        downloadedSize: 0,
-        speed: 0,
-        progress: 0,
-        status: 'pending',
-        createdAt: Date.now() / 1000,
-        updatedAt: Date.now() / 1000,
-        poster: params.poster,
-        mediaType: params.mediaType,
-        bandwidthLimit: params.bandwidthLimit,
-        mediaId: params.mediaId,
-        season: params.season,
-        episode: params.episode,
-      };
-      setDownloads((prev) => [newDownload, ...prev]);
-      toast.success('Download started', { description: params.title });
-      return id;
-    } catch (e) {
-      toast.error('Failed to start download', { description: getErrorMessage(e) });
-      throw e;
-    }
-  }, []);
+  const startDownload = useCallback(
+    async (params: StartDownloadParams) => {
+      try {
+        const id = await api.startDownload(params);
+        await refetchDownloads();
+        toast.success('Download started', { description: params.title });
+        return id;
+      } catch (e) {
+        toast.error('Failed to start download', { description: getErrorMessage(e) });
+        throw e;
+      }
+    },
+    [refetchDownloads],
+  );
 
-  const pauseDownload = useCallback(async (id: string) => {
-    try {
-      await api.pauseDownload(id);
-      setDownloads((prev) =>
-        prev.map((d) => (d.id === id ? { ...d, status: 'paused', speed: 0 } : d))
-      );
-    } catch (e) {
-      toast.error('Failed to pause download', { description: getErrorMessage(e) });
-    }
-  }, []);
+  const pauseDownload = useCallback(
+    async (id: string) => {
+      try {
+        await api.pauseDownload(id);
+        await refetchDownloads();
+      } catch (e) {
+        toast.error('Failed to pause download', { description: getErrorMessage(e) });
+      }
+    },
+    [refetchDownloads],
+  );
 
-  const resumeDownload = useCallback(async (id: string) => {
-    try {
-      await api.resumeDownload(id);
-      // Optimistic update — set to downloading so the UI reacts immediately.
-      // The backend will emit download://progress events that reconcile the real state.
-      setDownloads((prev) =>
-        prev.map((d) => (d.id === id ? { ...d, status: 'downloading' } : d))
-      );
-    } catch (e) {
-      toast.error('Failed to resume download', { description: getErrorMessage(e) });
-    }
-  }, []);
+  const resumeDownload = useCallback(
+    async (id: string) => {
+      try {
+        await api.resumeDownload(id);
+        await refetchDownloads();
+      } catch (e) {
+        toast.error('Failed to resume download', { description: getErrorMessage(e) });
+      }
+    },
+    [refetchDownloads],
+  );
 
-  const cancelDownload = useCallback(async (id: string) => {
-    try {
-      await api.cancelDownload(id);
-      // Backend emits download://progress with status=error, so we don't need
-      // an optimistic update here. The event listener will reconcile the state.
-    } catch (e) {
-      toast.error('Failed to cancel download', { description: getErrorMessage(e) });
-    }
-  }, []);
+  const cancelDownload = useCallback(
+    async (id: string) => {
+      try {
+        await api.cancelDownload(id);
+        await refetchDownloads();
+      } catch (e) {
+        toast.error('Failed to cancel download', { description: getErrorMessage(e) });
+      }
+    },
+    [refetchDownloads],
+  );
 
-  const removeDownload = useCallback(async (id: string, deleteFile: boolean) => {
-    try {
-      await api.removeDownload(id, deleteFile);
-      setDownloads((prev) => prev.filter((d) => d.id !== id));
-      toast.success('Download removed');
-    } catch (e) {
-      toast.error('Failed to remove download', { description: getErrorMessage(e) });
-    }
-  }, []);
+  const removeDownload = useCallback(
+    async (id: string, deleteFile: boolean) => {
+      try {
+        await api.removeDownload(id, deleteFile);
+        await refetchDownloads();
+        toast.success('Download removed');
+      } catch (e) {
+        toast.error('Failed to remove download', { description: getErrorMessage(e) });
+      }
+    },
+    [refetchDownloads],
+  );
 
-  const refetchDownloads = useCallback(async () => {
+  const refreshDownloads = useCallback(async () => {
     try {
-      const items = await api.getDownloads();
-      setDownloads(items);
+      await refetchDownloads();
     } catch (e) {
       if (isDev) console.error('Failed to refetch downloads:', e);
       toast.error('Failed to refresh downloads', { description: getErrorMessage(e) });
     }
-  }, []);
-
-  const pauseActiveDownloads = useCallback(async () => {
-    try {
-      const pausedCount = await api.pauseActiveDownloads();
-      if (pausedCount === 0) return 0;
-
-      setDownloads((prev) =>
-        prev.map((download) =>
-          download.status === 'downloading' || download.status === 'pending'
-            ? { ...download, status: 'paused', speed: 0 }
-            : download,
-        ),
-      );
-      await refetchDownloads();
-      toast.success(
-        pausedCount === 1 ? 'Paused 1 download' : `Paused ${pausedCount} downloads`,
-      );
-      return pausedCount;
-    } catch (e) {
-      toast.error('Failed to pause active downloads', { description: getErrorMessage(e) });
-      throw e;
-    }
   }, [refetchDownloads]);
+
+  const pauseActiveDownloads = useCallback(
+    async () => {
+      try {
+        const pausedCount = await api.pauseActiveDownloads();
+        if (pausedCount === 0) return 0;
+
+        await refetchDownloads();
+        toast.success(
+          pausedCount === 1 ? 'Paused 1 download' : `Paused ${pausedCount} downloads`,
+        );
+        return pausedCount;
+      } catch (e) {
+        toast.error('Failed to pause active downloads', { description: getErrorMessage(e) });
+        throw e;
+      }
+    },
+    [refetchDownloads],
+  );
 
   const clearCompletedDownloads = useCallback(
     async (deleteFile = false) => {
@@ -179,7 +174,6 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
         const clearedCount = await api.clearCompletedDownloads(deleteFile);
         if (clearedCount === 0) return 0;
 
-        setDownloads((prev) => prev.filter((download) => download.status !== 'completed'));
         await refetchDownloads();
         toast.success(
           clearedCount === 1
@@ -197,10 +191,18 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     [refetchDownloads],
   );
 
-  const setBandwidthLimit = useCallback(async (limit?: number) => {
-    await api.setDownloadBandwidth(limit);
-    toast.success(limit ? `Bandwidth limited to ${(limit / 1024 / 1024).toFixed(1)} MB/s` : 'Bandwidth limit removed');
-  }, []);
+  const setBandwidthLimit = useCallback(
+    async (limit?: number) => {
+      await api.setDownloadBandwidth(limit);
+      await refetchDownloads();
+      toast.success(
+        limit
+          ? `Bandwidth limited to ${(limit / 1024 / 1024).toFixed(1)} MB/s`
+          : 'Bandwidth limit removed',
+      );
+    },
+    [refetchDownloads],
+  );
 
   const activeCount = downloads.filter((d) => d.status === 'downloading').length;
 
@@ -216,7 +218,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       removeDownload,
       clearCompletedDownloads,
       setBandwidthLimit,
-      refetchDownloads,
+      refetchDownloads: refreshDownloads,
     }),
     [
       downloads,
@@ -229,7 +231,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       removeDownload,
       clearCompletedDownloads,
       setBandwidthLimit,
-      refetchDownloads,
+      refreshDownloads,
     ],
   );
 

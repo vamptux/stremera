@@ -33,6 +33,7 @@ import {
   buildPlayerNavigationTarget,
   type PlayerRouteMediaType,
 } from '@/lib/player-navigation';
+import { getLatestEpisodeResumeStartTime } from '@/lib/history-playback';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 
@@ -358,8 +359,8 @@ function DownloadCard({ item }: { item: DownloadItem }) {
     let startTime = 0;
     if (id !== 'local') {
       try {
-        const prog = await api.getWatchProgress(id, type, item.season, item.episode);
-        if (prog && prog.position > 0) startTime = prog.position;
+        startTime =
+          (await getLatestEpisodeResumeStartTime(id, type, item.season, item.episode)) ?? 0;
       } catch { /* ignore — player will self-recover */ }
     }
 

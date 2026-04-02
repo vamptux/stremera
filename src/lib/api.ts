@@ -1,51 +1,18 @@
-import { invoke } from '@tauri-apps/api/core';
 import type { PlaybackStreamOutcomeReport } from '@/lib/playback-stream-health';
-import { handlePreviewInvoke } from '@/lib/api-preview-mocks';
+import { safeInvoke } from '@/lib/api-core';
 import {
-  buildStreamRankingCacheKey,
-  buildStreamRankingInvokePayload,
-  type StreamRankingOptions,
-} from '@/lib/stream-ranking';
-
-const isDev = import.meta.env.DEV;
-
-function isTauriDesktopRuntime(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-}
-
-// Shared error-message extractor (exported for use across the app)
-export function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
-  if (typeof error === 'object' && error !== null) {
-    const anyErr = error as Record<string, unknown>;
-    if (typeof anyErr.message === 'string' && anyErr.message) return anyErr.message;
-    if (typeof anyErr.error === 'string' && anyErr.error) return anyErr.error;
-    if (typeof anyErr.err === 'string' && anyErr.err) return anyErr.err;
-    try {
-      return JSON.stringify(error);
-    } catch {
-      return String(error);
-    }
-  }
-  return String(error);
-}
-
-async function safeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  try {
-    if (isTauriDesktopRuntime()) {
-      return await invoke<T>(command, args);
-    }
-
-    if (isDev) console.warn(`[Preview] invoking ${command}`);
-    return await handlePreviewInvoke<T>(command, args);
-  } catch (e) {
-    if (isDev) console.error(`Raw invoke error for ${command}:`, e);
-    const message = getErrorMessage(e);
-    if (isDev) console.error(`Processed error message for ${command}:`, message);
-    throw new Error(message || 'Unknown error (empty message)');
-  }
-}
+  BEST_STREAM_CACHE_TTL_MS,
+  MEDIA_DETAILS_CACHE_TTL_MS,
+  RESOLVE_STREAM_CACHE_TTL_MS,
+  SEARCH_CACHE_TTL_MS,
+  STREAMS_CACHE_TTL_MS,
+  createRequestCache,
+} from '@/lib/api-cache';
+import type { StreamRankingOptions } from '@/lib/stream-ranking';
+import { createDiscoveryApi } from '@/lib/api-discovery';
+import { createPlaybackApi } from '@/lib/api-playback';
+import { createStoreApi } from '@/lib/api-store';
+export { getErrorMessage } from '@/lib/api-core';
 
 export interface MediaItem {
   id: string;
@@ -55,8 +22,12 @@ export interface MediaItem {
   logo?: string;
   description?: string;
   year?: string;
+  primaryYear?: number;
+  displayYear?: string;
   type: 'movie' | 'series';
   relationRole?: string;
+  relationContextLabel?: string;
+  relationPreferredSeason?: number;
 }
 
 export interface Episode {
@@ -65,6 +36,7 @@ export interface Episode {
   season: number;
   episode: number;
   released?: string;
+  releaseDate?: string;
   overview?: string;
   thumbnail?: string;
   /** IMDB ID of the parent series (e.g. "tt0388629") — present for Kitsu anime */
@@ -73,6 +45,14 @@ export interface Episode {
   imdbSeason?: number;
   /** IMDB episode number within the IMDB season */
   imdbEpisode?: number;
+  /** Backend-normalized playback lookup ID for this episode. */
+  streamLookupId?: string;
+  /** Backend-normalized source season for stream resolution. */
+  streamSeason?: number;
+  /** Backend-normalized source episode for stream resolution. */
+  streamEpisode?: number;
+  /** Backend-normalized AniSkip episode number for this episode. */
+  aniskipEpisode?: number;
 }
 
 export interface Trailer {
@@ -89,6 +69,8 @@ export interface MediaDetails extends MediaItem {
   genres?: string[];
   trailers?: Trailer[];
   episodes?: Episode[];
+  releaseDate?: string;
+  seasonYears?: Record<string, string>;
   relations?: MediaItem[];
 }
 
@@ -140,6 +122,7 @@ export interface TorrentioStream {
   infoHash?: string;
   url?: string;
   fileIdx?: number;
+  streamKey: string;
   behaviorHints?: {
     bingeGroup?: string;
     filename?: string;
@@ -153,6 +136,43 @@ export interface TorrentioStream {
   stream_family?: string;
   /** Backend coordinator explanation for why this stream ranks where it does. */
   recommendation_reasons?: string[];
+  /** Backend-prepared presentation facts so the UI can render without reparsing stream text. */
+  presentation: TorrentioStreamPresentation;
+}
+
+export type TorrentioStreamResolution = '4k' | '1080p' | '720p' | 'sd';
+export type TorrentioStreamDeliveryKind = 'cached' | 'http' | 'torrent';
+
+export interface TorrentioStreamPresentation {
+  sourceName: string;
+  streamTitle: string;
+  resolution: TorrentioStreamResolution;
+  deliveryKind: TorrentioStreamDeliveryKind;
+  deliveryLabel: string;
+  isInstantlyPlayable: boolean;
+  hdrLabel?: string;
+  audioLabel?: string;
+  codecLabel?: string;
+  multiAudioLabel?: string;
+  sizeLabel?: string;
+  isBatch: boolean;
+}
+
+export type StreamSourceHealthStatus = 'healthy' | 'degraded' | 'offline';
+
+export interface StreamSourceSummary {
+  id: string;
+  name: string;
+  status: StreamSourceHealthStatus;
+  streamCount: number;
+  latencyMs?: number;
+  errorMessage?: string;
+}
+
+export interface StreamSelectorData {
+  streams: TorrentioStream[];
+  sourceSummaries: StreamSourceSummary[];
+  fatalErrorMessage?: string | null;
 }
 
 export interface PreparedPlaybackStream {
@@ -181,15 +201,6 @@ export interface NextPlaybackPlan {
   lookupKey: string;
   primaryStream?: PreparedPlaybackStream;
   backupStream?: PreparedPlaybackStream;
-}
-
-export interface EpisodeStreamMapping {
-  lookupId: string;
-  canonicalSeason: number;
-  canonicalEpisode: number;
-  sourceSeason: number;
-  sourceEpisode: number;
-  aniskipEpisode: number;
 }
 
 export interface AnimeCharacterProfile {
@@ -245,6 +256,23 @@ export interface ResolveBestStreamOptions extends StreamRankingOptions {
   bypassCache?: boolean;
 }
 
+export interface RecoverPlaybackStreamOptions extends StreamRankingOptions {
+  mediaType: string;
+  mediaId: string;
+  streamSeason?: number;
+  streamEpisode?: number;
+  absoluteSeason?: number;
+  absoluteEpisode?: number;
+  streamLookupId?: string;
+  failedStreamUrl?: string;
+  failedStreamFormat?: string;
+  failedSourceName?: string;
+  failedStreamFamily?: string;
+  failedStreamKey?: string;
+  outcome: Exclude<PlaybackStreamOutcomeReport['outcome'], 'verified'>;
+  preparedBackupStream?: PreparedPlaybackStream;
+}
+
 /** A user-configured addon source compatible with Stremera's addon pipeline. */
 export interface AddonConfig {
   id: string;
@@ -260,161 +288,15 @@ export interface AddonManifest {
   version?: string;
 }
 
-const BEST_STREAM_CACHE_TTL_MS = 1000 * 60 * 8;
-const STREAMS_CACHE_TTL_MS = 1000 * 60 * 3;
-const MEDIA_DETAILS_CACHE_TTL_MS = 1000 * 60 * 30;
-const SEARCH_CACHE_TTL_MS = 1000 * 60 * 2;
-const API_CACHE_MAX_ENTRIES = 200;
-const RESOLVE_STREAM_CACHE_TTL_MS = 1000 * 60 * 5;
-const MULTI_GENRE_CACHE_TTL_MS = 1000 * 60 * 5;
-const SEARCH_QUERY_MAX_CHARS = 120;
-
-type TimedCacheEntry<T> = { value: T; expiresAt: number };
-
-interface RequestCache<T> {
-  ttlMs: number;
-  values: Map<string, TimedCacheEntry<T>>;
-  inFlight: Map<string, Promise<T>>;
-  clear: () => void;
-}
-
-function createRequestCache<T>(ttlMs: number): RequestCache<T> {
-  const values = new Map<string, TimedCacheEntry<T>>();
-  const inFlight = new Map<string, Promise<T>>();
-
-  return {
-    ttlMs,
-    values,
-    inFlight,
-    clear: () => {
-      values.clear();
-      inFlight.clear();
-    },
-  };
-}
-
-const bestStreamRequestCache = createRequestCache<BestResolvedStream>(BEST_STREAM_CACHE_TTL_MS);
-const resolveStreamRequestCache = createRequestCache<ResolvedStream>(RESOLVE_STREAM_CACHE_TTL_MS);
-const streamsRequestCache = createRequestCache<TorrentioStream[]>(STREAMS_CACHE_TTL_MS);
-const mediaDetailsRequestCache = createRequestCache<MediaDetails>(MEDIA_DETAILS_CACHE_TTL_MS);
-const searchRequestCache = createRequestCache<MediaItem[]>(SEARCH_CACHE_TTL_MS);
-const multiGenreRequestCache = createRequestCache<MultiGenreCatalogPage>(MULTI_GENRE_CACHE_TTL_MS);
-
-function pruneTimedCache<T>(
-  cache: Map<string, TimedCacheEntry<T>>,
-  maxEntries = API_CACHE_MAX_ENTRIES,
-) {
-  const now = Date.now();
-
-  for (const [key, entry] of cache) {
-    if (entry.expiresAt <= now) cache.delete(key);
-  }
-
-  while (cache.size > maxEntries) {
-    const oldestKey = cache.keys().next().value as string | undefined;
-    if (!oldestKey) break;
-    cache.delete(oldestKey);
-  }
-}
-
-function setTimedCache<T>(
-  cache: Map<string, TimedCacheEntry<T>>,
-  key: string,
-  value: T,
-  ttlMs: number,
-) {
-  pruneTimedCache(cache);
-  cache.set(key, { value, expiresAt: Date.now() + ttlMs });
-  pruneTimedCache(cache);
-}
-
-function getTimedCache<T>(
-  cache: Map<string, TimedCacheEntry<T>>,
-  key: string,
-): T | null {
-  const now = Date.now();
-  const cached = cache.get(key);
-  if (!cached) return null;
-  if (cached.expiresAt <= now) {
-    cache.delete(key);
-    return null;
-  }
-  return cached.value;
-}
-
-function runCachedRequest<T>(
-  cache: RequestCache<T>,
-  cacheKey: string,
-  load: () => Promise<T>,
-  options?: { bypassCache?: boolean; inFlightKey?: string },
-): Promise<T> {
-  const bypassCache = options?.bypassCache ?? false;
-  const inFlightKey = options?.inFlightKey ?? cacheKey;
-
-  if (!bypassCache) {
-    const cached = getTimedCache(cache.values, cacheKey);
-    if (cached) {
-      return Promise.resolve(cached);
-    }
-  } else {
-    cache.values.delete(cacheKey);
-  }
-
-  const inFlight = cache.inFlight.get(inFlightKey);
-  if (inFlight) {
-    return inFlight;
-  }
-
-  const request = load()
-    .then((result) => {
-      setTimedCache(cache.values, cacheKey, result, cache.ttlMs);
-      return result;
-    })
-    .finally(() => {
-      cache.inFlight.delete(inFlightKey);
-    });
-
-  cache.inFlight.set(inFlightKey, request);
-  return request;
-}
-
-function clearRequestCaches(...caches: Array<RequestCache<unknown>>) {
-  for (const cache of caches) {
-    cache.clear();
-  }
-}
-
-function clearStreamingCaches() {
-  clearRequestCaches(streamsRequestCache, bestStreamRequestCache, resolveStreamRequestCache);
-}
-
-function buildResolveStreamKey(
-  magnet: string,
-  infoHash?: string,
-  fileIdx?: number,
-  season?: number,
-  episode?: number,
-  url?: string,
-): string {
-  return [
-    magnet.trim(),
-    infoHash?.trim().toLowerCase() ?? 'na',
-    fileIdx ?? 'na',
-    season ?? 'na',
-    episode ?? 'na',
-    url?.trim() ?? 'na',
-  ].join('|');
-}
-
-function buildStreamCacheKey(
-  type: string,
-  id: string,
-  season?: number,
-  episode?: number,
-  absoluteEpisode?: number,
-): string {
-  return `${type.trim().toLowerCase()}|${id.trim()}|${season ?? 'na'}|${episode ?? 'na'}|${absoluteEpisode ?? 'na'}`;
-}
+const apiCaches = {
+  bestStream: createRequestCache<BestResolvedStream>(BEST_STREAM_CACHE_TTL_MS),
+  resolveStream: createRequestCache<ResolvedStream>(RESOLVE_STREAM_CACHE_TTL_MS),
+  streams: createRequestCache<TorrentioStream[]>(STREAMS_CACHE_TTL_MS),
+  streamSelector: createRequestCache<StreamSelectorData>(STREAMS_CACHE_TTL_MS),
+  mediaDetails: createRequestCache<MediaDetails>(MEDIA_DETAILS_CACHE_TTL_MS),
+  searchCatalog: createRequestCache<SearchCatalogPage>(SEARCH_CACHE_TTL_MS),
+  searchResults: createRequestCache<MediaItem[]>(SEARCH_CACHE_TTL_MS),
+};
 
 function normalizeStreamMediaType(type: string, id: string): string {
   const normalizedType = type.trim().toLowerCase();
@@ -425,417 +307,137 @@ function normalizeStreamMediaType(type: string, id: string): string {
   return normalizedType;
 }
 
-function buildMediaDetailsCacheKey(type: string, id: string): string {
-  return `${type.trim().toLowerCase()}|${id.trim()}`;
-}
-
-function normalizeSearchQuery(query: string): string {
-  return query.trim().replace(/\s+/g, ' ').slice(0, SEARCH_QUERY_MAX_CHARS);
-}
-
-function normalizeGenreFilters(genres: string[]): string[] {
-  return Array.from(
-    new Set(
-      genres
-        .map((genre) => genre.trim())
-        .filter((genre) => genre.length > 0),
-    ),
-  ).sort((left, right) => left.localeCompare(right));
-}
-
 export interface PlaybackLanguagePreferences {
   preferredAudioLanguage?: string;
   preferredSubtitleLanguage?: string;
 }
 
-export interface MultiGenreCatalogPage {
+export interface LocalProfile {
+  username: string;
+  accentColor: string;
+  bio: string;
+}
+
+export type ProfileViewMode = 'grid' | 'list';
+
+export interface ProfilePreferences {
+  profile: LocalProfile;
+  viewMode: ProfileViewMode;
+}
+
+export interface AppUiPreferences {
+  playerVolume: number;
+  playerSpeed: number;
+  spoilerProtection: boolean;
+}
+
+export interface AppUiPreferencesPatch {
+  playerVolume?: number;
+  playerSpeed?: number;
+  spoilerProtection?: boolean;
+}
+
+export type StreamSelectorQuality = 'all' | '4k' | '1080p' | '720p' | 'sd';
+export type StreamSelectorSource = 'all' | 'cached';
+export type StreamSelectorSort = 'smart' | 'quality' | 'size' | 'seeds';
+export type StreamSelectorBatch = 'all' | 'episodes' | 'packs';
+
+export interface StreamSelectorPreferences {
+  quality: StreamSelectorQuality;
+  source: StreamSelectorSource;
+  addon: string;
+  sort: StreamSelectorSort;
+  batch: StreamSelectorBatch;
+}
+
+export interface StreamSelectorPreferencesState {
+  preferences: StreamSelectorPreferences;
+  initialized: boolean;
+}
+
+export interface TrackLanguageCandidate {
+  id: number;
+  lang?: string;
+  title?: string;
+  defaultTrack?: boolean;
+  forced?: boolean;
+  hearingImpaired?: boolean;
+}
+
+export interface TrackLanguageSelectionResolution {
+  normalizedPreferredLanguage?: string;
+  selectedMatches: boolean;
+  matchedTrackId?: number;
+}
+
+export interface SearchCatalogQuery {
+  query?: string;
+  mediaType?: 'movie' | 'series' | 'anime';
+  provider?: 'cinemeta' | 'netflix' | 'hbo' | 'disney' | 'prime' | 'apple' | 'kitsu';
+  feed?: 'popular' | 'featured' | 'trending' | 'airing' | 'rating';
+  sort?: 'default' | 'title-asc' | 'title-desc' | 'year-desc' | 'year-asc';
+  genres?: string[];
+  yearFrom?: number;
+  yearTo?: number;
+  skip?: number;
+  limit?: number;
+}
+
+export interface SearchCatalogPage {
   items: MediaItem[];
-  hasMore: boolean;
+  nextSkip?: number | null;
+}
+
+export type HistoryPlaybackPlanReason = 'missing-episode-context' | 'missing-saved-stream';
+
+export interface HistoryPlaybackRouteState {
+  from?: string;
+  season?: number;
+  reopenStreamSelector?: boolean;
+  reopenStreamSeason?: number;
+  reopenStreamEpisode?: number;
+  reopenStartTime?: number;
+  streamUrl?: string;
+  title?: string;
+  poster?: string;
+  backdrop?: string;
+  format?: string;
+  streamSourceName?: string;
+  streamFamily?: string;
+  selectedStreamKey?: string;
+  startTime?: number;
+  absoluteSeason?: number;
+  absoluteEpisode?: number;
+  streamSeason?: number;
+  streamEpisode?: number;
+  aniskipEpisode?: number;
+  resumeFromHistory?: boolean;
+  streamLookupId?: string;
+}
+
+export interface HistoryPlaybackPlan {
+  kind: 'details' | 'player';
+  reason?: HistoryPlaybackPlanReason;
+  target: string;
+  state: HistoryPlaybackRouteState;
 }
 
 export const api = {
-  getTrendingMovies: (genre?: string) => safeInvoke<MediaItem[]>('get_trending_movies', { genre }),
-  getTrendingSeries: (genre?: string) => safeInvoke<MediaItem[]>('get_trending_series', { genre }),
-  getTrendingAnime: (genre?: string) => safeInvoke<MediaItem[]>('get_trending_anime', { genre }),
-  getCinemetaCatalog: (mediaType: string, catalogId: string, genre?: string, skip?: number) =>
-    safeInvoke<MediaItem[]>('get_cinemeta_catalog', { mediaType, catalogId, genre, skip }),
-  /** Browse-optimised: merges both top + imdbRating catalogs for ~2x content */
-  getCinemetaDiscover: (mediaType: string, catalogId: string, genre?: string) =>
-    safeInvoke<MediaItem[]>('get_cinemeta_discover', { mediaType, catalogId, genre }),
-  getMultiGenreCatalog: (
-    mediaType: string,
-    catalogId: string,
-    genres: string[],
-    skip?: number,
-  ) => {
-    const normalizedGenres = normalizeGenreFilters(genres);
-    const cacheKey = [
-      mediaType.trim().toLowerCase(),
-      catalogId.trim(),
-      normalizedGenres.join('|'),
-      skip ?? 0,
-    ].join('|');
-
-    return runCachedRequest(multiGenreRequestCache, cacheKey, () =>
-      safeInvoke<MultiGenreCatalogPage>('get_multi_genre_catalog', {
-        mediaType,
-        catalogId,
-        genres: normalizedGenres,
-        skip,
-      }),
-    );
-  },
-  searchMedia: (query: string, mediaType?: 'movie' | 'series') => {
-    const normalizedQuery = normalizeSearchQuery(query);
-    if (!normalizedQuery) return Promise.resolve([]);
-
-    const normalizedMediaType = mediaType?.trim().toLowerCase() as 'movie' | 'series' | undefined;
-    const cacheKey = `${normalizedMediaType ?? 'all'}|${normalizedQuery.toLowerCase()}`;
-    return runCachedRequest(searchRequestCache, cacheKey, () =>
-      safeInvoke<MediaItem[]>('search_media', {
-        query: normalizedQuery,
-        media_type: normalizedMediaType,
-      }),
-    );
-  },
-  getMediaDetails: (type: string, id: string, options?: { includeEpisodes?: boolean }) => {
-    const normalizedType = type.trim();
-    const normalizedId = id.trim();
-    const includeEpisodes = options?.includeEpisodes ?? true;
-    const cacheKey = `${buildMediaDetailsCacheKey(normalizedType, normalizedId)}|${includeEpisodes ? 'full' : 'lite'}`;
-
-    if (!includeEpisodes) {
-      const fullCacheKey = `${buildMediaDetailsCacheKey(normalizedType, normalizedId)}|full`;
-      const cachedFullDetails = getTimedCache(mediaDetailsRequestCache.values, fullCacheKey);
-      if (cachedFullDetails) {
-        setTimedCache(
-          mediaDetailsRequestCache.values,
-          cacheKey,
-          cachedFullDetails,
-          mediaDetailsRequestCache.ttlMs,
-        );
-        return Promise.resolve(cachedFullDetails);
-      }
-
-      const inFlightFullDetails = mediaDetailsRequestCache.inFlight.get(fullCacheKey);
-      if (inFlightFullDetails) {
-        return inFlightFullDetails;
-      }
-    }
-
-    return runCachedRequest(mediaDetailsRequestCache, cacheKey, () =>
-      safeInvoke<MediaDetails>('get_media_details', {
-        mediaType: normalizedType,
-        id: normalizedId,
-        include_episodes: includeEpisodes,
-      }),
-    );
-  },
-  getMediaEpisodes: (type: string, id: string, season?: number, page?: number, pageSize?: number) =>
-    safeInvoke<MediaEpisodesPage>('get_media_episodes', {
-      mediaType: type,
-      id,
-      season,
-      page,
-      page_size: pageSize,
-    }),
-  getEpisodeStreamMapping: (
-    type: string,
-    id: string,
-    canonicalSeason: number,
-    canonicalEpisode: number,
-  ) =>
-    safeInvoke<EpisodeStreamMapping | null>('get_episode_stream_mapping', {
-      mediaType: type,
-      id,
-      canonical_season: canonicalSeason,
-      canonical_episode: canonicalEpisode,
-    }),
-  getKitsuAnimeMetadata: (id: string) =>
-    safeInvoke<AnimeSupplementalMetadata>('get_kitsu_anime_metadata', {
-      id,
-    }),
-  prepareNextPlaybackPlan: (
-    type: string,
-    id: string,
-    currentSeason: number,
-    currentEpisode: number,
-    currentStreamLookupId?: string,
-  ) =>
-    safeInvoke<NextPlaybackPlan | null>('prepare_next_playback_plan', {
-      mediaType: type,
-      id,
-      current_season: currentSeason,
-      current_episode: currentEpisode,
-      current_stream_lookup_id: currentStreamLookupId,
-    }),
-
-  // Streaming
-  getStreams: (
-    type: string,
-    id: string,
-    season?: number,
-    episode?: number,
-    absoluteEpisode?: number,
-    options?: StreamRankingOptions,
-  ) => {
-    const normalizedType = normalizeStreamMediaType(type, id);
-    const cacheKey = `${buildStreamCacheKey(normalizedType, id, season, episode, absoluteEpisode)}|${buildStreamRankingCacheKey(options)}`;
-    return runCachedRequest(streamsRequestCache, cacheKey, () =>
-      safeInvoke<TorrentioStream[]>('get_streams', {
-        mediaType: normalizedType,
-        id,
-        season,
-        episode,
-        absolute_episode: absoluteEpisode,
-        ...buildStreamRankingInvokePayload(options),
-      }),
-    );
-  },
-  getStreamsForAddon: (
-    type: string,
-    id: string,
-    addonUrl: string,
-    addonName?: string,
-    season?: number,
-    episode?: number,
-    absoluteEpisode?: number,
-  ) => {
-    const normalizedType = normalizeStreamMediaType(type, id);
-    return safeInvoke<TorrentioStream[]>('get_streams_for_addon', {
-      mediaType: normalizedType,
-      id,
-      addonUrl,
-      addonName,
-      season,
-      episode,
-      absolute_episode: absoluteEpisode,
-    });
-  },
-  resolveStream: (
-    magnet: string,
-    infoHash?: string,
-    fileIdx?: number,
-    season?: number,
-    episode?: number,
-    url?: string,
-  ) => {
-    const cacheKey = buildResolveStreamKey(magnet, infoHash, fileIdx, season, episode, url);
-    return runCachedRequest(resolveStreamRequestCache, cacheKey, () =>
-      safeInvoke<ResolvedStream>('resolve_stream', {
-        magnet,
-        info_hash: infoHash,
-        file_idx: fileIdx,
-        season,
-        episode,
-        url,
-      }),
-    );
-  },
-  resolveBestStream: (
-    type: string,
-    id: string,
-    season?: number,
-    episode?: number,
-    absoluteEpisode?: number,
-    options?: ResolveBestStreamOptions,
-  ) => {
-    const normalizedType = normalizeStreamMediaType(type, id);
-    const cacheKey = `${buildStreamCacheKey(normalizedType, id, season, episode, absoluteEpisode)}|${buildStreamRankingCacheKey(options)}`;
-    const bypassCache = !!options?.bypassCache;
-    const inFlightKey = bypassCache ? `${cacheKey}|bypass` : cacheKey;
-
-    return runCachedRequest(
-      bestStreamRequestCache,
-      cacheKey,
-      () =>
-        safeInvoke<BestResolvedStream>('resolve_best_stream', {
-          mediaType: normalizedType,
-          id,
-          season,
-          episode,
-          absolute_episode: absoluteEpisode,
-          ...buildStreamRankingInvokePayload(options),
-        }),
-      { bypassCache, inFlightKey },
-    );
-  },
-
-  // Settings
-  getAddonConfigs: () => safeInvoke<AddonConfig[]>('get_addon_configs'),
-  saveAddonConfigs: async (configs: AddonConfig[]) => {
-    const saved = await safeInvoke<AddonConfig[]>('save_addon_configs', { configs });
-    clearStreamingCaches();
-    return saved;
-  },
-  fetchAddonManifest: (url: string) => safeInvoke<AddonManifest>('fetch_addon_manifest', { url }),
-  savePlaybackLanguagePreferences: (
-    preferredAudioLanguage?: string,
-    preferredSubtitleLanguage?: string,
-  ) =>
-    safeInvoke<PlaybackLanguagePreferences>('save_playback_language_preferences', {
-      preferredAudioLanguage,
-      preferredSubtitleLanguage,
-    }).then((savedPreferences) => {
-      clearStreamingCaches();
-      return savedPreferences;
-    }),
-  getPlaybackLanguagePreferences: () =>
-    safeInvoke<PlaybackLanguagePreferences>('get_playback_language_preferences'),
-  getEffectivePlaybackLanguagePreferences: (mediaId?: string, mediaType?: string) =>
-    safeInvoke<PlaybackLanguagePreferences>('get_effective_playback_language_preferences', {
-      media_id: mediaId,
-      media_type: mediaType,
-    }),
-  savePlaybackLanguagePreferenceOutcome: (
-    mediaId: string,
-    mediaType: string,
-    preferredAudioLanguage?: string,
-    preferredSubtitleLanguage?: string,
-  ) =>
-    safeInvoke<void>('save_playback_language_preference_outcome', {
-      media_id: mediaId,
-      media_type: mediaType,
-      preferred_audio_language: preferredAudioLanguage,
-      preferred_subtitle_language: preferredSubtitleLanguage,
-    }),
-  reportPlaybackStreamOutcome: (report: PlaybackStreamOutcomeReport) =>
-    safeInvoke<void>('report_playback_stream_outcome', report as unknown as Record<string, unknown>),
-
-  // Watch History
-  saveWatchProgress: (progress: WatchProgress) => safeInvoke('save_watch_progress', { progress }),
-  getWatchHistory: () => safeInvoke<WatchProgress[]>('get_watch_history'),
-  getContinueWatching: () => safeInvoke<WatchProgress[]>('get_continue_watching'),
-  getWatchHistoryFull: () => safeInvoke<WatchProgress[]>('get_watch_history_full'),
-  getWatchHistoryForId: (id: string) =>
-    safeInvoke<WatchProgress[]>('get_watch_history_for_id', { id }),
-  getWatchProgress: (id: string, type: string, season?: number, episode?: number) =>
-    safeInvoke<WatchProgress | null>('get_watch_progress', { id, type: type, season, episode }),
-  removeFromWatchHistory: (id: string, type: string, season?: number, episode?: number) =>
-    safeInvoke('remove_from_watch_history', { id, type: type, season, episode }),
-  /** Remove every episode/entry for a given title – use this from the trash button. */
-  removeAllFromWatchHistory: (id: string, type: string) =>
-    safeInvoke('remove_all_from_watch_history', { id, type: type }),
-
-  // Library
-  addToLibrary: (item: MediaItem) => safeInvoke('add_to_library', { item }),
-  removeFromLibrary: (id: string) => safeInvoke('remove_from_library', { id }),
-  getLibrary: () => safeInvoke<MediaItem[]>('get_library'),
-  checkLibrary: (id: string) => safeInvoke<boolean>('check_library', { id }),
-
-  // Custom Lists
-  createList: (name: string, icon?: string) => safeInvoke<UserList>('create_list', { name, icon }),
-  deleteList: (listId: string) => safeInvoke<void>('delete_list', { listId }),
-  renameList: (listId: string, name: string, icon?: string) =>
-    safeInvoke<void>('rename_list', { listId, name, icon }),
-  addToList: (listId: string, item: MediaItem) => safeInvoke<void>('add_to_list', { listId, item }),
-  removeFromList: (listId: string, itemId: string) =>
-    safeInvoke<void>('remove_from_list', { listId, itemId }),
-  getLists: () => safeInvoke<UserList[]>('get_lists'),
-  reorderListItems: (listId: string, itemIds: string[]) =>
-    safeInvoke<void>('reorder_list_items', { listId, itemIds }),
-  reorderLists: (listIds: string[]) => safeInvoke<void>('reorder_lists', { listIds }),
-  checkItemInLists: (itemId: string) => safeInvoke<string[]>('check_item_in_lists', { itemId }),
-
-  // Watch Status
-  setWatchStatus: (itemId: string, status: WatchStatus | null) =>
-    safeInvoke<void>('set_watch_status', { itemId, status }),
-  getWatchStatus: (itemId: string) =>
-    safeInvoke<WatchStatus | null>('get_watch_status', { itemId }),
-  getAllWatchStatuses: () => safeInvoke<Record<string, WatchStatus>>('get_all_watch_statuses'),
-
-  // Netflix & Kitsu
-  getNetflixCatalog: (catalogId: string, type: string, skip?: number) =>
-    safeInvoke<MediaItem[]>('get_netflix_catalog', { catalogId, mediaType: type, skip }),
-  getKitsuCatalog: (catalogId: string, genre?: string, skip?: number) =>
-    safeInvoke<MediaItem[]>('get_kitsu_catalog', { catalogId, genre, skip }),
-  searchKitsu: (query: string) => {
-    const normalizedQuery = normalizeSearchQuery(query);
-    if (!normalizedQuery) return Promise.resolve([]);
-
-    const cacheKey = `kitsu|${normalizedQuery.toLowerCase()}`;
-    return runCachedRequest(searchRequestCache, cacheKey, () =>
-      safeInvoke<MediaItem[]>('search_kitsu', { query: normalizedQuery }),
-    );
-  },
-
-  /**
-   * Fetch skippable segment timestamps for a TV episode.
-   *
-   * - Anime (`type === 'anime'` or `id` starts with `'kitsu:'`): resolves MAL mapping via
-   *   Kitsu and queries AniSkip v2.
-   * - Series (`type === 'series'`): queries IntroDB using the IMDb ID.
-   *
-   * Returns an empty array when no data is available (crowdsourced – may not exist).
-   */
-  getSkipTimes: (
-    mediaType: string,
-    id: string,
-    imdbId: string | undefined,
-    season: number | undefined,
-    episode: number | undefined,
-    duration?: number,
-  ) => {
-    const normalizedDuration =
-      typeof duration === 'number' && Number.isFinite(duration) && duration > 0
-        ? duration
-        : undefined;
-
-    return safeInvoke<SkipSegment[]>('get_skip_times', {
-      mediaType,
-      id,
-      imdbId,
-      season,
-      episode,
-      duration: normalizedDuration,
-    });
-  },
-
-  // Returns true when at least one enabled addon is configured (stream resolution is possible)
-  checkApiKeys: async () => {
-    try {
-      const addons = await api.getAddonConfigs();
-      return addons.some((a) => a.enabled && a.url.trim().length > 0);
-    } catch {
-      return false;
-    }
-  },
-
-  // Downloads
-  startDownload: (params: StartDownloadParams) =>
-    safeInvoke<string>('start_download', params as unknown as Record<string, unknown>),
-  pauseDownload: (id: string) => safeInvoke<void>('pause_download', { id }),
-  pauseActiveDownloads: () => safeInvoke<number>('pause_active_downloads'),
-  resumeDownload: (id: string) => safeInvoke<void>('resume_download', { id }),
-  cancelDownload: (id: string) => safeInvoke<void>('cancel_download', { id }),
-  /** Verifies the on-disk file for a completed download still exists.
-   *  Returns false (and marks the item as Error in the backend) if missing. */
-  checkDownloadFileExists: (id: string) =>
-    safeInvoke<boolean>('check_download_file_exists', { id }),
-  removeDownload: (id: string, deleteFile: boolean) =>
-    safeInvoke<void>('remove_download', { id, deleteFile }),
-  clearCompletedDownloads: (deleteFile = false) =>
-    safeInvoke<number>('clear_completed_downloads', { deleteFile }),
-  getDownloads: () => safeInvoke<DownloadItem[]>('get_downloads'),
-  setDownloadBandwidth: (limit?: number) => safeInvoke<void>('set_download_bandwidth', { limit }),
-  getDefaultDownloadPath: () => safeInvoke<string>('get_default_download_path'),
-  openFolder: (path: string) => safeInvoke<void>('open_folder', { path }),
-
-  // Data Management
-  getDataStats: () => safeInvoke<DataStats>('get_data_stats'),
-  clearWatchHistory: () => safeInvoke<void>('clear_watch_history'),
-  clearLibrary: () => safeInvoke<void>('clear_library'),
-  clearAllLists: () => safeInvoke<void>('clear_all_lists'),
-  clearAllWatchStatuses: () => safeInvoke<void>('clear_all_watch_statuses'),
-  /** Serialises all user data (history, library, lists, statuses) to a JSON string for download. */
-  exportAppData: () => safeInvoke<string>('export_app_data'),
-  /** Exports all data directly to a user-selected file path on desktop. */
-  exportAppDataToFile: (path: string) => safeInvoke<void>('export_app_data_to_file', { path }),
-  /** Merges a previously exported JSON backup into current stores. Returns import counts. */
-  importAppData: (data: string) => safeInvoke<ImportResult>('import_app_data', { data }),
-  /** Imports backup data directly from a selected JSON file path on desktop. */
-  importAppDataFromFile: (path: string) =>
-    safeInvoke<ImportResult>('import_app_data_from_file', { path }),
+  ...createDiscoveryApi({
+    safeInvoke,
+    mediaDetailsCache: apiCaches.mediaDetails,
+    searchCatalogCache: apiCaches.searchCatalog,
+    searchResultsCache: apiCaches.searchResults,
+  }),
+  ...createPlaybackApi({
+    safeInvoke,
+    caches: apiCaches,
+    normalizeStreamMediaType,
+  }),
+  ...createStoreApi({
+    safeInvoke,
+    caches: apiCaches,
+  }),
 };
 
 export interface DownloadItem {
@@ -918,6 +520,7 @@ export interface WatchProgress {
   last_stream_key?: string;
   source_name?: string;
   stream_family?: string;
+  resume_start_time?: number;
 }
 
 /**

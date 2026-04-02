@@ -1,10 +1,34 @@
 import { useCallback, useEffect, useRef, type MutableRefObject } from 'react';
-import { api } from '@/lib/api';
+import { api, type WatchProgress } from '@/lib/api';
 
 const MIN_PERSISTABLE_PROGRESS_SECS = 5;
 const NEAR_COMPLETION_MIN_DURATION_SECS = 60;
 const NEAR_COMPLETION_REMAINING_SECS = 30;
 const NEAR_COMPLETION_PROGRESS_RATIO = 0.97;
+
+function roundPersistedTime(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+function buildWatchProgressFingerprint(progress: WatchProgress): string {
+  return [
+    progress.id,
+    progress.type_,
+    progress.absolute_season ?? '',
+    progress.absolute_episode ?? '',
+    roundPersistedTime(progress.position),
+    roundPersistedTime(progress.duration),
+    progress.last_stream_url ?? '',
+    progress.last_stream_format ?? '',
+    progress.last_stream_lookup_id ?? '',
+    progress.last_stream_key ?? '',
+    progress.source_name ?? '',
+    progress.stream_family ?? '',
+    progress.title,
+    progress.poster ?? '',
+    progress.backdrop ?? '',
+  ].join('|');
+}
 
 function hasPersistableProgress(currentTime: number): boolean {
   return Number.isFinite(currentTime) && currentTime >= MIN_PERSISTABLE_PROGRESS_SECS;
@@ -73,14 +97,17 @@ export function usePlaybackProgressPersistence({
 }: UsePlaybackProgressPersistenceArgs) {
   const lastPlayingStateRef = useRef(isPlaying);
   const nearCompletionSavedRef = useRef(false);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const lastPersistedFingerprintRef = useRef<string | null>(null);
+  const scheduledFingerprintsRef = useRef<Set<string>>(new Set());
 
-  const saveProgress = useCallback(async () => {
-    if (!mediaType || !mediaId || mediaId === 'local') return;
+  const buildWatchProgressPayload = useCallback((): WatchProgress | null => {
+    if (!mediaType || !mediaId || mediaId === 'local') return null;
 
     // Ignore startup stubs so Continue Watching does not regress to near-zero resumes.
-    if (!hasPersistableProgress(currentTimeRef.current)) return;
+    if (!hasPersistableProgress(currentTimeRef.current)) return null;
 
-    await api.saveWatchProgress({
+    return {
       id: mediaId,
       type_: mediaType,
       season: absoluteSeason,
@@ -102,7 +129,7 @@ export function usePlaybackProgressPersistence({
       last_stream_key: selectedStreamKeyRef.current,
       source_name: activeStreamSourceNameRef.current,
       stream_family: activeStreamFamilyRef.current,
-    });
+    };
   }, [
     mediaType,
     mediaId,
@@ -123,6 +150,40 @@ export function usePlaybackProgressPersistence({
     streamLookupIdRef,
     selectedStreamKeyRef,
   ]);
+
+  const saveProgress = useCallback(async () => {
+    const payload = buildWatchProgressPayload();
+    if (!payload) return;
+
+    const fingerprint = buildWatchProgressFingerprint(payload);
+    if (lastPersistedFingerprintRef.current === fingerprint) {
+      return;
+    }
+
+    if (scheduledFingerprintsRef.current.has(fingerprint)) {
+      await saveQueueRef.current;
+      return;
+    }
+
+    scheduledFingerprintsRef.current.add(fingerprint);
+
+    const saveTask = saveQueueRef.current.then(async () => {
+      if (lastPersistedFingerprintRef.current === fingerprint) {
+        return;
+      }
+
+      await api.saveWatchProgress(payload);
+      lastPersistedFingerprintRef.current = fingerprint;
+    });
+
+    saveQueueRef.current = saveTask.catch(() => undefined);
+
+    try {
+      await saveTask;
+    } finally {
+      scheduledFingerprintsRef.current.delete(fingerprint);
+    }
+  }, [buildWatchProgressPayload]);
 
   const flushProgress = useCallback(() => {
     void saveProgress();

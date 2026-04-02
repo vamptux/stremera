@@ -2,6 +2,7 @@ use super::list_helpers::{
     list_item_store_key, list_meta_key, load_lists_order, UserList, UserListWithItems,
     LISTS_ORDER_KEY,
 };
+use super::store_helpers::normalize_library_item;
 use super::LISTS_STORE_FILE;
 use crate::providers::MediaItem;
 use serde_json::json;
@@ -90,6 +91,8 @@ pub async fn add_to_list(app: AppHandle, list_id: String, item: MediaItem) -> Re
         .get(list_meta_key(&list_id))
         .and_then(|value| serde_json::from_value::<UserList>(value).ok())
         .ok_or_else(|| "List not found".to_string())?;
+    let item = normalize_library_item(item)
+        .ok_or_else(|| "Invalid media item. Missing required id, title, or type.".to_string())?;
 
     if !list.item_ids.contains(&item.id) {
         list.item_ids.push(item.id.clone());
@@ -142,6 +145,11 @@ pub async fn get_lists(app: AppHandle) -> Result<Vec<UserListWithItems>, String>
                         continue;
                     };
                     let Ok(item) = serde_json::from_value::<MediaItem>(item_val) else {
+                        modified = true;
+                        store.delete(list_item_store_key(list_id, item_id));
+                        continue;
+                    };
+                    let Some(item) = normalize_library_item(item) else {
                         modified = true;
                         store.delete(list_item_store_key(list_id, item_id));
                         continue;

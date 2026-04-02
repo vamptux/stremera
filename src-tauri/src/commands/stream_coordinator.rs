@@ -1,3 +1,4 @@
+use super::language::{canonicalize_language_token, tokenize_language_meta};
 use super::playback_state::PlaybackStateService;
 use super::streaming_helpers::{stream_resolution_priority, stream_source_priority};
 use crate::providers::addons::{
@@ -52,34 +53,9 @@ const TITLE_SPINOFF_TOKENS: &[&str] = &[
     "spinoff",
 ];
 const TITLE_BOUNDARY_TOKENS: &[&str] = &[
-    "10bit",
-    "aac",
-    "ac3",
-    "amzn",
-    "atmos",
-    "av1",
-    "bluray",
-    "bdrip",
-    "ddp",
-    "dsnp",
-    "dts",
-    "dv",
-    "h264",
-    "h265",
-    "hdtv",
-    "hevc",
-    "hulu",
-    "mkv",
-    "mp4",
-    "nf",
-    "proper",
-    "repack",
-    "remux",
-    "webrip",
-    "web",
-    "webdl",
-    "x264",
-    "x265",
+    "10bit", "aac", "ac3", "amzn", "atmos", "av1", "bluray", "bdrip", "ddp", "dsnp", "dts", "dv",
+    "h264", "h265", "hdtv", "hevc", "hulu", "mkv", "mp4", "nf", "proper", "repack", "remux",
+    "webrip", "web", "webdl", "x264", "x265",
 ];
 
 #[derive(Clone, Copy)]
@@ -110,36 +86,6 @@ fn normalize_source_name(source_name: &str) -> Option<String> {
     } else {
         Some(trimmed.to_ascii_lowercase())
     }
-}
-
-fn canonicalize_language_token(value: &str) -> Option<&'static str> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "en" | "eng" | "english" => Some("en"),
-        "ja" | "jpn" | "japanese" => Some("ja"),
-        "es" | "spa" | "spanish" => Some("es"),
-        "fr" | "fra" | "fre" | "french" => Some("fr"),
-        "de" | "deu" | "ger" | "german" => Some("de"),
-        "it" | "ita" | "italian" => Some("it"),
-        "pt" | "por" | "portuguese" => Some("pt"),
-        "ko" | "kor" | "korean" => Some("ko"),
-        "zh" | "zho" | "chi" | "chinese" => Some("zh"),
-        _ => None,
-    }
-}
-
-fn tokenize_language_meta(value: &str) -> Vec<String> {
-    let normalized: String = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect();
-
-    normalized.split_whitespace().map(str::to_string).collect()
 }
 
 fn stream_language_haystack(stream: &TorrentioStream) -> String {
@@ -354,9 +300,7 @@ fn build_title_initialism(words: &[String]) -> Option<String> {
         .filter_map(|word| word.chars().next())
         .collect();
 
-    (3..=6)
-        .contains(&initialism.len())
-        .then_some(initialism)
+    (3..=6).contains(&initialism.len()).then_some(initialism)
 }
 
 fn is_neutral_title_extra(token: &str, media_type: &str) -> bool {
@@ -389,8 +333,15 @@ fn stream_episode_relevance_priority(
     best_match
 }
 
-fn stream_title_relevance_priority(stream: &TorrentioStream, context: StreamMatchContext<'_>) -> i8 {
-    let Some(title) = context.title.map(str::trim).filter(|value| !value.is_empty()) else {
+fn stream_title_relevance_priority(
+    stream: &TorrentioStream,
+    context: StreamMatchContext<'_>,
+) -> i8 {
+    let Some(title) = context
+        .title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return 0;
     };
 
@@ -535,15 +486,9 @@ fn recommendation_reasons(
         .is_some_and(|value| value.starts_with("http://") || value.starts_with("https://"));
 
     match episode_match {
-        StreamEpisodeMatchKind::Exact => {
-            reasons.push("Exact episode match".to_string())
-        }
-        StreamEpisodeMatchKind::EpisodeRange => {
-            reasons.push("Batch includes episode".to_string())
-        }
-        StreamEpisodeMatchKind::SeasonPack => {
-            reasons.push("Season pack".to_string())
-        }
+        StreamEpisodeMatchKind::Exact => reasons.push("Exact episode match".to_string()),
+        StreamEpisodeMatchKind::EpisodeRange => reasons.push("Batch includes episode".to_string()),
+        StreamEpisodeMatchKind::SeasonPack => reasons.push("Season pack".to_string()),
         StreamEpisodeMatchKind::None => {}
     }
 
@@ -707,10 +652,9 @@ pub(crate) fn sort_streams_by_recommendation(
 mod tests {
     use super::{
         compare_stream_recommendation, recommendation_reasons, StreamMatchContext,
-        StreamRecommendationInputs, DEFAULT_SOURCE_HEALTH_PRIORITY,
-        DEFAULT_STREAM_FAMILY_PRIORITY,
+        StreamRecommendationInputs, DEFAULT_SOURCE_HEALTH_PRIORITY, DEFAULT_STREAM_FAMILY_PRIORITY,
     };
-    use crate::providers::addons::TorrentioStream;
+    use crate::providers::addons::{StreamPresentation, TorrentioStream};
     use std::collections::HashMap;
 
     fn build_stream(
@@ -735,7 +679,9 @@ mod tests {
             size_bytes: Some(size_bytes),
             source_name: Some(source_name.to_string()),
             stream_family: Some(format!("{}|release:test", source_name.to_ascii_lowercase())),
+            stream_key: String::new(),
             recommendation_reasons: Vec::new(),
+            presentation: StreamPresentation::default(),
         }
     }
 
@@ -983,7 +929,8 @@ mod tests {
         );
         mainline.name = Some("Attack on Titan S01E03 1080p".to_string());
 
-        let mut spinoff = build_stream("beta", true, Some("https://beta.example/video.m3u8"), 2_000);
+        let mut spinoff =
+            build_stream("beta", true, Some("https://beta.example/video.m3u8"), 2_000);
         spinoff.name = Some("Attack on Titan Junior High S01E03 1080p".to_string());
 
         assert_eq!(

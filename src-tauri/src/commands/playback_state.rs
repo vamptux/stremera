@@ -1,9 +1,8 @@
 use super::{
+    episode_navigation::build_source_episode_coordinates,
     history_helpers::should_skip_watch_progress_save,
-    playback_preferences_commands::sanitize_language_pref,
-    resume_store::ResumeStore,
-    PlaybackLanguagePreferences,
-    WatchProgress,
+    playback_preferences_commands::sanitize_language_pref, resume_store::ResumeStore,
+    PlaybackLanguagePreferences, WatchProgress,
 };
 use crate::providers::Episode;
 use serde::{Deserialize, Serialize};
@@ -198,7 +197,10 @@ impl PlaybackStateService {
     }
 
     fn initialize_resume_store(&self, app: &AppHandle) -> Result<ResumeStore, String> {
-        let app_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
+        let app_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| error.to_string())?;
         std::fs::create_dir_all(&app_dir)
             .map_err(|error| format!("Failed to create app data directory: {}", error))?;
 
@@ -211,7 +213,9 @@ impl PlaybackStateService {
         key: &str,
         progress: &WatchProgress,
     ) -> Result<(), String> {
-        self.with_resume_store(app, |resume_store| resume_store.upsert_progress(key, progress))?;
+        self.with_resume_store(app, |resume_store| {
+            resume_store.upsert_progress(key, progress)
+        })?;
 
         let store = app
             .store(PLAYBACK_STATE_STORE_FILE)
@@ -629,12 +633,6 @@ impl PlaybackStateService {
         let updated_at = current_timestamp_ms();
 
         for episode in episodes {
-            let source_lookup_id = episode
-                .imdb_id
-                .as_deref()
-                .and_then(normalize_stream_meta)
-                .or_else(|| normalized_fallback_lookup_id.clone())
-                .unwrap_or_else(|| media_id.clone());
             let snapshot_key = playback_episode_mapping_snapshot_key(
                 media_type,
                 &media_id,
@@ -642,17 +640,13 @@ impl PlaybackStateService {
                 episode.episode,
             );
             let existing_snapshot = load_playback_episode_mapping_snapshot(&store, &snapshot_key);
-            let next_snapshot = PlaybackEpisodeMappingSnapshot {
-                media_id: media_id.clone(),
-                media_type: media_type.to_string(),
-                canonical_season: episode.season,
-                canonical_episode: episode.episode,
-                source_lookup_id,
-                source_season: episode.imdb_season.unwrap_or(episode.season),
-                source_episode: episode.imdb_episode.unwrap_or(episode.episode),
-                aniskip_episode: episode.imdb_episode.unwrap_or(episode.episode),
+            let next_snapshot = build_episode_mapping_snapshot(
+                media_type,
+                &media_id,
+                normalized_fallback_lookup_id.as_deref(),
+                episode,
                 updated_at,
-            };
+            );
 
             let needs_write = existing_snapshot
                 .as_ref()
@@ -856,6 +850,29 @@ impl PlaybackStateService {
     }
 }
 
+fn build_episode_mapping_snapshot(
+    media_type: &str,
+    media_id: &str,
+    fallback_lookup_id: Option<&str>,
+    episode: &Episode,
+    updated_at: u64,
+) -> PlaybackEpisodeMappingSnapshot {
+    let source = build_source_episode_coordinates(episode, fallback_lookup_id.unwrap_or(media_id));
+
+    PlaybackEpisodeMappingSnapshot {
+        media_id: media_id.to_string(),
+        media_type: media_type.to_string(),
+        canonical_season: episode.season,
+        canonical_episode: episode.episode,
+        source_lookup_id: normalize_stream_meta(&source.lookup_id)
+            .unwrap_or_else(|| media_id.to_string()),
+        source_season: source.season,
+        source_episode: source.episode,
+        aniskip_episode: source.aniskip_episode,
+        updated_at,
+    }
+}
+
 fn playback_stream_health_item_key(key: &str) -> String {
     format!("{}{}", PLAYBACK_STREAM_HEALTH_ITEM_PREFIX, key)
 }
@@ -1039,12 +1056,12 @@ fn merge_playback_language_preferences(
     scoped: Option<&PlaybackLanguagePreferencesSnapshot>,
 ) -> PlaybackLanguagePreferences {
     PlaybackLanguagePreferences {
-        preferred_audio_language: scoped
-            .and_then(|snapshot| snapshot.preferred_audio_language.clone())
-            .or(defaults.preferred_audio_language),
-        preferred_subtitle_language: scoped
-            .and_then(|snapshot| snapshot.preferred_subtitle_language.clone())
-            .or(defaults.preferred_subtitle_language),
+        preferred_audio_language: defaults
+            .preferred_audio_language
+            .or_else(|| scoped.and_then(|snapshot| snapshot.preferred_audio_language.clone())),
+        preferred_subtitle_language: defaults
+            .preferred_subtitle_language
+            .or_else(|| scoped.and_then(|snapshot| snapshot.preferred_subtitle_language.clone())),
     }
 }
 
@@ -1512,7 +1529,12 @@ fn upsert_stream_health_snapshot<R: tauri::Runtime>(
     let missing_resolved_at = snapshot.resolved_at.is_none();
     let index_changed = insert_sorted_unique(&mut health_index, key);
 
-    if !stream_changed && !format_changed && !stream_kind_changed && !missing_resolved_at && !index_changed {
+    if !stream_changed
+        && !format_changed
+        && !stream_kind_changed
+        && !missing_resolved_at
+        && !index_changed
+    {
         return Ok(false);
     }
 
@@ -1591,12 +1613,13 @@ pub(crate) fn merge_keyed_progress_entries(
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_playback_language_preferences, playback_language_preferences_scope_key,
-        score_source_health_priority, score_stream_family_priority,
-        PlaybackLanguagePreferencesSnapshot, PlaybackSourceHealthSnapshot,
-        PlaybackStreamFamilySnapshot,
+        build_episode_mapping_snapshot, merge_playback_language_preferences,
+        playback_language_preferences_scope_key, score_source_health_priority,
+        score_stream_family_priority, PlaybackLanguagePreferencesSnapshot,
+        PlaybackSourceHealthSnapshot, PlaybackStreamFamilySnapshot,
     };
     use crate::commands::PlaybackLanguagePreferences;
+    use crate::providers::Episode;
 
     #[test]
     fn source_health_priority_penalizes_active_cooldown() {
@@ -1702,7 +1725,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_language_preferences_override_global_defaults() {
+    fn global_language_preferences_override_scoped_fallbacks() {
         let defaults = PlaybackLanguagePreferences {
             preferred_audio_language: Some("en".to_string()),
             preferred_subtitle_language: Some("off".to_string()),
@@ -1717,10 +1740,42 @@ mod tests {
 
         let effective = merge_playback_language_preferences(defaults, Some(&scoped));
 
-        assert_eq!(effective.preferred_audio_language.as_deref(), Some("ja"));
+        assert_eq!(effective.preferred_audio_language.as_deref(), Some("en"));
         assert_eq!(
             effective.preferred_subtitle_language.as_deref(),
             Some("off")
         );
+    }
+
+    #[test]
+    fn episode_mapping_snapshot_prefers_backend_normalized_episode_coordinates() {
+        let snapshot = build_episode_mapping_snapshot(
+            "anime",
+            "kitsu:42",
+            Some("tt-fallback"),
+            &Episode {
+                id: "episode-1".to_string(),
+                title: Some("Episode 1".to_string()),
+                season: 1,
+                episode: 1,
+                released: None,
+                release_date: None,
+                overview: None,
+                thumbnail: None,
+                imdb_id: Some("tt-legacy".to_string()),
+                imdb_season: Some(21),
+                imdb_episode: Some(1004),
+                stream_lookup_id: Some("tt-stream".to_string()),
+                stream_season: Some(4),
+                stream_episode: Some(12),
+                aniskip_episode: Some(13),
+            },
+            123,
+        );
+
+        assert_eq!(snapshot.source_lookup_id, "tt-stream");
+        assert_eq!(snapshot.source_season, 4);
+        assert_eq!(snapshot.source_episode, 12);
+        assert_eq!(snapshot.aniskip_episode, 13);
     }
 }

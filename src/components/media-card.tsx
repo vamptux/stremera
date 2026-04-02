@@ -614,8 +614,10 @@ export function MediaCard({
         <p className='text-[12.5px] font-medium text-white/90 leading-tight line-clamp-2 tracking-[-0.01em]'>
           {item.title}
         </p>
-        {item.year && (
-          <p className='text-[11px] text-zinc-500 leading-none'>{item.year.split('-')[0]}</p>
+        {item.displayYear && (
+          <p className='text-[11px] text-zinc-500 leading-none'>
+            {item.displayYear}
+          </p>
         )}
       </div>
 
@@ -805,10 +807,10 @@ export function MediaCard({
                         <span>{episodeLabel}</span>
                       </>
                     )}
-                    {item.year && (
+                    {item.displayYear && (
                       <>
                         <span className='text-zinc-700'>·</span>
-                        <span>{item.year.split('-')[0]}</span>
+                        <span>{item.displayYear}</span>
                       </>
                     )}
                   </div>

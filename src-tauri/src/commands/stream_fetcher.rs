@@ -15,18 +15,61 @@ use super::{
     normalize_non_empty, normalize_stream_media_type, PlaybackLanguagePreferences,
     SETTINGS_STORE_FILE,
 };
+use crate::operational_log::{field, log_operational_event, OperationalLogLevel};
 use crate::providers::{
-    realdebrid::RealDebrid,
     addons::{AddonTransport, TorrentioStream},
+    realdebrid::RealDebrid,
 };
 use futures_util::future::join_all;
+use serde::Serialize;
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::AppHandle;
 use tauri_plugin_store::StoreExt;
 
-const ADDON_STREAM_FETCH_TIMEOUT_SECS: u64 = 20;
-const ADDON_STREAM_FALLBACK_QUERY_TIMEOUT_SECS: u64 = 8;
+// Primary addon lookups still get the most budget, but keep the upper bound short enough that
+// one unhealthy source does not dominate selector open time.
+const ADDON_STREAM_FETCH_TIMEOUT_SECS: u64 = 14;
+// Lookup fallbacks are best-effort only and should fail fast when the first ID did not produce
+// a usable response.
+const ADDON_STREAM_FALLBACK_QUERY_TIMEOUT_SECS: u64 = 5;
+const DEGRADED_SOURCE_LATENCY_MS: u64 = 4_500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum StreamSourceStatus {
+    Healthy,
+    Degraded,
+    Offline,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StreamSourceSummary {
+    pub id: String,
+    pub name: String,
+    pub status: StreamSourceStatus,
+    pub stream_count: usize,
+    pub latency_ms: Option<u64>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StreamSelectorData {
+    pub streams: Vec<TorrentioStream>,
+    pub source_summaries: Vec<StreamSourceSummary>,
+    pub fatal_error_message: Option<String>,
+}
+
+#[derive(Debug)]
+struct AddonStreamFetchOutcome {
+    id: String,
+    name: String,
+    streams: Vec<TorrentioStream>,
+    latency_ms: u64,
+    error_message: Option<String>,
+}
 
 fn load_effective_playback_language_preferences<R: tauri::Runtime>(
     store: &tauri_plugin_store::Store<R>,
@@ -144,25 +187,35 @@ pub(crate) async fn fetch_prepared_streams_for_addon(
                 return Ok(prepared);
             }
             Ok(Err(error)) => {
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "Addon '{}' query {} for '{}' failed: {}",
-                    source_name,
-                    index + 1,
-                    query_id,
-                    error
+                log_operational_event(
+                    OperationalLogLevel::Warn,
+                    "stream-fetcher",
+                    "fetch_addon_streams",
+                    "addon-query-failed",
+                    &[
+                        field("source", source_name),
+                        field("media_type", effective_type),
+                        field("query_index", index + 1),
+                        field("query_id", query_id),
+                        field("error", &error),
+                    ],
                 );
                 last_error = Some(format!("{}: {}", source_name, error));
             }
             Err(_) => {
                 let error = format!("{} timed out after {}s", source_name, timeout_secs);
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "Addon '{}' query {} for '{}' timed out after {}s",
-                    source_name,
-                    index + 1,
-                    query_id,
-                    timeout_secs
+                log_operational_event(
+                    OperationalLogLevel::Warn,
+                    "stream-fetcher",
+                    "fetch_addon_streams",
+                    "addon-query-timeout",
+                    &[
+                        field("source", source_name),
+                        field("media_type", effective_type),
+                        field("query_index", index + 1),
+                        field("query_id", query_id),
+                        field("timeout_secs", timeout_secs),
+                    ],
                 );
                 last_error = Some(error);
             }
@@ -176,14 +229,89 @@ pub(crate) async fn fetch_prepared_streams_for_addon(
     Ok(Vec::new())
 }
 
-pub(crate) async fn fetch_ranked_streams(
+async fn fetch_addon_stream_outcome(
+    provider: &AddonTransport,
+    rd_provider: &RealDebrid,
+    effective_type: &str,
+    query_ids: &[String],
+    token: Option<String>,
+    addon: AddonConfig,
+) -> AddonStreamFetchOutcome {
+    let started_at = Instant::now();
+    let result = fetch_prepared_streams_for_addon(
+        provider,
+        rd_provider,
+        effective_type,
+        query_ids,
+        token.as_deref(),
+        &addon.url,
+        &addon.name,
+    )
+    .await;
+    let latency_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+
+    match result {
+        Ok(streams) => AddonStreamFetchOutcome {
+            id: addon.id,
+            name: addon.name,
+            streams,
+            latency_ms,
+            error_message: None,
+        },
+        Err(error_message) => AddonStreamFetchOutcome {
+            id: addon.id,
+            name: addon.name,
+            streams: Vec::new(),
+            latency_ms,
+            error_message: Some(error_message),
+        },
+    }
+}
+
+fn summarize_addon_outcome(outcome: &AddonStreamFetchOutcome) -> StreamSourceSummary {
+    let status = if outcome.error_message.is_some() {
+        StreamSourceStatus::Offline
+    } else if outcome.streams.is_empty() || outcome.latency_ms > DEGRADED_SOURCE_LATENCY_MS {
+        StreamSourceStatus::Degraded
+    } else {
+        StreamSourceStatus::Healthy
+    };
+
+    StreamSourceSummary {
+        id: outcome.id.clone(),
+        name: outcome.name.clone(),
+        status,
+        stream_count: outcome.streams.len(),
+        latency_ms: outcome
+            .error_message
+            .is_none()
+            .then_some(outcome.latency_ms),
+        error_message: outcome.error_message.clone(),
+    }
+}
+
+fn build_fatal_stream_error(outcomes: &[AddonStreamFetchOutcome]) -> Option<String> {
+    let errors = outcomes
+        .iter()
+        .filter_map(|outcome| outcome.error_message.as_deref())
+        .take(3)
+        .collect::<Vec<_>>();
+
+    if errors.is_empty() {
+        None
+    } else {
+        Some(errors.join(" | "))
+    }
+}
+
+pub(crate) async fn fetch_stream_selector_data(
     app: &AppHandle,
     playback_state: &PlaybackStateService,
     provider: &AddonTransport,
     rd_provider: &RealDebrid,
     query: &StreamQueryRequest<'_>,
     ranking: &StreamRankingScope,
-) -> Result<Vec<TorrentioStream>, String> {
+) -> Result<StreamSelectorData, String> {
     let effective_type = if query.media_type == "anime" {
         "series".to_string()
     } else {
@@ -217,94 +345,120 @@ pub(crate) async fn fetch_ranked_streams(
         .collect();
 
     if enabled_addons.is_empty() {
-        return Ok(Vec::new());
+        return Ok(StreamSelectorData {
+            streams: Vec::new(),
+            source_summaries: Vec::new(),
+            fatal_error_message: None,
+        });
     }
 
+    let addon_source_priority_addons = enabled_addons.clone();
     let mut futures_vec = Vec::with_capacity(enabled_addons.len());
-    for addon in &enabled_addons {
+    for addon in enabled_addons {
         let query_ids = query_ids.clone();
         let effective_type = effective_type.clone();
         let token = token.clone();
-        let addon_url = addon.url.clone();
-        let source_name = addon.name.clone();
         futures_vec.push(async move {
-            fetch_prepared_streams_for_addon(
+            fetch_addon_stream_outcome(
                 provider,
                 rd_provider,
                 &effective_type,
                 &query_ids,
-                token.as_deref(),
-                &addon_url,
-                &source_name,
+                token,
+                addon,
             )
             .await
         });
     }
 
-    let all_addon_streams = join_all(futures_vec).await;
+    let outcomes = join_all(futures_vec).await;
     let mut merged: Vec<TorrentioStream> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut errors: Vec<String> = Vec::new();
 
-    for result in all_addon_streams {
-        match result {
-            Ok(streams) => merge_unique_streams(&mut merged, &mut seen, streams),
-            Err(error) => errors.push(error),
+    for outcome in &outcomes {
+        merge_unique_streams(&mut merged, &mut seen, outcome.streams.clone());
+    }
+
+    if !merged.is_empty() {
+        let addon_source_priorities =
+            build_addon_source_priority_map(&addon_source_priority_addons);
+        let source_health_priorities = build_source_health_priorities(app, playback_state, &merged);
+        let stream_family_priorities = build_stream_family_priorities(
+            app,
+            playback_state,
+            &ranking.media_id,
+            &ranking.media_type,
+            ranking.season,
+            ranking.episode,
+            &merged,
+        );
+        let title_source_affinities = build_title_source_affinities(
+            app,
+            playback_state,
+            &ranking.media_id,
+            &ranking.media_type,
+            &merged,
+        );
+        let playback_language_preferences = load_effective_playback_language_preferences(
+            &store,
+            app,
+            playback_state,
+            &ranking.media_id,
+            &ranking.media_type,
+        );
+        sort_streams_by_recommendation(
+            &mut merged,
+            StreamRecommendationInputs {
+                addon_source_priorities: &addon_source_priorities,
+                source_health_priorities: &source_health_priorities,
+                stream_family_priorities: &stream_family_priorities,
+                title_source_affinities: &title_source_affinities,
+                match_context: StreamMatchContext {
+                    media_type: &ranking.media_type,
+                    title: ranking.title.as_deref(),
+                    query_season: query.season,
+                    query_episode: query.episode,
+                    canonical_season: ranking.season,
+                    canonical_episode: ranking.episode,
+                },
+                preferred_audio_language: playback_language_preferences
+                    .preferred_audio_language
+                    .as_deref(),
+                preferred_subtitle_language: playback_language_preferences
+                    .preferred_subtitle_language
+                    .as_deref(),
+            },
+        );
+    }
+
+    Ok(StreamSelectorData {
+        fatal_error_message: if merged.is_empty() {
+            build_fatal_stream_error(&outcomes)
+        } else {
+            None
+        },
+        source_summaries: outcomes.iter().map(summarize_addon_outcome).collect(),
+        streams: merged,
+    })
+}
+
+pub(crate) async fn fetch_ranked_streams(
+    app: &AppHandle,
+    playback_state: &PlaybackStateService,
+    provider: &AddonTransport,
+    rd_provider: &RealDebrid,
+    query: &StreamQueryRequest<'_>,
+    ranking: &StreamRankingScope,
+) -> Result<Vec<TorrentioStream>, String> {
+    let data =
+        fetch_stream_selector_data(app, playback_state, provider, rd_provider, query, ranking)
+            .await?;
+
+    if data.streams.is_empty() {
+        if let Some(error) = data.fatal_error_message {
+            return Err(error);
         }
     }
 
-    if merged.is_empty() && !errors.is_empty() {
-        return Err(errors.into_iter().take(3).collect::<Vec<_>>().join(" | "));
-    }
-
-    let addon_source_priorities = build_addon_source_priority_map(&enabled_addons);
-    let source_health_priorities = build_source_health_priorities(app, playback_state, &merged);
-    let stream_family_priorities = build_stream_family_priorities(
-        app,
-        playback_state,
-        &ranking.media_id,
-        &ranking.media_type,
-        ranking.season,
-        ranking.episode,
-        &merged,
-    );
-    let title_source_affinities = build_title_source_affinities(
-        app,
-        playback_state,
-        &ranking.media_id,
-        &ranking.media_type,
-        &merged,
-    );
-    let playback_language_preferences = load_effective_playback_language_preferences(
-        &store,
-        app,
-        playback_state,
-        &ranking.media_id,
-        &ranking.media_type,
-    );
-    sort_streams_by_recommendation(
-        &mut merged,
-        StreamRecommendationInputs {
-            addon_source_priorities: &addon_source_priorities,
-            source_health_priorities: &source_health_priorities,
-            stream_family_priorities: &stream_family_priorities,
-            title_source_affinities: &title_source_affinities,
-            match_context: StreamMatchContext {
-                media_type: &ranking.media_type,
-                title: ranking.title.as_deref(),
-                query_season: query.season,
-                query_episode: query.episode,
-                canonical_season: ranking.season,
-                canonical_episode: ranking.episode,
-            },
-            preferred_audio_language: playback_language_preferences
-                .preferred_audio_language
-                .as_deref(),
-            preferred_subtitle_language: playback_language_preferences
-                .preferred_subtitle_language
-                .as_deref(),
-        },
-    );
-
-    Ok(merged)
+    Ok(data.streams)
 }

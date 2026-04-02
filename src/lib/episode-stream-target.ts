@@ -1,6 +1,9 @@
-import { api, type Episode, type EpisodeStreamMapping } from '@/lib/api';
+import type { Episode } from '@/lib/api';
 
-type EpisodeCoordinates = Pick<Episode, 'season' | 'episode' | 'imdbId' | 'imdbSeason' | 'imdbEpisode'>;
+type EpisodeCoordinates = Pick<
+  Episode,
+  'season' | 'episode' | 'streamLookupId' | 'streamSeason' | 'streamEpisode' | 'aniskipEpisode'
+>;
 
 export interface EpisodeStreamTarget {
   streamId: string;
@@ -11,28 +14,17 @@ export interface EpisodeStreamTarget {
   aniskipEpisode: number;
 }
 
-function fromMapping(mapping: EpisodeStreamMapping): EpisodeStreamTarget {
-  return {
-    streamId: mapping.lookupId,
-    season: mapping.sourceSeason,
-    episode: mapping.sourceEpisode,
-    absoluteSeason: mapping.canonicalSeason,
-    absoluteEpisode: mapping.canonicalEpisode,
-    aniskipEpisode: mapping.aniskipEpisode,
-  };
-}
-
-export function buildFallbackEpisodeStreamTarget(
+export function buildEpisodeStreamTarget(
   fallbackStreamId: string,
   episode: EpisodeCoordinates,
 ): EpisodeStreamTarget {
   return {
-    streamId: episode.imdbId || fallbackStreamId,
-    season: episode.imdbSeason || episode.season,
-    episode: episode.imdbEpisode || episode.episode,
+    streamId: episode.streamLookupId || fallbackStreamId,
+    season: episode.streamSeason || episode.season,
+    episode: episode.streamEpisode || episode.episode,
     absoluteSeason: episode.season,
     absoluteEpisode: episode.episode,
-    aniskipEpisode: episode.imdbEpisode || episode.episode,
+    aniskipEpisode: episode.aniskipEpisode || episode.streamEpisode || episode.episode,
   };
 }
 
@@ -55,22 +47,7 @@ export async function resolveEpisodeStreamTarget(
   fallbackStreamId: string,
   episode: EpisodeCoordinates,
 ): Promise<EpisodeStreamTarget> {
-  if (mediaType !== 'movie') {
-    try {
-      const mapping = await api.getEpisodeStreamMapping(
-        mediaType,
-        mediaId,
-        episode.season,
-        episode.episode,
-      );
-
-      if (mapping) {
-        return fromMapping(mapping);
-      }
-    } catch {
-      // Use the embedded episode metadata as a bounded fallback.
-    }
-  }
-
-  return buildFallbackEpisodeStreamTarget(fallbackStreamId, episode);
+  void mediaType;
+  void mediaId;
+  return buildEpisodeStreamTarget(fallbackStreamId, episode);
 }

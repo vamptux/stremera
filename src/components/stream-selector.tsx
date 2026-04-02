@@ -1,6 +1,4 @@
-import { useQuery, useMutation, useQueries } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
-import { api, getErrorMessage, type TorrentioStream } from '@/lib/api';
+import { getErrorMessage } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Loader2, FileVideo, X, SlidersHorizontal } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -9,60 +7,13 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { DownloadModal } from '@/components/download-modal';
 import { StreamItem } from '@/components/stream-selector-item';
 import { cn } from '@/lib/utils';
-import { toast } from 'sonner';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useOnlineStatus } from '@/hooks/use-online-status';
+import { useStreamSelectorController } from '@/hooks/use-stream-selector-controller';
 import {
-  buildStreamStats,
-  DEFAULT_FILTERS,
-  filterAndSortStreams,
-  getStreamKey,
-  isHttpStreamUrl,
-  isDebridCapable,
   type BatchFilter,
-  type FilterState,
   type QualityFilter,
   type SourceFilter,
   type SortMode,
 } from '@/lib/stream-selector-utils';
-import { buildPlayerNavigationTarget } from '@/lib/player-navigation';
-import { buildStreamRankingOptions } from '@/lib/stream-ranking';
-import { resolveStreamCandidate as resolvePlayableStreamCandidate } from '@/lib/stream-resolution';
-
-const isDev = import.meta.env.DEV;
-
-/** Returns true when the error message indicates RD is still caching the torrent. */
-function isDebridProcessingError(message: string): boolean {
-  const lower = message.toLowerCase();
-  return (
-    lower.includes('currently downloading on real-debrid') ||
-    lower.includes('timeout waiting for real-debrid')
-  );
-}
-
-function isDebridSetupError(message: string): boolean {
-  const lower = message.toLowerCase();
-  return (
-    lower.includes('requires a configured debrid provider') ||
-    lower.includes('requires debrid or a direct-link addon') ||
-    lower.includes('api token is invalid or expired') ||
-    lower.includes('real-debrid auth error')
-  );
-}
-
-/** Returns true when the error message indicates a Cloudflare / rate-limit block. */
-function isCloudflareError(message: string): boolean {
-  const lower = message.toLowerCase();
-  return (
-    lower.includes('cloudflare') ||
-    lower.includes('cf-ray') ||
-    lower.includes('access denied') ||
-    lower.includes('rate limit') ||
-    lower.includes('too many requests') ||
-    lower.includes('429') ||
-    lower.includes('403 forbidden')
-  );
-}
 
 interface StreamSelectorProps {
   open: boolean;
@@ -96,106 +47,6 @@ interface StreamSelectorProps {
   }) => void | Promise<void>;
 }
 
-interface AddonStreamQueryResult {
-  streams: TorrentioStream[];
-  latencyMs: number;
-}
-
-type AddonHealthStatus = 'healthy' | 'degraded' | 'offline' | 'loading';
-
-interface AddonHealthMetric {
-  id: string;
-  name: string;
-  status: AddonHealthStatus;
-  streamCount: number;
-  latencyMs?: number;
-  errorMessage?: string;
-}
-
-interface ActiveResolveFeedback {
-  mode: 'play' | 'download';
-  title: string;
-  subtitle: string;
-}
-
-const STREAM_SELECTOR_FILTERS_STORAGE_KEY = 'streamy_stream_selector_filters';
-const QUALITY_FILTER_VALUES: QualityFilter[] = ['all', '4k', '1080p', '720p', 'sd'];
-const SOURCE_FILTER_VALUES: SourceFilter[] = ['all', 'cached'];
-const SORT_MODE_VALUES: SortMode[] = ['smart', 'quality', 'size', 'seeds'];
-const BATCH_FILTER_VALUES: BatchFilter[] = ['all', 'episodes', 'packs'];
-
-function normalizeStoredFilters(candidate: unknown, defaults: FilterState): FilterState {
-  if (!candidate || typeof candidate !== 'object') {
-    return defaults;
-  }
-
-  const stored = candidate as Partial<Record<keyof FilterState, unknown>>;
-  const quality = QUALITY_FILTER_VALUES.includes(stored.quality as QualityFilter)
-    ? (stored.quality as QualityFilter)
-    : defaults.quality;
-  const source = SOURCE_FILTER_VALUES.includes(stored.source as SourceFilter)
-    ? (stored.source as SourceFilter)
-    : defaults.source;
-  const sort = SORT_MODE_VALUES.includes(stored.sort as SortMode)
-    ? (stored.sort as SortMode)
-    : defaults.sort;
-  const storedBatch = BATCH_FILTER_VALUES.includes(stored.batch as BatchFilter)
-    ? (stored.batch as BatchFilter)
-    : defaults.batch;
-  const batch = defaults.batch === 'all' && storedBatch !== 'all' ? 'all' : storedBatch;
-  const addon =
-    typeof stored.addon === 'string' && stored.addon.trim().length > 0
-      ? stored.addon.trim()
-      : defaults.addon;
-
-  return {
-    quality,
-    source,
-    addon,
-    sort,
-    batch,
-  };
-}
-
-function loadStoredFilters(defaults: FilterState): FilterState {
-  try {
-    const raw = window.localStorage.getItem(STREAM_SELECTOR_FILTERS_STORAGE_KEY);
-    if (!raw) {
-      return defaults;
-    }
-
-    return normalizeStoredFilters(JSON.parse(raw), defaults);
-  } catch {
-    return defaults;
-  }
-}
-
-function buildResolveFeedback(
-  stream: TorrentioStream,
-  mode: 'play' | 'download',
-): ActiveResolveFeedback {
-  const primaryLine =
-    stream.name
-      ?.split('\n')
-      .map((line) => line.trim())
-      .find(Boolean) ||
-    stream.title
-      ?.split('\n')
-      .map((line) => line.trim())
-      .find(Boolean) ||
-    'Selected stream';
-
-  const normalizedTitle = primaryLine.replace(/^[^\p{L}\p{N}]+/u, '').trim() || 'Selected stream';
-  const deliveryLabel = stream.cached ? 'RD+' : isHttpStreamUrl(stream.url) ? 'HTTP' : 'Torrent';
-  const subtitle = [stream.source_name?.trim(), deliveryLabel].filter(Boolean).join(' • ');
-
-  return {
-    mode,
-    title: normalizedTitle,
-    subtitle,
-  };
-}
-
 export function StreamSelector({
   open,
   onClose,
@@ -220,402 +71,63 @@ export function StreamSelector({
   inlineMode = false,
   onStreamResolved,
 }: StreamSelectorProps) {
-  const navigate = useNavigate();
-  const isOnline = useOnlineStatus();
-  const [downloadModalOpen, setDownloadModalOpen] = useState(false);
-  const [downloadData, setDownloadData] = useState<{ url: string; title: string } | null>(null);
-  const [activeResolveKey, setActiveResolveKey] = useState<string | null>(null);
-  const [activeResolveFeedback, setActiveResolveFeedback] = useState<ActiveResolveFeedback | null>(
-    null,
-  );
-  const openSessionKeyRef = useRef<string | null>(null);
-  const isSeriesLike = type === 'series' || type === 'anime';
-  // Kitsu-backed anime can surface as `series`; force anime stream lookup mode.
-  const streamMediaType: 'movie' | 'series' | 'anime' =
-    type === 'anime' || (type === 'series' && id.trim().toLowerCase().startsWith('kitsu:'))
-      ? 'anime'
-      : type;
-
-  const defaultFilters = useMemo<FilterState>(() => {
-    const preferEpisodeOnly = isSeriesLike && season !== undefined && episode !== undefined;
-    return {
-      ...DEFAULT_FILTERS,
-      batch: preferEpisodeOnly ? 'episodes' : 'all',
-    };
-  }, [isSeriesLike, season, episode]);
-
-  // Filter + sort state
-  const [filters, setFilters] = useState<FilterState>(() => loadStoredFilters(defaultFilters));
   const {
-    quality: qualityFilter,
-    source: sourceFilter,
-    sort: sortMode,
-    batch: batchFilter,
-  } = filters;
-
-  const closeSelector = useCallback(() => {
-    setActiveResolveKey(null);
-    setActiveResolveFeedback(null);
-    onClose();
-  }, [onClose]);
-
-  const lookupId = streamId || id;
-  const normalizedCurrentStreamUrl = currentStreamUrl?.trim();
-  const selectorSessionKey = `${inlineMode ? 'inline' : 'dialog'}|${lookupId}|${season ?? 'na'}|${episode ?? 'na'}|${absoluteEpisode ?? 'na'}`;
-  const compactOverview = useMemo(() => {
-    if (!overview) return '';
-    const normalized = overview.replace(/\s+/g, ' ').trim();
-    const maxChars = 200;
-    if (normalized.length <= maxChars) return normalized;
-    return `${normalized.slice(0, maxChars).trimEnd()}…`;
-  }, [overview]);
-
-  useEffect(() => {
-    if (!open) {
-      openSessionKeyRef.current = null;
-      return;
-    }
-
-    if (openSessionKeyRef.current === selectorSessionKey) return;
-    openSessionKeyRef.current = selectorSessionKey;
-
-    const timer = window.setTimeout(() => {
-      setFilters(loadStoredFilters(defaultFilters));
-      setActiveResolveKey(null);
-      setActiveResolveFeedback(null);
-    }, 0);
-
-    return () => window.clearTimeout(timer);
-  }, [open, selectorSessionKey, defaultFilters]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(STREAM_SELECTOR_FILTERS_STORAGE_KEY, JSON.stringify(filters));
-    } catch {
-      // Ignore storage failures and keep the selector usable.
-    }
-  }, [filters]);
-
-  const resolveStreamCandidate = useCallback(
-    (stream: TorrentioStream) =>
-      resolvePlayableStreamCandidate(stream, {
-        season,
-        episode,
-      }),
-    [season, episode],
-  );
-
-  const {
-    data: addonConfigs = [],
-    refetch: refetchAddonConfigs,
-    isLoading: isLoadingAddonConfigs,
-  } = useQuery({
-    queryKey: ['addonConfigs'],
-    queryFn: api.getAddonConfigs,
-    enabled: open && isOnline,
-    staleTime: 1000 * 60 * 5,
+    activeResolveFeedback,
+    activeResolveKey,
+    addonHealthMetrics,
+    batchFilter,
+    compactOverview,
+    debridStreams,
+    defaultFilters,
+    downloadData,
+    downloadModalOpen,
+    effectiveAddonFilter,
+    enabledAddons,
+    fatalAddonError,
+    handleDialogOpenChange,
+    handleDownloadStream,
+    handleRequestClose,
+    handleSelectStream,
+    hasActiveFilter,
+    healthSummary,
+    isAnyResolving,
+    isLoading,
+    isLoadingAddonConfigs,
+    isOnline,
+    normalizedCurrentStreamUrl,
+    qualityFilter,
+    refetchStreams,
+    setDownloadModalOpen,
+    setFilters,
+    showBatchFilter,
+    sortMode,
+    sortedStreams,
+    sourceFilter,
+    streamStats,
+    streams,
+  } = useStreamSelectorController({
+    open,
+    onClose,
+    onBeforePlayerNavigation,
+    type,
+    id,
+    streamId,
+    currentStreamUrl,
+    season,
+    episode,
+    absoluteSeason,
+    absoluteEpisode,
+    aniskipEpisode,
+    startTime,
+    title,
+    overview,
+    poster,
+    backdrop,
+    logo,
+    from,
+    inlineMode,
+    onStreamResolved,
   });
-
-  const enabledAddons = useMemo(
-    () => addonConfigs.filter((addon) => addon.enabled && addon.url.trim().length > 0),
-    [addonConfigs],
-  );
-
-  const effectiveAddonFilter = useMemo(() => {
-    if (filters.addon === 'all') return 'all';
-    return enabledAddons.some((addon) => addon.name === filters.addon) ? filters.addon : 'all';
-  }, [enabledAddons, filters.addon]);
-
-  const effectiveFilters = useMemo<FilterState>(() => {
-    if (effectiveAddonFilter === filters.addon) {
-      return filters;
-    }
-
-    return {
-      ...filters,
-      addon: effectiveAddonFilter,
-    };
-  }, [effectiveAddonFilter, filters]);
-
-  const {
-    data: rankedStreams = [],
-    error: rankedStreamsError,
-    isLoading: isLoadingRankedStreams,
-    refetch: refetchRankedStreams,
-  } = useQuery({
-    queryKey: ['streams', streamMediaType, lookupId, season, episode, absoluteEpisode],
-    queryFn: () =>
-      api.getStreams(
-        streamMediaType,
-        lookupId,
-        season,
-        episode,
-        absoluteEpisode,
-        buildStreamRankingOptions({
-          mediaId: id,
-          mediaType: streamMediaType,
-          season: absoluteSeason ?? season,
-          episode: absoluteEpisode ?? episode,
-          title,
-        }),
-      ),
-    enabled: open && !!lookupId && isOnline,
-    staleTime: 1000 * 60 * 3,
-    retry: 0,
-  });
-
-  const addonStreamQueries = useQueries({
-    queries: enabledAddons.map((addon) => ({
-      queryKey: [
-        'streamsByAddon',
-        addon.id,
-        addon.url,
-        streamMediaType,
-        lookupId,
-        season,
-        episode,
-        absoluteEpisode,
-      ],
-      queryFn: () =>
-        (async (): Promise<AddonStreamQueryResult> => {
-          const startedAt = performance.now();
-          const streams = await api.getStreamsForAddon(
-            streamMediaType,
-            lookupId,
-            addon.url,
-            addon.name,
-            season,
-            episode,
-            absoluteEpisode,
-          );
-
-          return {
-            streams,
-            latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
-          };
-        })(),
-      enabled: open && !!lookupId && isOnline,
-      staleTime: 1000 * 60 * 3,
-      retry: 0,
-    })),
-  });
-
-  const streams = rankedStreams;
-
-  const settledAddonQueryCount = addonStreamQueries.filter((q) => q.isSuccess || q.isError).length;
-  const hasPendingAddonQueries = addonStreamQueries.some((q) => q.isPending || q.isFetching);
-  const isLoading =
-    isLoadingAddonConfigs ||
-    (enabledAddons.length > 0 && streams.length === 0 && (isLoadingRankedStreams || hasPendingAddonQueries));
-  const isBackgroundLoadingSources =
-    streams.length > 0 &&
-    addonStreamQueries.length > 0 &&
-    settledAddonQueryCount < addonStreamQueries.length;
-  const fatalAddonError =
-    streams.length === 0
-      ? (rankedStreamsError ??
-          (addonStreamQueries.length > 0 && addonStreamQueries.every((q) => q.isError)
-            ? (addonStreamQueries.find((q) => q.error)?.error ?? null)
-            : null))
-      : null;
-
-  const refetchStreams = () => {
-    void refetchAddonConfigs();
-    void refetchRankedStreams();
-    for (const query of addonStreamQueries) {
-      void query.refetch();
-    }
-  };
-
-  const addonHealthMetrics = useMemo<AddonHealthMetric[]>(() => {
-    return enabledAddons.map((addon, index) => {
-      const query = addonStreamQueries[index];
-      const streamCount = query?.data?.streams?.length ?? 0;
-      const latencyMs = query?.data?.latencyMs;
-      const errorMessage = query?.error ? getErrorMessage(query.error) : undefined;
-
-      let status: AddonHealthStatus = 'loading';
-      if (query?.isError) {
-        status = 'offline';
-      } else if (query?.isSuccess) {
-        if (streamCount === 0) {
-          status = 'degraded';
-        } else if (typeof latencyMs === 'number' && latencyMs > 4500) {
-          status = 'degraded';
-        } else {
-          status = 'healthy';
-        }
-      }
-
-      return {
-        id: addon.id,
-        name: addon.name,
-        status,
-        streamCount,
-        latencyMs,
-        errorMessage,
-      };
-    });
-  }, [enabledAddons, addonStreamQueries]);
-
-  const healthSummary = useMemo(() => {
-    let healthy = 0;
-    let degraded = 0;
-    let offline = 0;
-
-    for (const metric of addonHealthMetrics) {
-      if (metric.status === 'healthy') healthy += 1;
-      else if (metric.status === 'degraded') degraded += 1;
-      else if (metric.status === 'offline') offline += 1;
-    }
-
-    return { healthy, degraded, offline };
-  }, [addonHealthMetrics]);
-
-  const resolveStreamMutation = useMutation({
-    mutationFn: resolveStreamCandidate,
-    onMutate: (stream) => {
-      setActiveResolveKey(getStreamKey(stream));
-      setActiveResolveFeedback(buildResolveFeedback(stream, 'play'));
-    },
-    onSuccess: async (data, stream) => {
-      const feedback = buildResolveFeedback(stream, 'play');
-      if (onStreamResolved) {
-        void Promise.resolve(
-          onStreamResolved({
-            ...data,
-            selectedStreamKey: getStreamKey(stream),
-            sourceName: stream.source_name?.trim() || undefined,
-            streamFamily: stream.stream_family?.trim() || undefined,
-          }),
-        ).finally(() => {
-          closeSelector();
-        });
-        return;
-      }
-
-      const playerSeason = absoluteSeason ?? season;
-      const playerEpisode = absoluteEpisode ?? episode;
-      const playerNavigation = buildPlayerNavigationTarget(streamMediaType, id, {
-        streamUrl: data.url,
-        streamLookupId: lookupId,
-        streamSeason: season,
-        streamEpisode: episode,
-        absoluteSeason: playerSeason,
-        absoluteEpisode: playerEpisode,
-        selectedStreamKey: getStreamKey(stream),
-        streamSourceName: stream.source_name,
-        streamFamily: stream.stream_family,
-        openingStreamName: feedback.title,
-        openingStreamSource: feedback.subtitle,
-        title,
-        poster,
-        backdrop,
-        logo,
-        format: data.format,
-        startTime,
-        aniskipEpisode,
-        from,
-      });
-
-      await Promise.resolve(onBeforePlayerNavigation?.()).catch(() => undefined);
-
-      navigate(playerNavigation.target, { state: playerNavigation.state });
-      closeSelector();
-    },
-    onError: (err) => {
-      if (isDev) console.error('Stream resolution failed:', err);
-      const msg = getErrorMessage(err);
-
-      if (isDebridProcessingError(msg)) {
-        toast.info('Still downloading on Debrid', {
-          description: 'Real-Debrid is caching this file. Try again in a moment.',
-          duration: 4500,
-        });
-      } else if (isDebridSetupError(msg)) {
-        toast.error('Stream needs debrid or direct playback', {
-          description: msg,
-          duration: 6000,
-        });
-      } else if (isCloudflareError(msg)) {
-        toast.warning('Blocked by Cloudflare / rate limit', {
-          description:
-            'The stream provider is rate-limiting requests. Wait 30 s then retry, or try another stream.',
-          duration: 7000,
-        });
-      } else {
-        toast.error('Failed to resolve stream', { description: msg, duration: 5000 });
-      }
-    },
-    onSettled: () => {
-      setActiveResolveKey(null);
-      setActiveResolveFeedback(null);
-    },
-  });
-
-  const resolveDownloadMutation = useMutation({
-    mutationFn: resolveStreamCandidate,
-    onMutate: (stream) => {
-      setActiveResolveKey(getStreamKey(stream));
-      setActiveResolveFeedback(buildResolveFeedback(stream, 'download'));
-    },
-    onSuccess: (data) => {
-      setDownloadData({ url: data.url, title });
-      setDownloadModalOpen(true);
-    },
-    onError: (err) => {
-      toast.error('Failed to resolve stream for download', { description: getErrorMessage(err) });
-    },
-    onSettled: () => {
-      setActiveResolveKey(null);
-      setActiveResolveFeedback(null);
-    },
-  });
-
-  const isAnyResolving = resolveStreamMutation.isPending || resolveDownloadMutation.isPending;
-
-  const handleRequestClose = () => {
-    if (isAnyResolving) return;
-    closeSelector();
-  };
-
-  const handleDialogOpenChange = (nextOpen: boolean) => {
-    if (!nextOpen) {
-      handleRequestClose();
-    }
-  };
-
-  // Base: only streams that can actually be resolved (debrid-cached or direct HTTP).
-  // All downstream filtering, counts and display work from this set — never the raw list.
-  const debridStreams = useMemo(() => streams.filter(isDebridCapable), [streams]);
-
-  const sortedStreams = useMemo(() => {
-    if (!debridStreams.length) return [];
-    return filterAndSortStreams(debridStreams, effectiveFilters);
-  }, [debridStreams, effectiveFilters]);
-
-  const streamStats = useMemo(() => {
-    return buildStreamStats(debridStreams);
-  }, [debridStreams]);
-
-  const showBatchFilter = isSeriesLike && season !== undefined && episode !== undefined;
-
-  const hasActiveFilter =
-    qualityFilter !== defaultFilters.quality ||
-    sourceFilter !== defaultFilters.source ||
-    effectiveAddonFilter !== defaultFilters.addon ||
-    sortMode !== defaultFilters.sort ||
-    batchFilter !== defaultFilters.batch;
-
-  const handleSelectStream = (stream: TorrentioStream) => {
-    if (isAnyResolving) return;
-    resolveStreamMutation.mutate(stream);
-  };
-
-  const handleDownloadStream = (stream: TorrentioStream) => {
-    if (isAnyResolving) return;
-    resolveDownloadMutation.mutate(stream);
-  };
 
   if (inlineMode && !open) return null;
 
@@ -703,7 +215,7 @@ export function StreamSelector({
             <Loader2 className='w-6 h-6 animate-spin text-white/20' />
             <p className='text-[11px] font-semibold uppercase tracking-widest text-white/30 animate-pulse'>
               {enabledAddons.length > 0
-                ? `Searching streams… ${settledAddonQueryCount}/${enabledAddons.length} sources`
+                ? `Searching ${enabledAddons.length} sources…`
                 : 'Preparing sources…'}
             </p>
           </div>
@@ -921,11 +433,6 @@ export function StreamSelector({
                   </div>
 
                   <div className='ml-auto flex items-center gap-2 flex-shrink-0'>
-                    {isBackgroundLoadingSources && (
-                      <span className='text-[10px] font-medium text-zinc-500'>
-                        Loading {settledAddonQueryCount}/{addonStreamQueries.length} sources…
-                      </span>
-                    )}
                     <span className='text-[10px] font-semibold text-zinc-500 tabular-nums'>
                       {sortedStreams.length === debridStreams.length
                         ? `${sortedStreams.length} streams`
@@ -946,7 +453,7 @@ export function StreamSelector({
 
               {sortedStreams.length > 0 ? (
                 sortedStreams.map((stream) => {
-                  const streamKey = getStreamKey(stream);
+                  const streamKey = stream.streamKey;
                   const streamUrl = stream.url?.trim();
                   const isUrlMatch =
                     !!normalizedCurrentStreamUrl &&

@@ -1,17 +1,21 @@
 use super::{
-    build_provider_http_client, AnimeCharacterProfile, AnimeProductionCompanyProfile,
-    AnimeStaffProfile, AnimeStreamingPlatformProfile, AnimeSupplementalMetadata, Episode,
-    MediaDetails, MediaItem, Trailer,
+    build_episode_season_years, build_provider_http_client, normalize_media_year,
+    AnimeSupplementalMetadata, Episode, MediaDetails, MediaItem, Trailer,
 };
+use crate::operational_log::{field, log_operational_event, OperationalLogLevel};
+use futures_util::future::join_all;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use urlencoding::encode;
 
+mod supplements;
+
 const BASE_URL: &str = "https://anime-kitsu.strem.fun";
-const CATALOG_PAGE_SIZE: usize = 20;
-const SEARCH_PAGE_LIMIT: usize = 5;
+const EDGE_BASE_URL: &str = "https://kitsu.io/api/edge/anime";
+const EDGE_PAGE_LIMIT: usize = 20;
+const EDGE_SUPPLEMENT_OFFSETS: [usize; 2] = [20, 40];
 const RELATION_LIMIT: usize = 8;
 const ANIME_CHARACTER_LIMIT: usize = 10;
 const ANIME_STAFF_LIMIT: usize = 10;
@@ -244,25 +248,177 @@ impl Kitsu {
         serde_json::from_str(&text).map_err(|e| format!("Parse Error: {}", e))
     }
 
-    fn extract_release_year(value: &str) -> Option<u32> {
-        let trimmed = value.trim();
-        if trimmed.len() < 4 {
-            return None;
-        }
-
-        let year_text = trimmed.get(0..4)?;
-        let year = year_text.parse::<u32>().ok()?;
-        if (1900..=2100).contains(&year) {
-            Some(year)
-        } else {
-            None
-        }
-    }
-
     pub fn new() -> Self {
         Self {
             client: build_provider_http_client(None),
         }
+    }
+
+    fn merge_items_in_order<I>(batches: I) -> Vec<MediaItem>
+    where
+        I: IntoIterator<Item = Vec<MediaItem>>,
+    {
+        let mut items = Vec::new();
+        let mut seen_ids = HashSet::new();
+
+        for batch in batches {
+            for item in batch {
+                if seen_ids.insert(item.id.clone()) {
+                    items.push(item);
+                }
+            }
+        }
+
+        items
+    }
+
+    fn build_edge_catalog_url(
+        sort: &str,
+        genre: Option<&str>,
+        status: Option<&str>,
+        offset: Option<usize>,
+    ) -> String {
+        let mut query = vec![
+            format!("page[limit]={}", EDGE_PAGE_LIMIT),
+            format!("sort={}", sort),
+        ];
+
+        if let Some(offset) = offset.filter(|value| *value > 0) {
+            query.push(format!("page[offset]={}", offset));
+        }
+
+        if let Some(status) = status {
+            query.push(format!("filter[status]={}", status));
+        }
+
+        if let Some(genre) = genre {
+            query.push(format!("filter[categories]={}", encode(genre)));
+        }
+
+        format!("{}?{}", EDGE_BASE_URL, query.join("&"))
+    }
+
+    fn map_edge_item(entry: &Value) -> Option<MediaItem> {
+        let id = entry.get("id").and_then(Value::as_str)?;
+        let title = Self::extract_value_string(entry, "/attributes/canonicalTitle")
+            .or_else(|| Self::extract_value_string(entry, "/attributes/titles/en"))
+            .or_else(|| Self::extract_value_string(entry, "/attributes/titles/en_jp"))
+            .or_else(|| Self::extract_value_string(entry, "/attributes/titles/ja_jp"))?;
+        let subtype = Self::extract_value_string(entry, "/attributes/subtype");
+        let media_type = if subtype
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("movie"))
+        {
+            "movie"
+        } else {
+            "series"
+        };
+
+        Some(MediaItem {
+            id: format!("kitsu:{}", id),
+            title,
+            poster: Self::extract_image_url(entry, "posterImage"),
+            backdrop: Self::extract_image_url(entry, "coverImage"),
+            logo: None,
+            description: Self::extract_value_string(entry, "/attributes/synopsis")
+                .or_else(|| Self::extract_value_string(entry, "/attributes/description")),
+            year: Self::extract_value_string(entry, "/attributes/startDate"),
+            primary_year: None,
+            display_year: None,
+            type_: media_type.to_string(),
+            relation_role: None,
+            relation_context_label: None,
+            relation_preferred_season: None,
+        })
+    }
+
+    fn map_edge_catalog_items(body: &Value) -> Vec<MediaItem> {
+        body.get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Self::map_edge_item)
+            .collect()
+    }
+
+    async fn fetch_edge_catalog_items(
+        &self,
+        sort: &str,
+        genre: Option<&str>,
+        status: Option<&str>,
+        offset: Option<usize>,
+    ) -> Result<Vec<MediaItem>, String> {
+        let url = Self::build_edge_catalog_url(sort, genre, status, offset);
+
+        let body = self.fetch_edge_value(&url).await?;
+        Ok(Self::map_edge_catalog_items(&body))
+    }
+
+    async fn fetch_catalog_supplements(
+        &self,
+        catalog_id: &str,
+        genre: Option<&str>,
+    ) -> Vec<Vec<MediaItem>> {
+        let requests = match catalog_id {
+            "kitsu-anime-popular" => {
+                if genre.is_some() {
+                    vec![self.fetch_edge_catalog_items("ratingRank", genre, None, None)]
+                } else {
+                    EDGE_SUPPLEMENT_OFFSETS
+                        .into_iter()
+                        .map(|offset| {
+                            self.fetch_edge_catalog_items(
+                                "popularityRank",
+                                None,
+                                None,
+                                Some(offset),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }
+            }
+            "kitsu-anime-rating" => {
+                if genre.is_some() {
+                    vec![self.fetch_edge_catalog_items("popularityRank", genre, None, None)]
+                } else {
+                    EDGE_SUPPLEMENT_OFFSETS
+                        .into_iter()
+                        .map(|offset| {
+                            self.fetch_edge_catalog_items("ratingRank", None, None, Some(offset))
+                        })
+                        .collect::<Vec<_>>()
+                }
+            }
+            "kitsu-anime-airing" => {
+                vec![self.fetch_edge_catalog_items("-startDate", genre, Some("current"), None)]
+            }
+            _ => return Vec::new(),
+        };
+
+        let results = join_all(requests).await;
+        let mut supplements = Vec::new();
+
+        for result in results {
+            match result {
+                Ok(items) if !items.is_empty() => supplements.push(items),
+                Ok(_) => {}
+                Err(error) => {
+                    log_operational_event(
+                        OperationalLogLevel::Warn,
+                        "kitsu",
+                        "fetch_catalog_supplement",
+                        "failed",
+                        &[
+                            field("catalog_id", catalog_id),
+                            field("genre", genre.unwrap_or("all")),
+                            field("error", error),
+                        ],
+                    );
+                }
+            }
+        }
+
+        supplements
     }
 
     pub async fn get_anime_catalog(
@@ -271,6 +427,12 @@ impl Kitsu {
         genre: Option<String>,
         skip: Option<u32>,
     ) -> Result<Vec<MediaItem>, String> {
+        // Live validation against the public addon shows `skip` values repeat the first page.
+        // Treat Kitsu browse as single-page until a working pagination contract is available.
+        if skip.filter(|value| *value > 0).is_some() {
+            return Ok(Vec::new());
+        }
+
         let supports_genre = matches!(
             catalog_id,
             "kitsu-anime-airing" | "kitsu-anime-popular" | "kitsu-anime-rating"
@@ -283,65 +445,15 @@ impl Kitsu {
             catalog_id
         };
 
-        let effective_supports_skip = matches!(
-            effective_catalog,
-            "kitsu-anime-airing"
-                | "kitsu-anime-popular"
-                | "kitsu-anime-rating"
-                | "kitsu-anime-list"
-        );
+        let url = Self::build_catalog_url(effective_catalog, &genre, None);
+        let addon_items = self.fetch_items(&url).await?;
+        let supplements = self
+            .fetch_catalog_supplements(effective_catalog, genre.as_deref())
+            .await;
 
-        if !effective_supports_skip {
-            let url = Self::build_catalog_url(effective_catalog, &genre, None);
-            #[cfg(debug_assertions)]
-            eprintln!("Fetching Kitsu Catalog (single): {}", url);
-            return self.fetch_items(&url).await;
-        }
-
-        // Bounded pagination keeps browse latency predictable.
-        let mut all_items: Vec<MediaItem> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-
-        let (start_skip, max_pages) = match skip {
-            Some(s) => (s as usize, 3),
-            None => (0, 5),
-        };
-
-        for page in 0..max_pages {
-            let page_skip = start_skip + page * CATALOG_PAGE_SIZE;
-            let skip_opt = if page_skip == 0 {
-                None
-            } else {
-                Some(page_skip as u32)
-            };
-            let url = Self::build_catalog_url(effective_catalog, &genre, skip_opt);
-
-            #[cfg(debug_assertions)]
-            eprintln!("Fetching Kitsu Catalog: {}", url);
-
-            let page_items_opt = self.fetch_items_optional(&url).await?;
-            let Some(page_items) = page_items_opt else {
-                break;
-            };
-
-            if page_items.is_empty() {
-                break;
-            }
-
-            let mut added_this_page = 0usize;
-            for item in page_items {
-                if seen.insert(item.id.clone()) {
-                    all_items.push(item);
-                    added_this_page += 1;
-                }
-            }
-
-            if added_this_page < CATALOG_PAGE_SIZE {
-                break;
-            }
-        }
-
-        Ok(all_items)
+        Ok(Self::merge_items_in_order(
+            std::iter::once(addon_items).chain(supplements.into_iter()),
+        ))
     }
 
     pub async fn search_anime(&self, query: &str) -> Result<Vec<MediaItem>, String> {
@@ -350,47 +462,8 @@ impl Kitsu {
             return Ok(Vec::new());
         }
 
-        let mut all_items: Vec<MediaItem> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-
-        let max_pages: usize = SEARCH_PAGE_LIMIT; // up to ~100 search results
-
-        for page in 0..max_pages {
-            let skip = page * CATALOG_PAGE_SIZE;
-            let skip_opt = if skip == 0 { None } else { Some(skip as u32) };
-            let url = Self::build_search_url(query, skip_opt);
-
-            #[cfg(debug_assertions)]
-            eprintln!("Searching Kitsu: {}", url);
-
-            let page_items_opt = self.fetch_items_optional(&url).await?;
-            let Some(page_items) = page_items_opt else {
-                // If skip isn't supported here, fall back to single page.
-                if page == 0 {
-                    let single_url = Self::build_search_url(query, None);
-                    return self.fetch_items(&single_url).await;
-                }
-                break;
-            };
-
-            if page_items.is_empty() {
-                break;
-            }
-
-            let mut added_this_page = 0usize;
-            for item in page_items {
-                if seen.insert(item.id.clone()) {
-                    all_items.push(item);
-                    added_this_page += 1;
-                }
-            }
-
-            if added_this_page < CATALOG_PAGE_SIZE {
-                break;
-            }
-        }
-
-        Ok(all_items)
+        let url = Self::build_search_url(query, None);
+        self.fetch_items(&url).await
     }
 
     fn map_videos_to_episodes(videos: Vec<MetaVideo>) -> Vec<Episode> {
@@ -472,11 +545,16 @@ impl Kitsu {
                     season: display_season,
                     episode: display_episode,
                     released: v.released,
+                    release_date: None,
                     overview: v.overview,
                     thumbnail,
                     imdb_id: v.imdb_id,
                     imdb_season: inferred_imdb_season,
                     imdb_episode: v.imdb_episode,
+                    stream_lookup_id: None,
+                    stream_season: None,
+                    stream_episode: None,
+                    aniskip_episode: None,
                 }
             })
             .collect()
@@ -505,36 +583,7 @@ impl Kitsu {
             .into_iter()
             .collect::<Vec<u32>>();
         seasons.sort_unstable();
-
-        let mut years_by_season: HashMap<u32, Vec<u32>> = HashMap::new();
-        for ep in &episodes_all {
-            let Some(released) = ep.released.as_deref() else {
-                continue;
-            };
-            let Some(year) = Self::extract_release_year(released) else {
-                continue;
-            };
-            years_by_season.entry(ep.season).or_default().push(year);
-        }
-
-        let mut season_years: HashMap<u32, String> = HashMap::new();
-        for (season_num, years) in years_by_season {
-            if years.is_empty() {
-                continue;
-            }
-
-            let mut sorted_years = years;
-            sorted_years.sort_unstable();
-            sorted_years.dedup();
-
-            let label = match (sorted_years.first(), sorted_years.last()) {
-                (Some(first), Some(last)) if first != last => format!("{}-{}", first, last),
-                (Some(single), _) => single.to_string(),
-                _ => continue,
-            };
-
-            season_years.insert(season_num, label);
-        }
+        let season_years = build_episode_season_years(&episodes_all).unwrap_or_default();
 
         let total = episodes_all.len();
         let resolved_season = Self::default_episode_page_season(&seasons, season);
@@ -623,7 +672,7 @@ impl Kitsu {
         // Relations Future
         let relations_future = async {
             if let Some(nid) = &numeric_id_opt {
-                self.fetch_relations(nid).await
+                supplements::fetch_relations(self, nid).await
             } else {
                 None
             }
@@ -640,7 +689,7 @@ impl Kitsu {
         } else {
             // Fallback: Extract ID from response and fetch
             let fallback_id = m.id.strip_prefix("kitsu:").unwrap_or(&m.id);
-            self.fetch_relations(fallback_id).await
+            supplements::fetch_relations(self, fallback_id).await
         };
 
         Ok(MediaDetails {
@@ -650,7 +699,10 @@ impl Kitsu {
             poster: m.poster,
             backdrop: m.background,
             logo: m.logo,
-            year: m.year,
+            year: normalize_media_year(m.year, m.release_info),
+            primary_year: None,
+            display_year: None,
+            release_date: None,
             type_: m.type_,
             description: m.description,
             rating: m.imdb_rating,
@@ -672,6 +724,7 @@ impl Kitsu {
             } else {
                 None
             },
+            season_years: None,
         })
     }
 
@@ -683,568 +736,7 @@ impl Kitsu {
         &self,
         id: &str,
     ) -> Result<AnimeSupplementalMetadata, String> {
-        let numeric_id = id.strip_prefix("kitsu:").unwrap_or(id).trim();
-        if numeric_id.is_empty() {
-            return Err("Anime ID is required for Kitsu metadata.".to_string());
-        }
-
-        let (characters_result, staff_result, productions_result, platforms_result) = tokio::join!(
-            self.fetch_anime_characters(numeric_id),
-            self.fetch_anime_staff(numeric_id),
-            self.fetch_anime_productions(numeric_id),
-            self.fetch_anime_streaming_platforms(numeric_id),
-        );
-
-        let mut errors = Vec::new();
-        let mut warnings = Vec::new();
-
-        let characters = match characters_result {
-            Ok(characters) => characters,
-            Err(error) => {
-                errors.push(error);
-                warnings.push(Self::supplemental_warning("Character"));
-                Vec::new()
-            }
-        };
-        let staff = match staff_result {
-            Ok(staff) => staff,
-            Err(error) => {
-                errors.push(error);
-                warnings.push(Self::supplemental_warning("Staff"));
-                Vec::new()
-            }
-        };
-        let productions = match productions_result {
-            Ok(productions) => productions,
-            Err(error) => {
-                errors.push(error);
-                warnings.push(Self::supplemental_warning("Studio and producer"));
-                Vec::new()
-            }
-        };
-        let platforms = match platforms_result {
-            Ok(platforms) => platforms,
-            Err(error) => {
-                errors.push(error);
-                warnings.push(Self::supplemental_warning("Streaming platform"));
-                Vec::new()
-            }
-        };
-
-        if characters.is_empty()
-            && staff.is_empty()
-            && productions.is_empty()
-            && platforms.is_empty()
-        {
-            if let Some(error) = errors.into_iter().next() {
-                return Err(error);
-            }
-        }
-
-        Ok(AnimeSupplementalMetadata {
-            characters,
-            staff,
-            productions,
-            platforms,
-            warnings,
-        })
-    }
-
-    async fn fetch_anime_characters(
-        &self,
-        kitsu_id: &str,
-    ) -> Result<Vec<AnimeCharacterProfile>, String> {
-        let url = format!(
-            "https://kitsu.io/api/edge/anime/{}/characters?page[limit]={}&include=character",
-            kitsu_id, ANIME_CHARACTER_LIMIT
-        );
-        let body = self.fetch_edge_value(&url).await?;
-        let data = body
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-
-        let included = body
-            .get("included")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let included_characters = included
-            .into_iter()
-            .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("characters"))
-            .filter_map(|entry| {
-                let id = entry.get("id").and_then(Value::as_str)?.to_string();
-                Some((id, entry))
-            })
-            .collect::<HashMap<_, _>>();
-
-        let mut characters = Vec::new();
-        let mut seen_character_ids = HashSet::new();
-
-        for relationship in data {
-            let Some(character_id) = relationship
-                .pointer("/relationships/character/data/id")
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-
-            if !seen_character_ids.insert(character_id.to_string()) {
-                continue;
-            }
-
-            let Some(character) = included_characters.get(character_id) else {
-                continue;
-            };
-
-            let Some(name) = Self::extract_value_string(character, "/attributes/canonicalName")
-                .or_else(|| Self::extract_value_string(character, "/attributes/name"))
-            else {
-                continue;
-            };
-
-            characters.push(AnimeCharacterProfile {
-                name,
-                role: Self::extract_value_string(&relationship, "/attributes/role")
-                    .map(|role| Self::title_case_label(&role)),
-                image: Self::extract_image_url(character, "image"),
-                description: Self::extract_value_string(character, "/attributes/description"),
-            });
-        }
-
-        characters.sort_by(|left, right| {
-            Self::character_role_priority(right.role.as_deref())
-                .cmp(&Self::character_role_priority(left.role.as_deref()))
-                .then_with(|| left.name.cmp(&right.name))
-        });
-        characters.truncate(ANIME_CHARACTER_LIMIT);
-
-        Ok(characters)
-    }
-
-    async fn fetch_anime_staff(&self, kitsu_id: &str) -> Result<Vec<AnimeStaffProfile>, String> {
-        let url = format!(
-            "https://kitsu.io/api/edge/anime/{}/anime-staff?page[limit]={}&include=person",
-            kitsu_id, ANIME_STAFF_LIMIT
-        );
-        let body = self.fetch_edge_value(&url).await?;
-        let data = body
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-
-        let included = body
-            .get("included")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let included_people = included
-            .into_iter()
-            .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("people"))
-            .filter_map(|entry| {
-                let id = entry.get("id").and_then(Value::as_str)?.to_string();
-                Some((id, entry))
-            })
-            .collect::<HashMap<_, _>>();
-
-        let mut merged_staff: HashMap<String, AnimeStaffProfile> = HashMap::new();
-
-        for relationship in data {
-            let Some(person_id) = relationship
-                .pointer("/relationships/person/data/id")
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-
-            let Some(person) = included_people.get(person_id) else {
-                continue;
-            };
-
-            let Some(name) = Self::extract_value_string(person, "/attributes/name") else {
-                continue;
-            };
-
-            let staff_entry = merged_staff
-                .entry(person_id.to_string())
-                .or_insert_with(|| AnimeStaffProfile {
-                    name,
-                    roles: Vec::new(),
-                    image: Self::extract_image_url(person, "image"),
-                    description: Self::extract_value_string(person, "/attributes/description"),
-                });
-
-            if let Some(raw_role) = Self::extract_value_string(&relationship, "/attributes/role") {
-                for role in raw_role
-                    .split(',')
-                    .filter_map(Self::normalize_text)
-                    .map(|role| Self::title_case_label(&role))
-                {
-                    if !staff_entry.roles.iter().any(|existing| existing == &role) {
-                        staff_entry.roles.push(role);
-                    }
-                }
-            }
-        }
-
-        let mut staff = merged_staff.into_values().collect::<Vec<_>>();
-        for entry in &mut staff {
-            entry.roles.sort_by(|left, right| {
-                Self::staff_role_priority(right)
-                    .cmp(&Self::staff_role_priority(left))
-                    .then_with(|| left.cmp(right))
-            });
-        }
-
-        staff.sort_by(|left, right| {
-            let left_priority = left
-                .roles
-                .iter()
-                .map(|role| Self::staff_role_priority(role))
-                .max()
-                .unwrap_or(0);
-            let right_priority = right
-                .roles
-                .iter()
-                .map(|role| Self::staff_role_priority(role))
-                .max()
-                .unwrap_or(0);
-
-            right_priority
-                .cmp(&left_priority)
-                .then_with(|| left.name.cmp(&right.name))
-        });
-        staff.truncate(ANIME_STAFF_LIMIT);
-
-        Ok(staff)
-    }
-
-    async fn fetch_anime_productions(
-        &self,
-        kitsu_id: &str,
-    ) -> Result<Vec<AnimeProductionCompanyProfile>, String> {
-        let url = format!(
-            "https://kitsu.io/api/edge/anime/{}/productions?page[limit]={}&include=producer",
-            kitsu_id, ANIME_PRODUCTION_LIMIT
-        );
-        let body = self.fetch_edge_value(&url).await?;
-        let data = body
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-
-        let included = body
-            .get("included")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let included_producers = included
-            .into_iter()
-            .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("producers"))
-            .filter_map(|entry| {
-                let id = entry.get("id").and_then(Value::as_str)?.to_string();
-                Some((id, entry))
-            })
-            .collect::<HashMap<_, _>>();
-
-        let mut merged_productions: HashMap<String, AnimeProductionCompanyProfile> = HashMap::new();
-
-        for relationship in data {
-            let Some(producer_id) = relationship
-                .pointer("/relationships/producer/data/id")
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-
-            let Some(producer) = included_producers.get(producer_id) else {
-                continue;
-            };
-
-            let Some(name) = Self::extract_value_string(producer, "/attributes/name") else {
-                continue;
-            };
-
-            let production_entry = merged_productions
-                .entry(producer_id.to_string())
-                .or_insert_with(|| AnimeProductionCompanyProfile {
-                    name,
-                    roles: Vec::new(),
-                    logo: Self::extract_image_url(producer, "logo")
-                        .or_else(|| Self::extract_image_url(producer, "image")),
-                    description: Self::extract_value_string(producer, "/attributes/description"),
-                });
-
-            if let Some(raw_role) = Self::extract_value_string(&relationship, "/attributes/role")
-                .or_else(|| Self::extract_value_string(&relationship, "/attributes/producerType"))
-            {
-                for role in raw_role
-                    .split(',')
-                    .filter_map(Self::normalize_text)
-                    .map(|role| Self::title_case_label(&role))
-                {
-                    if !production_entry
-                        .roles
-                        .iter()
-                        .any(|existing| existing == &role)
-                    {
-                        production_entry.roles.push(role);
-                    }
-                }
-            }
-        }
-
-        let mut productions = merged_productions.into_values().collect::<Vec<_>>();
-        for entry in &mut productions {
-            entry.roles.sort_by(|left, right| {
-                Self::production_role_priority(right)
-                    .cmp(&Self::production_role_priority(left))
-                    .then_with(|| left.cmp(right))
-            });
-        }
-
-        productions.sort_by(|left, right| {
-            let left_priority = left
-                .roles
-                .iter()
-                .map(|role| Self::production_role_priority(role))
-                .max()
-                .unwrap_or(0);
-            let right_priority = right
-                .roles
-                .iter()
-                .map(|role| Self::production_role_priority(role))
-                .max()
-                .unwrap_or(0);
-
-            right_priority
-                .cmp(&left_priority)
-                .then_with(|| left.name.cmp(&right.name))
-        });
-        productions.truncate(ANIME_PRODUCTION_LIMIT);
-
-        Ok(productions)
-    }
-
-    async fn fetch_anime_streaming_platforms(
-        &self,
-        kitsu_id: &str,
-    ) -> Result<Vec<AnimeStreamingPlatformProfile>, String> {
-        let url = format!(
-            "https://kitsu.io/api/edge/anime/{}/streaming-links?page[limit]=20&include=streamer",
-            kitsu_id
-        );
-        let body = self.fetch_edge_value(&url).await?;
-        let data = body
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-
-        let included = body
-            .get("included")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let included_streamers = included
-            .into_iter()
-            .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("streamers"))
-            .filter_map(|entry| {
-                let id = entry.get("id").and_then(Value::as_str)?.to_string();
-                Some((id, entry))
-            })
-            .collect::<HashMap<_, _>>();
-
-        let mut merged_platforms: HashMap<String, AnimeStreamingPlatformProfile> = HashMap::new();
-        let mut platform_link_counts: HashMap<String, usize> = HashMap::new();
-
-        for streaming_link in data {
-            let Some(streamer_id) = streaming_link
-                .pointer("/relationships/streamer/data/id")
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-
-            let Some(streamer) = included_streamers.get(streamer_id) else {
-                continue;
-            };
-
-            let Some(name) = Self::extract_value_string(streamer, "/attributes/siteName") else {
-                continue;
-            };
-
-            let Some(link_url) = Self::extract_value_string(&streaming_link, "/attributes/url")
-            else {
-                continue;
-            };
-
-            if reqwest::Url::parse(&link_url).is_err() {
-                continue;
-            }
-
-            let key = streamer_id.to_string();
-            let entry = merged_platforms.entry(key.clone()).or_insert_with(|| {
-                AnimeStreamingPlatformProfile {
-                    name,
-                    url: link_url.clone(),
-                    logo: Self::extract_value_string(streamer, "/attributes/logo"),
-                    sub_languages: Vec::new(),
-                    dub_languages: Vec::new(),
-                }
-            });
-
-            if entry.logo.is_none() {
-                entry.logo = Self::extract_value_string(streamer, "/attributes/logo");
-            }
-            if Self::should_replace_platform_url(&entry.url, &link_url) {
-                entry.url = link_url.clone();
-            }
-
-            for language in Self::extract_language_labels(&streaming_link, "/attributes/subs") {
-                if !entry
-                    .sub_languages
-                    .iter()
-                    .any(|existing| existing == &language)
-                {
-                    entry.sub_languages.push(language);
-                }
-            }
-            for language in Self::extract_language_labels(&streaming_link, "/attributes/dubs") {
-                if !entry
-                    .dub_languages
-                    .iter()
-                    .any(|existing| existing == &language)
-                {
-                    entry.dub_languages.push(language);
-                }
-            }
-
-            *platform_link_counts.entry(key).or_insert(0) += 1;
-        }
-
-        let mut platforms = merged_platforms
-            .into_iter()
-            .map(|(key, mut platform)| {
-                platform.sub_languages.sort();
-                platform.dub_languages.sort();
-                let link_count = platform_link_counts.get(&key).copied().unwrap_or(0);
-                (link_count, platform)
-            })
-            .collect::<Vec<_>>();
-
-        platforms.sort_by(|(left_count, left), (right_count, right)| {
-            right_count
-                .cmp(left_count)
-                .then_with(|| {
-                    let right_signal = right.sub_languages.len() + right.dub_languages.len();
-                    let left_signal = left.sub_languages.len() + left.dub_languages.len();
-                    right_signal.cmp(&left_signal)
-                })
-                .then_with(|| left.name.cmp(&right.name))
-        });
-        platforms.truncate(ANIME_STREAMING_PLATFORM_LIMIT);
-
-        Ok(platforms
-            .into_iter()
-            .map(|(_, platform)| platform)
-            .collect())
-    }
-
-    async fn fetch_relations(&self, kitsu_id: &str) -> Option<Vec<MediaItem>> {
-        let url = format!(
-            "https://kitsu.io/api/edge/anime/{}/media-relationships?include=destination&page[limit]={}",
-            kitsu_id, RELATION_LIMIT
-        );
-
-        let body = self.fetch_edge_value(&url).await.ok()?;
-
-        let relation_roles = body
-            .get("data")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| {
-                let destination_id = entry
-                    .pointer("/relationships/destination/data/id")
-                    .and_then(Value::as_str)?;
-                let role = Self::extract_value_string(entry, "/attributes/role")?;
-                Some((destination_id.to_string(), role))
-            })
-            .collect::<HashMap<_, _>>();
-
-        let included = body.get("included")?.as_array()?;
-
-        let relations: Vec<MediaItem> = included
-            .iter()
-            .filter_map(|item| {
-                let attrs = item.get("attributes")?;
-                let id = item.get("id")?.as_str()?;
-                let type_ = item.get("type")?.as_str()?;
-
-                // We only want anime relations for now
-                if type_ != "anime" {
-                    return None;
-                }
-
-                let title = attrs
-                    .get("canonicalTitle")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("Unknown")
-                    .to_string();
-                let poster = attrs
-                    .get("posterImage")
-                    .and_then(|i| i.get("original").or(i.get("large")))
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-
-                let backdrop = attrs
-                    .get("coverImage")
-                    .and_then(|i| i.get("original").or(i.get("large")))
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-
-                let description = attrs
-                    .get("synopsis")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-                let year = attrs
-                    .get("startDate")
-                    .and_then(|s| s.as_str())
-                    .and_then(|s| {
-                        let y = s.split('-').next().unwrap_or("");
-                        if y.is_empty() {
-                            None
-                        } else {
-                            Some(y.to_string())
-                        }
-                    });
-
-                Some(MediaItem {
-                    id: format!("kitsu:{}", id),
-                    title,
-                    poster,
-                    backdrop,
-                    logo: None,
-                    description,
-                    year,
-                    type_: "series".to_string(),
-                    relation_role: relation_roles.get(id).cloned(),
-                })
-            })
-            // Rust-side safety cap — page[limit] in the URL should already
-            // enforce this, but guard against API responses that ignore the hint.
-            .take(RELATION_LIMIT)
-            .collect();
-
-        if relations.is_empty() {
-            None
-        } else {
-            Some(relations)
-        }
+        supplements::get_anime_supplemental_metadata(self, id).await
     }
 
     async fn fetch_items(&self, url: &str) -> Result<Vec<MediaItem>, String> {
@@ -1292,19 +784,26 @@ impl Kitsu {
 
     fn parse_meta_detail_response(text: &str) -> Result<MetaDetail, String> {
         let body: MetaDetailResponse = serde_json::from_str(text).map_err(|e| {
-            #[cfg(debug_assertions)]
-            {
-                eprintln!("Failed to parse kitsu detail response: {}", e);
-                eprintln!("Snippet: {}", &text.chars().take(200).collect::<String>());
-            }
+            log_operational_event(
+                OperationalLogLevel::Error,
+                "kitsu",
+                "parse_detail_response",
+                "failed",
+                &[
+                    field("error", &e),
+                    field("snippet", text.chars().take(200).collect::<String>()),
+                ],
+            );
             format!("Parse Error: {}", e)
         })?;
 
         body.meta.ok_or_else(|| {
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "Kitsu detail response missing meta field. Snippet: {}",
-                &text.chars().take(200).collect::<String>()
+            log_operational_event(
+                OperationalLogLevel::Warn,
+                "kitsu",
+                "parse_detail_response",
+                "missing-meta",
+                &[field("snippet", text.chars().take(200).collect::<String>())],
             );
             "Metadata not found.".to_string()
         })
@@ -1312,8 +811,13 @@ impl Kitsu {
 
     fn parse_catalog_response(text: &str) -> Result<CatalogResponse, String> {
         serde_json::from_str(text).map_err(|e| {
-            #[cfg(debug_assertions)]
-            eprintln!("Failed to parse kitsu response: {}", e);
+            log_operational_event(
+                OperationalLogLevel::Error,
+                "kitsu",
+                "parse_catalog_response",
+                "failed",
+                &[field("error", &e)],
+            );
             format!("Parse Error: {}", e)
         })
     }
@@ -1347,9 +851,13 @@ impl Kitsu {
                 backdrop: m.background,
                 logo: m.logo,
                 description: m.description,
-                year: m.year,
+                year: normalize_media_year(m.year, m.release_info),
+                primary_year: None,
+                display_year: None,
                 type_: m.type_,
                 relation_role: None,
+                relation_context_label: None,
+                relation_preferred_season: None,
             })
             .collect();
 
@@ -1386,6 +894,8 @@ struct Meta {
     logo: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(rename = "releaseInfo", default)]
+    release_info: Option<String>,
     year: Option<String>,
 }
 
@@ -1402,6 +912,8 @@ struct MetaDetail {
     logo: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(rename = "releaseInfo", default)]
+    release_info: Option<String>,
     year: Option<String>,
     #[serde(alias = "imdbRating")]
     imdb_rating: Option<String>,
@@ -1454,11 +966,16 @@ mod tests {
             season,
             episode,
             released: released.map(|value| value.to_string()),
+            release_date: None,
             overview: None,
             thumbnail: None,
             imdb_id: None,
             imdb_season: None,
             imdb_episode: None,
+            stream_lookup_id: None,
+            stream_season: None,
+            stream_episode: None,
+            aniskip_episode: None,
         }
     }
 

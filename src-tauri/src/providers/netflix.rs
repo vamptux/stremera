@@ -39,8 +39,12 @@ impl Netflix {
                 logo: meta.logo,
                 description: meta.description,
                 year: meta.year,
+                primary_year: None,
+                display_year: None,
                 type_: meta.type_,
                 relation_role: None,
+                relation_context_label: None,
+                relation_preferred_season: None,
             })
             .collect()
     }

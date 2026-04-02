@@ -2,6 +2,12 @@ import {
   normalizeSearchYearRange,
   normalizeSearchYearValue,
 } from '@/lib/search-page-state';
+import {
+  clearLegacyStorageFeatureKeys,
+  markLegacyStorageFeatureComplete,
+  readLegacyStorageFeature,
+  type LegacyStorageReadResult,
+} from '@/lib/legacy-storage';
 
 export interface SearchHistoryEntry {
   query: string;
@@ -15,8 +21,13 @@ export interface SearchHistoryEntry {
   savedAt: number;
 }
 
+export interface SearchHistoryEntryInput extends Omit<SearchHistoryEntry, 'savedAt'> {
+  savedAt?: number;
+}
+
 const SEARCH_HISTORY_STORAGE_KEY = 'search-history-v2';
 const LEGACY_SEARCH_HISTORY_STORAGE_KEY = 'recent_searches';
+const SEARCH_HISTORY_LEGACY_STORAGE_FEATURE = 'search-history';
 const MAX_SEARCH_HISTORY_ENTRIES = 10;
 
 function normalizeQuery(value: unknown): string | null {
@@ -49,12 +60,12 @@ function normalizeYear(value: unknown): number | null | undefined {
   return normalizeSearchYearValue(value);
 }
 
-function normalizeSavedAt(value: unknown): number {
+function normalizeSavedAt(value: unknown, fallback = 0): number {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
     return value;
   }
 
-  return Date.now();
+  return fallback;
 }
 
 function normalizeEntry(value: unknown): SearchHistoryEntry | null {
@@ -99,77 +110,57 @@ export function buildSearchHistoryKey(entry: Pick<SearchHistoryEntry, 'query' | 
   ].join('|');
 }
 
-function writeSearchHistory(entries: SearchHistoryEntry[], storage: Storage) {
-  storage.setItem(SEARCH_HISTORY_STORAGE_KEY, JSON.stringify(entries));
-  storage.removeItem(LEGACY_SEARCH_HISTORY_STORAGE_KEY);
+export function canonicalizeSearchHistoryEntries(
+  values: readonly unknown[],
+): SearchHistoryEntry[] {
+  const normalized = values
+    .map(normalizeEntry)
+    .filter((entry): entry is SearchHistoryEntry => entry !== null)
+    .sort((left, right) => right.savedAt - left.savedAt);
+
+  const seen = new Set<string>();
+  return normalized
+    .filter((entry) => {
+      const key = buildSearchHistoryKey(entry);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, MAX_SEARCH_HISTORY_ENTRIES);
 }
 
-export function loadSearchHistory(storage: Storage = window.localStorage): SearchHistoryEntry[] {
-  const raw = storage.getItem(SEARCH_HISTORY_STORAGE_KEY) ?? storage.getItem(LEGACY_SEARCH_HISTORY_STORAGE_KEY);
-  if (!raw) return [];
-
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-
-    const normalized = parsed
-      .map(normalizeEntry)
-      .filter((entry): entry is SearchHistoryEntry => entry !== null)
-      .slice(0, MAX_SEARCH_HISTORY_ENTRIES);
-
-    if (normalized.length > 0) {
-      writeSearchHistory(normalized, storage);
+export function readLegacySearchHistory(): LegacyStorageReadResult<SearchHistoryEntry[]> {
+  return readLegacyStorageFeature(SEARCH_HISTORY_LEGACY_STORAGE_FEATURE, (storage) => {
+    const raw =
+      storage.getItem(SEARCH_HISTORY_STORAGE_KEY) ??
+      storage.getItem(LEGACY_SEARCH_HISTORY_STORAGE_KEY);
+    if (!raw) {
+      return { hasLegacyData: false, value: null };
     }
 
-    return normalized;
-  } catch {
-    return [];
-  }
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        return { hasLegacyData: true, value: [] };
+      }
+
+      return {
+        hasLegacyData: true,
+        value: canonicalizeSearchHistoryEntries(parsed),
+      };
+    } catch {
+      return { hasLegacyData: true, value: [] };
+    }
+  });
 }
 
-export function pushSearchHistoryEntry(
-  entries: SearchHistoryEntry[],
-  entry: Omit<SearchHistoryEntry, 'savedAt'>,
-  storage: Storage = window.localStorage,
-): SearchHistoryEntry[] {
-  const normalizedQuery = normalizeQuery(entry.query);
-  if (!normalizedQuery) return entries;
-
-  const normalizedYears = normalizeSearchYearRange(
-    normalizeYear(entry.yearFrom) ?? null,
-    normalizeYear(entry.yearTo) ?? null,
-  );
-  const nextEntry: SearchHistoryEntry = {
-    query: normalizedQuery,
-    mediaType: normalizeToken(entry.mediaType),
-    provider: normalizeToken(entry.provider),
-    feed: normalizeToken(entry.feed),
-    sort: normalizeToken(entry.sort),
-    genres: normalizeGenres(entry.genres),
-    yearFrom: normalizedYears.yearFrom,
-    yearTo: normalizedYears.yearTo,
-    savedAt: Date.now(),
-  };
-  const nextKey = buildSearchHistoryKey(nextEntry);
-  const deduped = entries.filter((existing) => buildSearchHistoryKey(existing) !== nextKey);
-  const next = [nextEntry, ...deduped].slice(0, MAX_SEARCH_HISTORY_ENTRIES);
-
-  writeSearchHistory(next, storage);
-  return next;
+export function clearLegacySearchHistory() {
+  clearLegacyStorageFeatureKeys(SEARCH_HISTORY_LEGACY_STORAGE_FEATURE, [
+    SEARCH_HISTORY_STORAGE_KEY,
+    LEGACY_SEARCH_HISTORY_STORAGE_KEY,
+  ]);
 }
 
-export function removeSearchHistoryEntry(
-  entries: SearchHistoryEntry[],
-  entry: SearchHistoryEntry,
-  storage: Storage = window.localStorage,
-): SearchHistoryEntry[] {
-  const entryKey = buildSearchHistoryKey(entry);
-  const next = entries.filter((existing) => buildSearchHistoryKey(existing) !== entryKey);
-  writeSearchHistory(next, storage);
-  return next;
-}
-
-export function clearSearchHistory(storage: Storage = window.localStorage) {
-  storage.removeItem(SEARCH_HISTORY_STORAGE_KEY);
-  storage.removeItem(LEGACY_SEARCH_HISTORY_STORAGE_KEY);
+export function markLegacySearchHistoryMigrationComplete() {
+  markLegacyStorageFeatureComplete(SEARCH_HISTORY_LEGACY_STORAGE_FEATURE);
 }

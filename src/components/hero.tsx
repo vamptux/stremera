@@ -246,9 +246,9 @@ export function Hero({ items, onFirstImageLoaded }: HeroProps) {
                   <span className="text-zinc-700">·</span>
                 </>
               )}
-              {item.year && (
+              {item.displayYear && (
                 <>
-                  <span>{item.year.split('-')[0]}</span>
+                  <span>{item.displayYear}</span>
                   <span className="text-zinc-700">·</span>
                 </>
               )}

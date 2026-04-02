@@ -138,10 +138,12 @@ impl ResumeStore {
             return Ok(0);
         }
 
-        let transaction = self
-            .connection
-            .transaction()
-            .map_err(|error| format!("Failed to open playback resume merge transaction: {}", error))?;
+        let transaction = self.connection.transaction().map_err(|error| {
+            format!(
+                "Failed to open playback resume merge transaction: {}",
+                error
+            )
+        })?;
         let mut imported = 0usize;
 
         for (key, progress) in entries {
@@ -152,7 +154,9 @@ impl ResumeStore {
                     |row| row.get::<_, i64>(0),
                 )
                 .optional()
-                .map_err(|error| format!("Failed to inspect existing playback resume row: {}", error))?;
+                .map_err(|error| {
+                    format!("Failed to inspect existing playback resume row: {}", error)
+                })?;
 
             if let Some(existing_last_watched) = existing_last_watched {
                 if existing_last_watched >= to_sql_i64(progress.last_watched) {
@@ -215,10 +219,12 @@ impl ResumeStore {
             return Ok(());
         }
 
-        let transaction = self
-            .connection
-            .transaction()
-            .map_err(|error| format!("Failed to open playback resume delete transaction: {}", error))?;
+        let transaction = self.connection.transaction().map_err(|error| {
+            format!(
+                "Failed to open playback resume delete transaction: {}",
+                error
+            )
+        })?;
 
         {
             let mut statement = transaction
@@ -226,9 +232,9 @@ impl ResumeStore {
                 .map_err(|error| format!("Failed to prepare playback resume delete: {}", error))?;
 
             for key in keys {
-                statement
-                    .execute(params![key])
-                    .map_err(|error| format!("Failed to delete playback resume entry: {}", error))?;
+                statement.execute(params![key]).map_err(|error| {
+                    format!("Failed to delete playback resume entry: {}", error)
+                })?;
             }
         }
 
@@ -380,7 +386,12 @@ fn prune_title_history_tx(
             params![media_type, media_id, MAX_RESUME_ROWS_PER_TITLE as i64],
             |row| row.get::<_, String>(0),
         )
-        .map_err(|error| format!("Failed to query playback resume prune candidates: {}", error))?
+        .map_err(|error| {
+            format!(
+                "Failed to query playback resume prune candidates: {}",
+                error
+            )
+        })?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("Failed to read playback resume prune candidates: {}", error))?;
 
@@ -425,6 +436,7 @@ fn read_watch_progress_row(row: &Row<'_>) -> rusqlite::Result<(String, WatchProg
         last_stream_key: row.get(19)?,
         source_name: row.get(20)?,
         stream_family: row.get(21)?,
+        resume_start_time: None,
     };
 
     Ok((history_key, progress))

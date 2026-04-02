@@ -1,4 +1,5 @@
 use super::streaming_helpers::{find_best_matching_file, infer_stream_mime, normalize_http_url};
+use crate::operational_log::{field, log_operational_event, OperationalLogLevel};
 use crate::providers::realdebrid::{InstantAvailabilityResponse, RealDebrid};
 use serde::Serialize;
 use std::sync::LazyLock;
@@ -114,10 +115,12 @@ where
                 return Err(first_error);
             }
 
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "Transient RD error during {} (retrying once): {}",
-                _operation_name, first_error
+            log_operational_event(
+                OperationalLogLevel::Warn,
+                "stream-resolver",
+                _operation_name,
+                "transient-retry",
+                &[field("error", &first_error)],
             );
 
             tokio::time::sleep(Duration::from_millis(RD_TRANSIENT_RETRY_DELAY_MS)).await;
@@ -187,8 +190,6 @@ pub(crate) async fn resolve_stream_inner(
         .ok_or_else(|| missing_debrid_provider_message().to_string())?;
 
     if let Some(hash) = &info_hash {
-        #[cfg(debug_assertions)]
-        eprintln!("Checking availability for hash: {}", hash);
         let availability_res = run_with_transient_retry("availability check", || async {
             provider
                 .check_availability(&token, vec![hash.clone()])
@@ -208,8 +209,13 @@ pub(crate) async fn resolve_stream_inner(
             }
             Err(error) => {
                 if is_disabled_rd_availability(&error) {
-                    #[cfg(debug_assertions)]
-                    eprintln!("RD availability endpoint disabled/bypassed: {}", error);
+                    log_operational_event(
+                        OperationalLogLevel::Warn,
+                        "stream-resolver",
+                        "availability-check",
+                        "disabled-endpoint",
+                        &[field("hash", hash), field("error", &error)],
+                    );
                 } else if is_auth_error(&error) {
                     return Err(format!("Real-Debrid Auth Error: {}", error));
                 } else if is_transient_rd_error(&error) {
@@ -241,8 +247,6 @@ pub(crate) async fn resolve_stream_inner(
         }
     })?;
     let torrent_id = add_res.id;
-    #[cfg(debug_assertions)]
-    eprintln!("Magnet added. Torrent ID: {}", torrent_id);
 
     let info = run_with_transient_retry("get torrent info", || async {
         provider
@@ -279,11 +283,6 @@ pub(crate) async fn resolve_stream_inner(
     }
 
     let target_file_id = info.files[target_file_idx].id.to_string();
-    #[cfg(debug_assertions)]
-    eprintln!(
-        "Selected file index: {}, ID: {}",
-        target_file_idx, target_file_id
-    );
 
     run_with_transient_retry("select files", || async {
         provider
@@ -316,8 +315,28 @@ pub(crate) async fn resolve_stream_inner(
                 .await
                 .unwrap_or(info);
             if is_rd_processing_status(&info.status) {
+                log_operational_event(
+                    OperationalLogLevel::Warn,
+                    "stream-resolver",
+                    "wait-for-links",
+                    "processing-timeout",
+                    &[
+                        field("torrent_id", &torrent_id),
+                        field("status", &info.status),
+                    ],
+                );
                 return Err("Torrent is not cached and is currently downloading on Real-Debrid. Please try again later.".to_string());
             }
+            log_operational_event(
+                OperationalLogLevel::Warn,
+                "stream-resolver",
+                "wait-for-links",
+                "timeout",
+                &[
+                    field("torrent_id", &torrent_id),
+                    field("status", &info.status),
+                ],
+            );
             return Err("Timeout waiting for Real-Debrid to process links.".to_string());
         }
 
@@ -325,8 +344,13 @@ pub(crate) async fn resolve_stream_inner(
             Ok(value) => value,
             Err(error) => {
                 let error = error.to_string();
-                #[cfg(debug_assertions)]
-                eprintln!("Error polling torrent info: {}", error);
+                log_operational_event(
+                    OperationalLogLevel::Warn,
+                    "stream-resolver",
+                    "poll-torrent-info",
+                    "failed",
+                    &[field("torrent_id", &torrent_id), field("error", &error)],
+                );
 
                 if is_auth_error(&error) {
                     return Err(format!(
@@ -381,9 +405,6 @@ pub(crate) async fn resolve_stream_inner(
     if links.is_empty() {
         return Err("No links returned from Real-Debrid.".to_string());
     }
-
-    #[cfg(debug_assertions)]
-    eprintln!("Got {} links. Unrestricting first one...", links.len());
 
     let target_link = &links[0];
 

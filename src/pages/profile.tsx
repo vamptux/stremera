@@ -20,7 +20,7 @@ import {
   List,
   ChevronDown,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
@@ -58,15 +58,6 @@ const ACCENT_PRESETS = [
   { color: '#a855f7', label: 'Purple' },
 ];
 
-function getInitialProfileViewMode(): 'grid' | 'list' {
-  try {
-    const stored = localStorage.getItem('streamy_profile_view');
-    return stored === 'list' ? 'list' : 'grid';
-  } catch {
-    return 'grid';
-  }
-}
-
 function isWatchStatusValue(value: string): value is WatchStatus {
   return (
     value === 'watching' || value === 'watched' || value === 'plan_to_watch' || value === 'dropped'
@@ -75,7 +66,13 @@ function isWatchStatusValue(value: string): value is WatchStatus {
 
 export function Profile() {
   const location = useLocation();
-  const { profile, updateProfile } = useLocalProfile();
+  const {
+    profile,
+    viewMode,
+    updateProfile,
+    updateViewMode,
+    isSaving: isSavingProfilePreferences,
+  } = useLocalProfile();
 
   const defaultTab = location.pathname === '/library' ? 'library' : 'history';
   const [activeTab, setActiveTab] = useState<string>(defaultTab);
@@ -114,15 +111,9 @@ export function Profile() {
   >('default');
   const [librarySearch, setLibrarySearch] = useState('');
 
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>(getInitialProfileViewMode);
-  const updateViewMode = (mode: 'grid' | 'list') => {
-    setViewMode(mode);
-    try {
-      localStorage.setItem('streamy_profile_view', mode);
-    } catch {
-      // localStorage unavailable in sandboxed context.
-    }
-  };
+  const handleViewModeChange = useCallback((mode: 'grid' | 'list') => {
+    void updateViewMode(mode);
+  }, [updateViewMode]);
 
   const filteredLibrary = useMemo(() => {
     let items = !library
@@ -230,7 +221,11 @@ export function Profile() {
                     <h1 className='text-3xl font-black tracking-tight text-white truncate'>
                       {profile.username}
                     </h1>
-                    <ProfileSettingsPopover profile={profile} onUpdate={updateProfile} />
+                    <ProfileSettingsPopover
+                      profile={profile}
+                      onUpdate={updateProfile}
+                      isSaving={isSavingProfilePreferences}
+                    />
                   </div>
                 {profile.bio && (
                   <p className='text-sm text-zinc-500 max-w-[32ch] leading-relaxed'>
@@ -517,7 +512,7 @@ export function Profile() {
                     </button>
                   )}
                 </div>
-                <ViewToggle viewMode={viewMode} onChange={updateViewMode} />
+                <ViewToggle viewMode={viewMode} onChange={handleViewModeChange} />
               </div>
             )}
             {historyLoading ? (
@@ -567,7 +562,7 @@ export function Profile() {
           >
             {continueWatchingItems.length > 0 && !continueWatchingLoading && (
               <div className='flex items-center justify-end'>
-                <ViewToggle viewMode={viewMode} onChange={updateViewMode} />
+                <ViewToggle viewMode={viewMode} onChange={handleViewModeChange} />
               </div>
             )}
             {continueWatchingLoading ? (
@@ -706,8 +701,10 @@ function LibraryListRow({ item, status }: { item: MediaItem; status?: string }) 
           {item.title}
         </p>
         <div className='flex items-center gap-1.5 mt-0.5 flex-wrap'>
-          {item.year && (
-            <span className='text-[10px] text-zinc-600'>{item.year.split('-')[0]}</span>
+          {item.displayYear && (
+            <span className='text-[10px] text-zinc-600'>
+              {item.displayYear}
+            </span>
           )}
           <span
             className={cn(
@@ -962,9 +959,11 @@ function EmptyState({
 function ProfileSettingsPopover({
   profile,
   onUpdate,
+  isSaving,
 }: {
   profile: LocalProfile;
-  onUpdate: (updates: Partial<LocalProfile>) => void;
+  onUpdate: (updates: Partial<LocalProfile>) => Promise<void>;
+  isSaving: boolean;
 }) {
   const accentDraftRegex = /^#[0-9a-fA-F]{0,6}$/;
   const [open, setOpen] = useState(false);
@@ -985,16 +984,21 @@ function ProfileSettingsPopover({
     ? draftAccentColor
     : profile.accentColor;
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const trimmedName = draftName.trim();
-    if (!trimmedName) return;
-    onUpdate({
-      username: trimmedName,
-      bio: draftBio.trim(),
-      accentColor: previewAccentColor,
-    });
-    toast.success('Profile saved');
-    setOpen(false);
+    if (!trimmedName || isSaving) return;
+
+    try {
+      await onUpdate({
+        username: trimmedName,
+        bio: draftBio.trim(),
+        accentColor: previewAccentColor,
+      });
+      toast.success('Profile saved');
+      setOpen(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to save profile');
+    }
   };
 
   const active = previewAccentColor;
@@ -1023,7 +1027,7 @@ function ProfileSettingsPopover({
 
         <div className='px-4 pt-4 pb-3 border-b border-white/[0.06]'>
           <h2 className='text-sm font-semibold text-white'>Customize Profile</h2>
-          <p className='text-[11px] text-zinc-600 mt-0.5'>Saved locally on this device.</p>
+          <p className='text-[11px] text-zinc-600 mt-0.5'>Stored in the desktop app settings.</p>
         </div>
 
         <div className='px-4 py-4 space-y-4'>
@@ -1102,7 +1106,7 @@ function ProfileSettingsPopover({
           <Button
             size='sm'
             onClick={handleSave}
-            disabled={!draftName.trim()}
+            disabled={!draftName.trim() || isSaving}
             className='w-full text-xs font-semibold rounded-lg h-8 flex items-center gap-1.5'
             style={{
               backgroundColor: active,
@@ -1110,7 +1114,7 @@ function ProfileSettingsPopover({
             }}
           >
             <Check className='w-3 h-3' />
-            Save
+            {isSaving ? 'Saving…' : 'Save'}
           </Button>
         </div>
       </PopoverContent>

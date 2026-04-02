@@ -18,20 +18,12 @@ import {
   FastForward,
   ArrowLeftRight,
 } from 'lucide-react';
-import { api, type Episode, type SkipSegment } from '@/lib/api';
-import { toast } from 'sonner';
+import { api, type Episode, type PlaybackLanguagePreferences, type SkipSegment } from '@/lib/api';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { StreamSelector } from '@/components/stream-selector';
 import {
-  init,
   command,
   setProperty,
-  observeProperties,
-  listenEvents,
-  setVideoMarginRatio,
-  type MpvConfig,
-  type MpvObservableProperty,
-  destroy,
 } from 'tauri-plugin-libmpv-api';
 import { cn } from '@/lib/utils';
 import { Sidebar } from '@/components/sidebar';
@@ -42,12 +34,6 @@ import {
   PlayerEpisodesToggleButton,
 } from '@/components/player-episodes-panel';
 import { PlayerProgressBar } from '@/components/player-progress-bar';
-import {
-  type Track,
-  areTrackListsEqual,
-  normalizeTrackList,
-  doesTrackSelectionMatch,
-} from '@/lib/player-track-utils';
 import { useStreamRecovery } from '@/hooks/use-stream-recovery';
 import { usePlayerViewportMode } from '@/hooks/use-player-viewport-mode';
 import { AudioTrackSelector, SubtitleTrackSelector } from '@/components/player-track-selectors';
@@ -56,23 +42,24 @@ import { PlayerSlider } from '@/components/player-slider';
 import { PlayerActionOverlays } from '@/components/player-action-overlays';
 import { usePlaybackProgressPersistence } from '@/hooks/use-playback-progress-persistence';
 import { usePlaybackStreamHealth } from '@/hooks/use-playback-stream-health';
-import { usePlayerTrackPreferences } from '@/hooks/use-player-track-preferences';
+import { usePlayerMpvLifecycle } from '@/hooks/use-player-mpv-lifecycle';
+import { usePlayerTrackController } from '@/hooks/use-player-track-controller';
 import { usePlayerResumeController } from '@/hooks/use-player-resume-controller';
 import { usePlayerStreamSession } from '@/hooks/use-player-stream-session';
 import { usePlayerRouteState } from '@/hooks/use-player-route-state';
 import { usePlayerNavigationGuard } from '@/hooks/use-player-navigation-guard';
 import { usePlayerSurfaceLayout } from '@/hooks/use-player-surface-layout';
 import { type NextEpisodeStreamCoordinates } from '@/hooks/use-player-up-next';
+import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import {
   buildEpisodeStreamTargetLookupKey,
-  buildFallbackEpisodeStreamTarget,
+  buildEpisodeStreamTarget,
   resolveEpisodeStreamTarget,
 } from '@/lib/episode-stream-target';
 import {
   buildDetailsReopenSelectorState,
   getLatestEpisodeResumeStartTime,
 } from '@/lib/history-playback';
-import { normalizeSkipSegments } from '@/lib/skip-segments';
 import { resolveRankedBestStream } from '@/lib/stream-resolution';
 
 // --- Types & Constants ---
@@ -109,26 +96,8 @@ interface PlayerLoadingCopy {
   detail: string;
 }
 
-const OBSERVED_PROPERTIES = [
-  ['pause', 'flag'],
-  ['time-pos', 'double', 'none'],
-  ['duration', 'double', 'none'],
-  ['percent-pos', 'double', 'none'],
-  ['volume', 'double'],
-  ['mute', 'flag'],
-  ['eof-reached', 'flag'],
-  ['idle-active', 'flag'],
-  ['speed', 'double'],
-  ['core-idle', 'flag'],
-  ['track-list', 'node'],
-] as const satisfies MpvObservableProperty[];
-
 const SPEED_OPTIONS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
-const TIME_UPDATE_THROTTLE_MS = 350;
 const OPTIMISTIC_SEEK_HOLD_MS = 450;
-const OPTIMISTIC_SEEK_SETTLED_DELTA_SECS = 1.1;
-const TRACK_SWITCH_VERIFY_ATTEMPTS = 8;
-const TRACK_SWITCH_VERIFY_DELAY_MS = 150;
 const CONTROLS_AUTO_HIDE_DELAY_MS = 3000;
 const PLAYBACK_READY_AUTO_HIDE_DELAY_MS = 2600;
 const PLAYER_INTERACTIVE_TARGET_SELECTOR =
@@ -218,6 +187,8 @@ function InnerPlayer() {
     mediaId: id,
     routeMarkedOffline,
   });
+  const { preferences: appUiPreferences, updatePreferences: updateAppUiPreferences } =
+    useAppUiPreferences();
 
   useEffect(() => {
     setHasPlaybackStarted(false);
@@ -227,10 +198,7 @@ function InnerPlayer() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(() => {
-    const saved = localStorage.getItem('player:volume');
-    return saved !== null ? Math.max(0, Math.min(100, parseInt(saved, 10))) : 75;
-  });
+  const [volume, setVolume] = useState(() => appUiPreferences.playerVolume);
   const [isMuted, setIsMuted] = useState(false);
   const [showControls, setShowControls] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -239,18 +207,9 @@ function InnerPlayer() {
   const [resolveStatus, setResolveStatus] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [seekPreviewTime, setSeekPreviewTime] = useState<number | null>(null);
-  const [playbackSpeed, setPlaybackSpeed] = useState(() => {
-    const saved = localStorage.getItem('player:speed');
-    return saved !== null ? parseFloat(saved) : 1.0;
-  });
+  const [playbackSpeed, setPlaybackSpeed] = useState(() => appUiPreferences.playerSpeed);
   const [subtitleDelay, setSubtitleDelay] = useState(0);
   const [subtitlePos, setSubtitlePos] = useState(100);
-  const [audioTracks, setAudioTracks] = useState<Track[]>([]);
-  const [subTracks, setSubTracks] = useState<Track[]>([]);
-  const [trackSwitching, setTrackSwitching] = useState<{ audio: boolean; sub: boolean }>({
-    audio: false,
-    sub: false,
-  });
   const [showEpisodes, setShowEpisodes] = useState(false);
   const [selectedSeason, setSelectedSeason] = useState<number>(() => {
     return routeAbsoluteSeason ?? 1;
@@ -276,6 +235,7 @@ function InnerPlayer() {
   // Remaining time mode: click the clock to toggle between elapsed and remaining
   const [showRemainingTime, setShowRemainingTime] = useState(false);
   const watchHistoryInvalidatedRef = useRef(false);
+  const playbackLanguagePreferencesRef = useRef<PlaybackLanguagePreferences>({});
 
   const restoreCursorVisibility = useCallback(() => {
     if (playerContainerRef.current) playerContainerRef.current.style.cursor = '';
@@ -420,18 +380,27 @@ function InnerPlayer() {
   /** Timestamp (ms) when playback was first verified — used to suppress transient idle events. */
   const playbackVerifiedAtRef = useRef(0);
   const isDev = import.meta.env.DEV;
-  const trackSwitchingRef = useRef<{ audio: boolean; sub: boolean }>({
-    audio: false,
-    sub: false,
-  });
-  const trackListRef = useRef<Track[]>([]);
-  const setTrackRef = useRef<
-    (
-      type: 'audio' | 'sub',
-      id: number | 'no',
-      options?: { silent?: boolean; persistPreference?: boolean },
-    ) => Promise<void> | void
-  >(async () => undefined);
+
+  useEffect(() => {
+    setVolume((current) =>
+      current === appUiPreferences.playerVolume ? current : appUiPreferences.playerVolume,
+    );
+    volumeRef.current = appUiPreferences.playerVolume;
+
+    if (mpvInitializedRef.current) {
+      void setProperty('volume', appUiPreferences.playerVolume).catch(() => undefined);
+    }
+  }, [appUiPreferences.playerVolume]);
+
+  useEffect(() => {
+    setPlaybackSpeed((current) =>
+      current === appUiPreferences.playerSpeed ? current : appUiPreferences.playerSpeed,
+    );
+
+    if (mpvInitializedRef.current) {
+      void setProperty('speed', appUiPreferences.playerSpeed).catch(() => undefined);
+    }
+  }, [appUiPreferences.playerSpeed]);
 
   // Component mount state must survive stream swaps so stale-link recovery can
   // tear down MPV and immediately re-enter auto-resolve on the same screen.
@@ -500,7 +469,7 @@ function InnerPlayer() {
 
   const currentEpisodeStream = useMemo(() => {
     if (!sidebarCurrentEpisode || !type || !id) return null;
-    const target = buildFallbackEpisodeStreamTarget(
+    const target = buildEpisodeStreamTarget(
       routeStreamLookupId || details?.imdbId || id,
       sidebarCurrentEpisode,
     );
@@ -578,10 +547,7 @@ function InnerPlayer() {
     retry: 1,
   });
 
-  const skipSegments = useMemo(
-    () => normalizeSkipSegments(rawSkipSegments, duration),
-    [rawSkipSegments, duration],
-  );
+  const skipSegments = rawSkipSegments;
 
   // -- Derived State --
   const seasons = useMemo(() => {
@@ -709,15 +675,23 @@ function InnerPlayer() {
     );
   }, [skipSegments, currentTime, duration]);
 
-  const activeAudioTrack = useMemo(
-    () => audioTracks.find((track) => !!track.selected) ?? null,
-    [audioTracks],
-  );
-  const activeSubTrack = useMemo(
-    () => subTracks.find((track) => !!track.selected) ?? null,
-    [subTracks],
-  );
-  const subtitlesOff = subTracks.length > 0 && !activeSubTrack;
+  const {
+    audioTracks,
+    subTracks,
+    trackSwitching,
+    subtitlesOff,
+    playbackLanguagePreferences,
+    refreshTracks,
+    setTrack,
+  } = usePlayerTrackController({
+    mediaId: id,
+    mediaType: effectiveResolveMediaType,
+    activeStreamUrl,
+    hasPlaybackStarted,
+    isLoading,
+    isResolving,
+    resetKey: `${activeStreamUrl ?? 'stream'}:${id ?? 'id'}:${season ?? 'season'}:${episode ?? 'episode'}`,
+  });
 
   const { saveProgress } = usePlaybackProgressPersistence({
     mediaId: id,
@@ -825,6 +799,7 @@ function InnerPlayer() {
     title,
     resolveSeason: resolvedStreamSeason,
     resolveEpisode: resolvedStreamEpisode,
+    absoluteSeason: resolvedAbsoluteSeason,
     absoluteEpisode: resolvedAbsoluteEpisode,
     streamLookupId,
     currentTimeRef,
@@ -834,6 +809,7 @@ function InnerPlayer() {
     activeStreamFormatRef,
     activeStreamSourceNameRef,
     activeStreamFamilyRef,
+    selectedStreamKeyRef,
     errorRef,
     stopLoading,
     setError,
@@ -949,42 +925,6 @@ function InnerPlayer() {
       },
     });
 
-  const updateTracks = useCallback((rawTracks: unknown) => {
-    const normalizedTracks = normalizeTrackList(rawTracks);
-    if (areTrackListsEqual(trackListRef.current, normalizedTracks)) {
-      return trackListRef.current;
-    }
-
-    trackListRef.current = normalizedTracks;
-    const nextAudioTracks = normalizedTracks.filter((track) => track.type === 'audio');
-    const nextSubTracks = normalizedTracks.filter((track) => track.type === 'sub');
-
-    setAudioTracks((previousTracks) =>
-      areTrackListsEqual(previousTracks, nextAudioTracks) ? previousTracks : nextAudioTracks,
-    );
-    setSubTracks((previousTracks) =>
-      areTrackListsEqual(previousTracks, nextSubTracks) ? previousTracks : nextSubTracks,
-    );
-
-    return normalizedTracks;
-  }, []);
-
-  const confirmTrackSwitch = useCallback(async (type: 'audio' | 'sub', id: number | 'no') => {
-    if (doesTrackSelectionMatch(trackListRef.current, type, id)) {
-      return true;
-    }
-
-    for (let attempt = 0; attempt < TRACK_SWITCH_VERIFY_ATTEMPTS; attempt += 1) {
-      if (doesTrackSelectionMatch(trackListRef.current, type, id)) {
-        return true;
-      }
-      if (attempt < TRACK_SWITCH_VERIFY_ATTEMPTS - 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, TRACK_SWITCH_VERIFY_DELAY_MS));
-      }
-    }
-    return false;
-  }, []);
-
   // Keep refs in sync so MPV init effect reads latest versions without dep changes.
   useEffect(() => {
     saveProgressRef.current = saveProgress;
@@ -1011,6 +951,61 @@ function InnerPlayer() {
     pendingSeekTargetRef.current = null;
     pendingSeekDeadlineRef.current = 0;
   }, []);
+
+  usePlayerMpvLifecycle({
+    activeStreamUrl,
+    isOffline,
+    isHistoryResume,
+    isDev,
+    playbackSpeed,
+    subtitleDelay,
+    subtitlePos,
+    subtitleScale,
+    playbackLanguagePreferencesRef,
+    volumeRef,
+    mountedRef,
+    isDestroyedRef,
+    mpvInitializedRef,
+    isLoadingRef,
+    isPlayingRef,
+    currentTimeRef,
+    durationRef,
+    pendingSeekTargetRef,
+    pendingSeekDeadlineRef,
+    lastTimeUpdateRef,
+    playbackVerifiedAtRef,
+    errorRef,
+    forceShowTimeoutRef,
+    handleEndedRef,
+    saveProgressRef,
+    lastStreamUrlRef,
+    setIsResolving,
+    setResolveStatus,
+    setIsLoading,
+    setError,
+    setCurrentTime,
+    setDuration,
+    setIsPlaying,
+    setVolume,
+    setIsMuted,
+    setPlaybackSpeed,
+    setMpvSurfaceReady,
+    setSurfaceLayoutRefreshToken,
+    clearUiTimers,
+    clearResumeRetryTimer,
+    clearRecoveryTimers,
+    prepareForStreamLoad,
+    markPlaybackReady,
+    applyResumeIfReady,
+    clearOptimisticSeek,
+    refreshTracks,
+    reportStreamFailure,
+    recoverFromSlowStartup,
+    reopenSelectorForSavedStreamFailure,
+    stopLoading,
+    setTransparent,
+    restorePlayerSurface,
+  });
 
   const primeOptimisticSeek = useCallback(
     (targetTime: number) => {
@@ -1208,7 +1203,7 @@ function InnerPlayer() {
     async (newVol: number) => {
       setVolume(newVol);
       volumeRef.current = newVol;
-      localStorage.setItem('player:volume', newVol.toString());
+      void updateAppUiPreferences({ playerVolume: newVol });
       await setProperty('volume', newVol);
       if (newVol > 0 && isMuted) {
         setIsMuted(false);
@@ -1216,7 +1211,7 @@ function InnerPlayer() {
       }
       triggerOsd({ kind: 'volume', level: newVol });
     },
-    [isMuted, triggerOsd],
+    [isMuted, triggerOsd, updateAppUiPreferences],
   );
 
   const toggleMute = useCallback(async () => {
@@ -1234,123 +1229,15 @@ function InnerPlayer() {
     }
   }, [isMuted, triggerOsd]);
 
-  const setTrackSwitchingFlag = useCallback((type: 'audio' | 'sub', value: boolean) => {
-    trackSwitchingRef.current = {
-      ...trackSwitchingRef.current,
-      [type]: value,
+  useEffect(() => {
+    playbackLanguagePreferencesRef.current = {
+      preferredAudioLanguage: playbackLanguagePreferences.preferredAudioLanguage,
+      preferredSubtitleLanguage: playbackLanguagePreferences.preferredSubtitleLanguage,
     };
-    setTrackSwitching((prev) => {
-      if (prev[type] === value) return prev;
-      return {
-        ...prev,
-        [type]: value,
-      };
-    });
-  }, []);
-
-  const requestTrackChange = useCallback(
-    (
-      type: 'audio' | 'sub',
-      id: number | 'no',
-      options?: { silent?: boolean; persistPreference?: boolean },
-    ) => setTrackRef.current(type, id, options),
-    [],
-  );
-
-  const { persistSelectedTrackPreference } = usePlayerTrackPreferences({
-    mediaId: id,
-    mediaType: effectiveResolveMediaType,
-    activeStreamUrl,
-    hasPlaybackStarted,
-    isLoading,
-    isResolving,
-    resetKey: `${activeStreamUrl ?? 'stream'}:${id ?? 'id'}:${season ?? 'season'}:${episode ?? 'episode'}`,
-    audioTracks,
-    subTracks,
-    activeAudioTrack,
-    activeSubTrack,
-    subtitlesOff,
-    trackSwitching,
-    setTrack: requestTrackChange,
-  });
-
-  const setTrack = useCallback(
-    async (
-      type: 'audio' | 'sub',
-      id: number | 'no',
-      options?: { silent?: boolean; persistPreference?: boolean },
-    ) => {
-      if (type === 'audio' && id === 'no') return;
-
-      if (trackSwitchingRef.current.audio || trackSwitchingRef.current.sub) return;
-
-      const alreadySelected =
-        type === 'audio'
-          ? activeAudioTrack?.id === id
-          : id === 'no'
-            ? subtitlesOff
-            : activeSubTrack?.id === id;
-
-      const prop = type === 'audio' ? 'aid' : 'sid';
-      const value = id === 'no' ? 'no' : id;
-      const silent = options?.silent ?? false;
-      const persistPreference = options?.persistPreference ?? false;
-
-      const persistSelection = () => {
-        if (!persistPreference) return;
-        persistSelectedTrackPreference(type, id);
-      };
-
-      if (alreadySelected) {
-        persistSelection();
-        return;
-      }
-
-      setTrackSwitchingFlag(type, true);
-
-      try {
-        try {
-          await setProperty(prop, value);
-        } catch {
-          await command('set', [prop, String(value)]);
-        }
-
-        const switched = await confirmTrackSwitch(type, id);
-        if (!switched) {
-          throw new Error('track-switch-not-confirmed');
-        }
-
-        persistSelection();
-        if (!silent) toast.success(`${type === 'audio' ? 'Audio' : 'Subtitle'} track changed`);
-      } catch {
-        if (!silent) toast.error('Failed to switch track');
-      } finally {
-        setTrackSwitchingFlag(type, false);
-      }
-    },
-    [
-      activeAudioTrack?.id,
-      activeSubTrack?.id,
-      confirmTrackSwitch,
-      persistSelectedTrackPreference,
-      setTrackSwitchingFlag,
-      subtitlesOff,
-    ],
-  );
-
-  useEffect(() => {
-    setTrackRef.current = setTrack;
-  }, [setTrack]);
-
-  useEffect(() => {
-    trackSwitchingRef.current = { audio: false, sub: false };
-
-    const timer = window.setTimeout(() => {
-      setTrackSwitching({ audio: false, sub: false });
-    }, 0);
-
-    return () => window.clearTimeout(timer);
-  }, [activeStreamUrl, id, season, episode]);
+  }, [
+    playbackLanguagePreferences.preferredAudioLanguage,
+    playbackLanguagePreferences.preferredSubtitleLanguage,
+  ]);
 
   // -- Hotkeys --
   useEffect(() => {
@@ -1532,325 +1419,6 @@ function InnerPlayer() {
     activeStreamSourceNameRef,
     setActiveStreamUrl,
     stopLoading,
-  ]);
-
-  // 2. Initialize MPV
-  useEffect(() => {
-    if (!activeStreamUrl) return;
-
-    // For local files (offline), we skip the resolve phase
-    if (isOffline) {
-      setIsResolving(false);
-      setResolveStatus('');
-    }
-
-    if (lastStreamUrlRef.current !== activeStreamUrl) {
-      lastStreamUrlRef.current = activeStreamUrl;
-    }
-
-    isDestroyedRef.current = false;
-    mpvInitializedRef.current = false;
-
-    // Local cancelled flag prevents stale async continuations (fixes StrictMode double-fire race)
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    let unlistenEvents: (() => void) | undefined;
-    let loadfileSent = false;
-
-    const initPlayer = async () => {
-      setIsLoading(true);
-      isLoadingRef.current = true;
-      setError(null);
-      setCurrentTime(0);
-      setDuration(0);
-
-      setTransparent(false); // Start with black background
-
-      try {
-        try {
-          await destroy();
-        } catch {
-          /* ignore */
-        }
-
-        setMpvSurfaceReady(false);
-
-        await new Promise((r) => setTimeout(r, 150));
-        if (cancelled) return;
-
-        const shouldStartPaused = prepareForStreamLoad();
-
-        const mpvConfig: MpvConfig = {
-          initialOptions: {
-            vo: 'gpu',
-            hwdec: 'd3d11va-copy',
-            'gpu-api': 'd3d11',
-            'gpu-context': 'd3d11',
-            'keep-open': 'yes',
-            cache: 'yes',
-            volume: volumeRef.current.toString(),
-            pause: shouldStartPaused ? 'yes' : 'no',
-            osc: 'no', // Disable MPV's on-screen controller
-            'osd-level': '0', // Disable MPV's OSD text
-            'input-default-bindings': 'yes',
-            'msg-level': 'all=warn', // Suppress verbose FFmpeg/codec debug spam
-          },
-          observedProperties: OBSERVED_PROPERTIES,
-        };
-
-        await init(mpvConfig);
-        if (cancelled) return;
-
-        await setProperty('sub-delay', subtitleDelay);
-        await setProperty('sub-pos', subtitlePos);
-        if (subtitleScale !== 1.0) await setProperty('sub-scale', subtitleScale);
-        // Restore persisted speed
-        const savedSpeed = localStorage.getItem('player:speed');
-        if (savedSpeed) {
-          const parsed = parseFloat(savedSpeed);
-          if (!isNaN(parsed) && parsed !== 1.0) await setProperty('speed', parsed);
-        }
-        mpvInitializedRef.current = true;
-        setMpvSurfaceReady(true);
-
-        unlisten = await observeProperties(OBSERVED_PROPERTIES, (event) => {
-          if (cancelled || !mountedRef.current || isDestroyedRef.current) return;
-          const { name, data } = event;
-
-          switch (name) {
-            case 'time-pos':
-              if (typeof data === 'number') {
-                const now = performance.now();
-                const pendingSeekTarget = pendingSeekTargetRef.current;
-                if (pendingSeekTarget !== null) {
-                  const seekSettled =
-                    Math.abs(data - pendingSeekTarget) <= OPTIMISTIC_SEEK_SETTLED_DELTA_SECS;
-
-                  if (!seekSettled && now < pendingSeekDeadlineRef.current) {
-                    break;
-                  }
-
-                  clearOptimisticSeek();
-                }
-
-                const prevTime = currentTimeRef.current;
-                currentTimeRef.current = data;
-                if (
-                  now - lastTimeUpdateRef.current > TIME_UPDATE_THROTTLE_MS ||
-                  Math.abs(prevTime - data) > 2
-                ) {
-                  lastTimeUpdateRef.current = now;
-                  setCurrentTime(data);
-                }
-                // Mark playback as started once we have a valid time position
-                if (isLoadingRef.current && data > 0.1) {
-                  markPlaybackReady();
-                }
-                void applyResumeIfReady();
-              }
-              break;
-            case 'duration':
-              if (typeof data === 'number') {
-                setDuration(data);
-                durationRef.current = data;
-                if (data > 0 && isLoadingRef.current) {
-                  markPlaybackReady();
-                }
-                void applyResumeIfReady();
-              }
-              break;
-            case 'pause':
-              if (typeof data === 'boolean') {
-                isPlayingRef.current = !data;
-                setIsPlaying(!data);
-              }
-              break;
-            case 'volume':
-              if (typeof data === 'number') {
-                setVolume(data);
-                volumeRef.current = data;
-              }
-              break;
-            case 'mute':
-              if (typeof data === 'boolean') setIsMuted(data);
-              break;
-            case 'speed':
-              if (typeof data === 'number') setPlaybackSpeed(data);
-              break;
-            case 'eof-reached':
-              if (data === true) handleEndedRef.current?.();
-              break;
-            case 'track-list':
-              if (Array.isArray(data)) updateTracks(data);
-              break;
-            case 'idle-active':
-              if (data === true) {
-                if (isOffline || errorRef.current) break;
-                // Before loadfile completes, idle-active is just MPV's initial state — ignore it
-                if (isLoadingRef.current && !loadfileSent) break;
-
-                // Grace period: MPV can fire idle-active transiently during buffering, seeking,
-                // or internal state transitions right after playback was confirmed. Suppress these
-                // for a short window to avoid premature "stream disconnected" errors.
-                const IDLE_GRACE_MS = 4000;
-                const verifiedAt = playbackVerifiedAtRef.current;
-                if (verifiedAt > 0 && performance.now() - verifiedAt < IDLE_GRACE_MS) break;
-
-                // If playback has been progressing normally (time > threshold), this is likely a
-                // transient buffer stall, not a real disconnect. Let MPV handle reconnection.
-                const hasProgressedMeaningfully =
-                  currentTimeRef.current > 2 && durationRef.current > 0;
-
-                const nearEnd =
-                  durationRef.current > 0 &&
-                  currentTimeRef.current >= Math.max(0, durationRef.current - 1);
-                if (nearEnd) break;
-
-                const currentUrl = lastStreamUrlRef.current || activeStreamUrl;
-                if (!currentUrl) break;
-
-                const duringInitialLoad = isLoadingRef.current;
-
-                // For history resume: if playback already progressed past initial frames,
-                // treat this as a transient stall instead of an immediate failure.
-                if (isHistoryResume && hasProgressedMeaningfully) break;
-
-                reportStreamFailure(duringInitialLoad ? 'load-failed' : 'disconnected', currentUrl);
-                if (isHistoryResume) {
-                  if (duringInitialLoad) stopLoading();
-                  reopenSelectorForSavedStreamFailure();
-                  break;
-                }
-
-                // For non-resume streams that have been playing, give them more tolerance
-                if (hasProgressedMeaningfully) break;
-
-                void recoverFromSlowStartup(currentUrl).then((didRecover) => {
-                  if (didRecover || !mountedRef.current || errorRef.current) return;
-
-                  const stillNearEnd =
-                    durationRef.current > 0 &&
-                    currentTimeRef.current >= Math.max(0, durationRef.current - 1);
-                  if (stillNearEnd) return;
-
-                  // Final check: if playback started while recovery was in-flight, skip the error
-                  if (playbackVerifiedAtRef.current > 0 && currentTimeRef.current > 0.5) return;
-
-                  setError(
-                    duringInitialLoad
-                      ? 'Stream failed to load. Try another stream.'
-                      : 'This stream disconnected. Try another stream.',
-                  );
-                  if (duringInitialLoad) stopLoading();
-                });
-              }
-              break;
-            case 'core-idle':
-              if (data === false) {
-                if (isLoadingRef.current && (durationRef.current > 0 || loadfileSent)) {
-                  markPlaybackReady();
-                }
-                void applyResumeIfReady();
-              }
-              break;
-          }
-        });
-
-        unlistenEvents = await listenEvents((event) => {
-          if (cancelled || !mountedRef.current || isDestroyedRef.current) return;
-
-          if (
-            event.event === 'file-loaded' ||
-            event.event === 'video-reconfig' ||
-            event.event === 'playback-restart'
-          ) {
-            window.requestAnimationFrame(() => {
-              if (!cancelled && mountedRef.current && !isDestroyedRef.current) {
-                setSurfaceLayoutRefreshToken((version) => version + 1);
-              }
-            });
-          }
-        });
-
-        if (cancelled) {
-          if (unlisten) unlisten();
-          if (unlistenEvents) unlistenEvents();
-          return;
-        }
-
-        if (isDev) console.warn('Loading stream...');
-        await command('loadfile', [activeStreamUrl, 'replace']);
-        loadfileSent = true;
-        if (cancelled) return;
-        isPlayingRef.current = !shouldStartPaused;
-        setIsPlaying(!shouldStartPaused);
-        void applyResumeIfReady();
-
-        clearUiTimers();
-        forceShowTimeoutRef.current = setTimeout(() => {
-          if (!cancelled && mountedRef.current && isLoadingRef.current && !errorRef.current) {
-            if (isDev) console.warn('Force showing player after timeout.');
-            // Show transparent player so the user can see controls and try another stream
-            stopLoading(true);
-            // If nothing has started after another 5 s, show a definitive error
-            forceShowTimeoutRef.current = setTimeout(() => {
-              if (cancelled || !mountedRef.current || errorRef.current) return;
-              // Playback may have started between the two timers — don't show error
-              if (playbackVerifiedAtRef.current > 0) return;
-              if (durationRef.current > 0 && currentTimeRef.current > 0.1) return;
-              reportStreamFailure('load-failed');
-              setError('Stream failed to load. Try another stream.');
-              stopLoading();
-            }, 5000);
-          }
-        }, 6500);
-      } catch (err) {
-        if (cancelled) return; // Don't set error for cancelled inits
-        if (isDev) console.error('MPV Init Error:', err);
-        reportStreamFailure('load-failed');
-        if (mountedRef.current) {
-          setError('Failed to initialize player. Please try a different stream.');
-          stopLoading();
-        }
-      }
-    };
-
-    initPlayer();
-
-    return () => {
-      cancelled = true;
-      isDestroyedRef.current = true;
-      mpvInitializedRef.current = false;
-      setMpvSurfaceReady(false);
-      if (unlisten) unlisten();
-      if (unlistenEvents) unlistenEvents();
-      clearUiTimers();
-      clearResumeRetryTimer();
-      clearRecoveryTimers();
-      destroy().catch(() => {});
-      void setVideoMarginRatio({ left: 0, right: 0, top: 0, bottom: 0 }).catch(() => {});
-      restorePlayerSurface();
-      saveProgressRef.current?.();
-    };
-    // Intentionally scoped dependencies: this effect owns MPV init/teardown and should
-    // not restart on transient UI state changes (e.g. `error`) that are handled via refs.
-    // `handleEnded` and `saveProgress` are read from stable refs to avoid reinit when
-    // async data (details/nextEpisode) changes their callback identities.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    activeStreamUrl,
-    updateTracks,
-    clearRecoveryTimers,
-    clearResumeRetryTimer,
-    clearUiTimers,
-    isDev,
-    markPlaybackReady,
-    reopenSelectorForSavedStreamFailure,
-    restorePlayerSurface,
-    prepareForStreamLoad,
-    stopLoading,
-    clearOptimisticSeek,
-    isAnime,
   ]);
 
   const handleMouseMove = useCallback(() => {
@@ -2302,7 +1870,7 @@ function InnerPlayer() {
                         type='button'
                         onClick={() => {
                           setPlaybackSpeed(s);
-                          localStorage.setItem('player:speed', s.toString());
+                          void updateAppUiPreferences({ playerSpeed: s });
                           void setProperty('speed', s);
                         }}
                         className={cn(

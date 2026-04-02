@@ -1,6 +1,9 @@
 use super::config_store::AddonConfig;
+use crate::providers::addons::{
+    stream_contains_batch, stream_quality_score, StreamDeliveryKind, StreamPresentation,
+    StreamResolution, TorrentioStream,
+};
 use crate::providers::realdebrid::TorrentFile;
-use crate::providers::addons::{stream_quality_score, TorrentioStream};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -21,6 +24,39 @@ static STREAM_FAMILY_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 });
 static STREAM_FAMILY_NON_WORD_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[^a-z0-9]+").expect("valid stream family non-word regex"));
+static STREAM_LANGUAGE_TAG_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[[A-Z]{2,3}\]").expect("valid stream language tag regex"));
+static STREAM_META_ONLY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[\x{26A1}\x{2B07}\x{1F4BE}\x{1F464}\x{1F331}\s\[\]|]")
+        .expect("valid stream meta-only regex")
+});
+static STREAM_LEADING_META_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[\x{26A1}\x{2B07}\x{1F4BE}\x{1F464}\x{1F331}\s]+")
+        .expect("valid stream leading meta regex")
+});
+static STREAM_FILENAME_HINT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)([\w].*\d{3,4}p|S\d{1,2}E\d{1,4})").expect("valid stream filename hint regex")
+});
+static STREAM_SIZE_LABEL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)([\d.]+)\s*(GB|MB|GiB|MiB)\b").expect("valid stream size label regex")
+});
+static STREAM_DV_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bdv\b").expect("valid stream dv regex"));
+static STREAM_AV1_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bav1\b").expect("valid stream av1 regex"));
+static STREAM_DUAL_AUDIO_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)dual[.\-\s]?audio").expect("valid stream dual-audio regex"));
+static STREAM_MULTI_AUDIO_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)multi[.\-\s]?audio").expect("valid stream multi-audio regex")
+});
+static STREAM_MULTI_LANG_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)multi[.\-\s]?lang").expect("valid stream multi-lang regex"));
+static STREAM_MULTI_SUB_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)multi[.\-\s]?sub").expect("valid stream multi-sub regex"));
+static STREAM_ENGLISH_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\beng(?:lish)?\b").expect("valid stream english regex"));
+static STREAM_JAPANESE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bjap(?:anese)?\b").expect("valid stream japanese regex"));
 
 fn normalize_stream_family_component(value: &str) -> Option<String> {
     let normalized = STREAM_FAMILY_EPISODE_REGEX.replace_all(value, " ");
@@ -72,6 +108,59 @@ pub(crate) fn derive_stream_family(stream: &TorrentioStream, source_name: &str) 
             };
             Some(format!("{}|delivery:{}", normalized_source, delivery))
         })
+}
+
+pub(crate) fn build_stream_key(stream: &TorrentioStream) -> String {
+    let identity = stream
+        .info_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .or_else(|| {
+            stream
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            stream
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            stream
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    format!(
+        "{}|{}",
+        identity,
+        stream
+            .file_idx
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "na".to_string())
+    )
+}
+
+fn stream_delivery_kind(stream: &TorrentioStream) -> StreamDeliveryKind {
+    if stream.cached {
+        StreamDeliveryKind::Cached
+    } else if stream.url.as_deref().is_some_and(is_http_url) {
+        StreamDeliveryKind::Http
+    } else {
+        StreamDeliveryKind::Torrent
+    }
 }
 
 pub(crate) fn normalize_http_url(input: &str) -> Option<String> {
@@ -149,6 +238,216 @@ pub(crate) fn stream_dedup_key(stream: &TorrentioStream) -> Option<String> {
         .map(|url| format!("u:{}", url))
 }
 
+fn stream_resolution(stream: &TorrentioStream) -> StreamResolution {
+    let text = format!(
+        "{} {}",
+        stream.name.as_deref().unwrap_or(""),
+        stream.title.as_deref().unwrap_or("")
+    )
+    .to_ascii_lowercase();
+
+    if text.contains("2160p") || text.contains("4k") {
+        StreamResolution::P2160
+    } else if text.contains("1080p") {
+        StreamResolution::P1080
+    } else if text.contains("720p") {
+        StreamResolution::P720
+    } else {
+        StreamResolution::Sd
+    }
+}
+
+fn is_meta_only(value: &str) -> bool {
+    value.len() < 6
+        || STREAM_META_ONLY_REGEX
+            .replace_all(value, "")
+            .trim()
+            .is_empty()
+}
+
+fn looks_like_filename(value: &str) -> bool {
+    STREAM_FILENAME_HINT_REGEX.is_match(value) || value.len() > 30
+}
+
+fn get_display_lines(stream: &TorrentioStream) -> (String, String) {
+    let raw_name = stream.name.as_deref().unwrap_or("");
+    let raw_title = stream.title.as_deref().unwrap_or("");
+    let name_first_line = raw_name.lines().next().map(str::trim).unwrap_or("");
+    let title_first_line = raw_title.lines().next().map(str::trim).unwrap_or("");
+
+    if is_meta_only(name_first_line) && looks_like_filename(title_first_line) {
+        let stream_title = raw_name.lines().skip(1).collect::<Vec<_>>().join(" ");
+
+        return (
+            title_first_line.to_string(),
+            if stream_title.trim().is_empty() {
+                title_first_line.to_string()
+            } else {
+                stream_title.trim().to_string()
+            },
+        );
+    }
+
+    (
+        if name_first_line.is_empty() {
+            if title_first_line.is_empty() {
+                "Unknown".to_string()
+            } else {
+                title_first_line.to_string()
+            }
+        } else {
+            name_first_line.to_string()
+        },
+        if title_first_line.is_empty() {
+            if name_first_line.is_empty() {
+                "Unknown".to_string()
+            } else {
+                name_first_line.to_string()
+            }
+        } else {
+            title_first_line.to_string()
+        },
+    )
+}
+
+fn format_stream_size_label(stream: &TorrentioStream) -> Option<String> {
+    let raw_text = format!(
+        "{} {}",
+        stream.name.as_deref().unwrap_or(""),
+        stream.title.as_deref().unwrap_or("")
+    );
+
+    if let Some(captures) = STREAM_SIZE_LABEL_REGEX.captures(&raw_text) {
+        let amount = captures
+            .get(1)
+            .map(|capture| capture.as_str())
+            .unwrap_or_default();
+        let unit = captures
+            .get(2)
+            .map(|capture| capture.as_str())
+            .unwrap_or_default()
+            .to_ascii_uppercase()
+            .replace("GIB", "GB")
+            .replace("MIB", "MB");
+
+        return Some(format!("{}{}", amount, unit));
+    }
+
+    stream.size_bytes.map(|size_bytes| {
+        let gb = size_bytes as f64 / 1_073_741_824.0;
+        if gb >= 1.0 {
+            format!("{gb:.1}GB")
+        } else {
+            format!("{}MB", size_bytes / 1_048_576)
+        }
+    })
+}
+
+fn build_stream_presentation(stream: &TorrentioStream) -> StreamPresentation {
+    let (raw_source_name, stream_title) = get_display_lines(stream);
+    let source_name = STREAM_LEADING_META_REGEX
+        .replace(&raw_source_name, "")
+        .trim()
+        .to_string();
+    let full_text = format!(
+        "{}\n{}",
+        stream.name.as_deref().unwrap_or(""),
+        stream.title.as_deref().unwrap_or("")
+    )
+    .to_ascii_lowercase();
+    let raw_text = format!(
+        "{} {}",
+        stream.name.as_deref().unwrap_or(""),
+        stream.title.as_deref().unwrap_or("")
+    );
+    let raw_text_lower = raw_text.to_ascii_lowercase();
+    let language_tag_count = STREAM_LANGUAGE_TAG_REGEX.find_iter(&raw_text).count();
+
+    let is_dv = full_text.contains("dolby vision")
+        || full_text.contains("dovi")
+        || STREAM_DV_REGEX.is_match(&full_text);
+    let is_hdr10p = full_text.contains("hdr10+");
+    let is_hdr = full_text.contains("hdr");
+    let is_atmos = full_text.contains("atmos") || full_text.contains("truehd");
+    let is_dtshd =
+        full_text.contains("dts-hd") || full_text.contains("dtsx") || full_text.contains("dts-x");
+    let is_dts = !is_dtshd && full_text.contains("dts");
+    let is_eac3 = full_text.contains("eac3")
+        || full_text.contains("dd+")
+        || full_text.contains("ddp")
+        || full_text.contains("dd5.1");
+    let is_aac = !is_atmos && !is_dtshd && !is_dts && !is_eac3 && full_text.contains("aac");
+    let is_hevc = full_text.contains("x265")
+        || full_text.contains("hevc")
+        || full_text.contains("h265")
+        || full_text.contains("h.265");
+    let is_av1 = STREAM_AV1_REGEX.is_match(&full_text);
+    let is_dual_audio = language_tag_count == 2
+        || STREAM_DUAL_AUDIO_REGEX.is_match(&raw_text)
+        || (STREAM_ENGLISH_REGEX.is_match(&raw_text) && STREAM_JAPANESE_REGEX.is_match(&raw_text))
+        || (raw_text_lower.contains("dubbed") && raw_text_lower.contains("sub"));
+    let is_multi_audio = language_tag_count > 2
+        || STREAM_MULTI_AUDIO_REGEX.is_match(&raw_text)
+        || STREAM_MULTI_LANG_REGEX.is_match(&raw_text)
+        || STREAM_MULTI_SUB_REGEX.is_match(&raw_text);
+    let delivery_kind = stream_delivery_kind(stream);
+
+    StreamPresentation {
+        source_name: if source_name.is_empty() {
+            "Unknown".to_string()
+        } else {
+            source_name
+        },
+        stream_title,
+        resolution: stream_resolution(stream),
+        delivery_kind,
+        delivery_label: match delivery_kind {
+            StreamDeliveryKind::Cached => "RD+".to_string(),
+            StreamDeliveryKind::Http => "HTTP".to_string(),
+            StreamDeliveryKind::Torrent => "Torrent".to_string(),
+        },
+        is_instantly_playable: !matches!(delivery_kind, StreamDeliveryKind::Torrent),
+        hdr_label: if is_dv {
+            Some("DV".to_string())
+        } else if is_hdr10p {
+            Some("HDR10+".to_string())
+        } else if is_hdr {
+            Some("HDR".to_string())
+        } else {
+            None
+        },
+        audio_label: if is_atmos {
+            Some("Atmos".to_string())
+        } else if is_dtshd {
+            Some("DTS-HD".to_string())
+        } else if is_dts {
+            Some("DTS".to_string())
+        } else if is_eac3 {
+            Some("DD+".to_string())
+        } else if is_aac {
+            Some("AAC".to_string())
+        } else {
+            None
+        },
+        codec_label: if is_av1 {
+            Some("AV1".to_string())
+        } else if is_hevc {
+            Some("HEVC".to_string())
+        } else {
+            None
+        },
+        multi_audio_label: if is_multi_audio {
+            Some("MULTI".to_string())
+        } else if is_dual_audio {
+            Some("DUAL".to_string())
+        } else {
+            None
+        },
+        size_label: format_stream_size_label(stream),
+        is_batch: stream_contains_batch(stream),
+    }
+}
+
 pub(crate) fn prepare_addon_streams(
     streams: Vec<TorrentioStream>,
     source_name: &str,
@@ -172,6 +471,8 @@ pub(crate) fn prepare_addon_streams(
 
         stream.source_name = Some(source_name.clone());
         stream.stream_family = derive_stream_family(&stream, &source_name);
+        stream.stream_key = build_stream_key(&stream);
+        stream.presentation = build_stream_presentation(&stream);
         prepared.push(stream);
     }
 
