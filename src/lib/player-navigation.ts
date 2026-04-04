@@ -28,6 +28,20 @@ export interface PlayerRouteState {
   openingStreamSource?: string;
 }
 
+export function resolvePlayerRouteMediaType(
+  mediaType: string | null | undefined,
+  mediaId: string | null | undefined,
+): PlayerRouteMediaType {
+  const normalizedType = normalizeRouteText(mediaType)?.toLowerCase();
+  const normalizedId = normalizeRouteText(mediaId)?.toLowerCase();
+
+  if (normalizedType === 'anime' || normalizedId?.startsWith('kitsu:')) {
+    return 'anime';
+  }
+
+  return normalizedType === 'movie' ? 'movie' : 'series';
+}
+
 function normalizeRouteNumber(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return undefined;

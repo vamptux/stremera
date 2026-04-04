@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import {
+  resolvePlayerRouteMediaType,
   sanitizePlayerRouteState,
   type PlayerRouteMediaType,
   type PlayerRouteState,
@@ -28,12 +29,7 @@ export function usePlayerRouteState() {
     const routeAbsoluteEpisode = parseFiniteNumber(state.absoluteEpisode) ?? routeEpisode;
     const routeStreamSeason = parseFiniteNumber(state.streamSeason);
     const routeStreamEpisode = parseFiniteNumber(state.streamEpisode);
-    const effectiveResolveMediaType: PlayerRouteMediaType =
-      type === 'anime' || (type === 'series' && (id?.startsWith('kitsu:') ?? false))
-        ? 'anime'
-        : type === 'movie'
-          ? 'movie'
-          : 'series';
+    const effectiveResolveMediaType: PlayerRouteMediaType = resolvePlayerRouteMediaType(type, id);
 
     return {
       id,

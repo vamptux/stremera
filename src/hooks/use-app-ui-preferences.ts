@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useEffectEvent, useMemo, useState } from 'react';
+import { useCallback, useMemo } from 'react';
 
+import { useLegacyStorageImport } from '@/hooks/use-legacy-storage-import';
 import {
   api,
   type AppUiPreferences,
@@ -8,15 +9,16 @@ import {
 } from '@/lib/api';
 import {
   clearLegacyStorageFeatureKeys,
-  markLegacyStorageFeatureComplete,
   readLegacyStorageFeature,
   type LegacyStorageReadResult,
 } from '@/lib/legacy-storage';
+import { runOptimisticQueryMutation } from '@/lib/optimistic-query';
 
 const LEGACY_PLAYER_VOLUME_STORAGE_KEY = 'player:volume';
 const LEGACY_PLAYER_SPEED_STORAGE_KEY = 'player:speed';
 const LEGACY_SPOILER_PROTECTION_STORAGE_KEY = 'streamy_spoiler_protection';
 const APP_UI_LEGACY_STORAGE_FEATURE = 'app-ui-preferences';
+const APP_UI_PREFERENCES_QUERY_KEY = ['appUiPreferences'] as const;
 
 const DEFAULT_APP_UI_PREFERENCES: AppUiPreferences = {
   playerVolume: 75,
@@ -117,72 +119,25 @@ export function useAppUiPreferences() {
   const queryClient = useQueryClient();
   const legacyPreferencesRead = useMemo(() => readLegacyAppUiPreferences(), []);
   const legacyPreferences = legacyPreferencesRead.value;
-  const [hasAttemptedLegacyImport, setHasAttemptedLegacyImport] = useState(
-    () => !legacyPreferencesRead.hasLegacyData,
-  );
-  const markLegacyImportHandled = useEffectEvent(() => {
-    setHasAttemptedLegacyImport(true);
-  });
 
   const preferencesQuery = useQuery({
-    queryKey: ['appUiPreferences'],
+    queryKey: APP_UI_PREFERENCES_QUERY_KEY,
     queryFn: api.getAppUiPreferences,
     staleTime: Number.POSITIVE_INFINITY,
     gcTime: Number.POSITIVE_INFINITY,
     placeholderData: legacyPreferences ?? DEFAULT_APP_UI_PREFERENCES,
   });
 
-  useEffect(() => {
-    if (!legacyPreferencesRead.hasLegacyData) {
-      markLegacyStorageFeatureComplete(APP_UI_LEGACY_STORAGE_FEATURE);
-    }
-  }, [legacyPreferencesRead.hasLegacyData]);
-
-  useEffect(() => {
-    if (hasAttemptedLegacyImport || !preferencesQuery.isSuccess) {
-      return;
-    }
-
-    if (!legacyPreferencesRead.hasLegacyData) {
-      markLegacyImportHandled();
-      return;
-    }
-
-    if (!legacyPreferences) {
-      clearLegacyAppUiPreferences();
-      markLegacyImportHandled();
-      return;
-    }
-
-    let cancelled = false;
-
-    void api
-      .importLegacyAppUiPreferences(legacyPreferences)
-      .then((savedPreferences) => {
-        if (cancelled) {
-          return;
-        }
-
-        queryClient.setQueryData<AppUiPreferences>(['appUiPreferences'], savedPreferences);
-        clearLegacyAppUiPreferences();
-        markLegacyImportHandled();
-      })
-      .catch(() => {
-        if (!cancelled) {
-          markLegacyImportHandled();
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    hasAttemptedLegacyImport,
-    legacyPreferences,
-    legacyPreferencesRead.hasLegacyData,
-    preferencesQuery.isSuccess,
-    queryClient,
-  ]);
+  useLegacyStorageImport({
+    clearLegacy: clearLegacyAppUiPreferences,
+    enabled: preferencesQuery.isSuccess,
+    feature: APP_UI_LEGACY_STORAGE_FEATURE,
+    importLegacy: api.importLegacyAppUiPreferences,
+    onImported: (savedPreferences) => {
+      queryClient.setQueryData<AppUiPreferences>(APP_UI_PREFERENCES_QUERY_KEY, savedPreferences);
+    },
+    readResult: legacyPreferencesRead,
+  });
 
   const savePreferencesMutation = useMutation({
     mutationFn: (patch: AppUiPreferencesPatch) => api.saveAppUiPreferences(patch),
@@ -201,15 +156,13 @@ export function useAppUiPreferences() {
         ...patch,
       });
 
-      queryClient.setQueryData<AppUiPreferences>(['appUiPreferences'], optimisticPreferences);
-
-      try {
-        const savedPreferences = await savePreferencesMutation.mutateAsync(patch);
-        queryClient.setQueryData<AppUiPreferences>(['appUiPreferences'], savedPreferences);
-      } catch (error) {
-        await queryClient.invalidateQueries({ queryKey: ['appUiPreferences'] });
-        throw error;
-      }
+      await runOptimisticQueryMutation({
+        mutate: savePreferencesMutation.mutateAsync,
+        optimisticData: optimisticPreferences,
+        queryClient,
+        queryKey: APP_UI_PREFERENCES_QUERY_KEY,
+        variables: patch,
+      });
     },
     [currentPreferences, queryClient, savePreferencesMutation],
   );

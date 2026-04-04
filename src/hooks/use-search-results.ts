@@ -1,16 +1,47 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import { useEffect, useMemo, type MutableRefObject } from 'react';
+import { useEffect, useMemo, useRef, type MutableRefObject } from 'react';
 
-import { api, type MediaItem } from '@/lib/api';
+import { api, type MediaItem, type SearchCatalogPage } from '@/lib/api';
+import {
+  type SearchDiscoverFeed,
+  type SearchMediaType,
+  type SearchProviderId,
+  type SearchSortOption,
+} from '@/lib/search-page-state';
 
-export type SearchMediaType = 'movie' | 'series' | 'anime';
-export type SearchProviderId = 'cinemeta' | 'netflix' | 'hbo' | 'disney' | 'prime' | 'apple' | 'kitsu';
-export type SearchDiscoverFeed = 'popular' | 'featured' | 'trending' | 'airing' | 'rating';
-export type SearchSortOption = 'default' | 'title-asc' | 'title-desc' | 'year-desc' | 'year-asc';
+export type {
+  SearchDiscoverFeed,
+  SearchMediaType,
+  SearchProviderId,
+  SearchSortOption,
+} from '@/lib/search-page-state';
 
 const SEARCH_AUTO_PREFETCH_RESULT_TARGET = 120;
 const SEARCH_AUTO_PREFETCH_PAGE_LIMIT = 2;
 const FILTERED_SEARCH_AUTO_PREFETCH_PAGE_LIMIT = 4;
+
+function getNextSearchCatalogPageParam(
+  lastPage: SearchCatalogPage,
+  allPages: SearchCatalogPage[],
+): number | undefined {
+  const nextSkip = lastPage.nextSkip ?? undefined;
+  if (nextSkip === undefined || lastPage.items.length === 0) {
+    return undefined;
+  }
+
+  if (allPages.length <= 1) {
+    return nextSkip;
+  }
+
+  const seenIds = new Set<string>();
+  for (const page of allPages.slice(0, -1)) {
+    for (const item of page.items) {
+      seenIds.add(item.id);
+    }
+  }
+
+  return lastPage.items.some((item) => !seenIds.has(item.id)) ? nextSkip : undefined;
+}
 
 interface UseSearchResultsArgs {
   query: string;
@@ -25,6 +56,7 @@ interface UseSearchResultsArgs {
   isOnline: boolean;
   suggestFocused: boolean;
   restoredScrollTopRef: MutableRefObject<number>;
+  scrollContainerRef: MutableRefObject<HTMLDivElement | null>;
 }
 
 export function useSearchResults({
@@ -40,7 +72,9 @@ export function useSearchResults({
   isOnline,
   suggestFocused,
   restoredScrollTopRef,
+  scrollContainerRef,
 }: UseSearchResultsArgs) {
+  const sentinelRef = useRef<HTMLDivElement>(null);
   const normalizedQuery = query.trim();
   const normalizedSuggestionQuery = suggestionQuery.trim();
   const normalizedGenres = useMemo(
@@ -107,7 +141,7 @@ export function useSearchResults({
         yearTo: yearTo ?? undefined,
         skip: typeof pageParam === 'number' && pageParam > 0 ? pageParam : undefined,
       }),
-    getNextPageParam: (lastPage) => lastPage.nextSkip ?? undefined,
+    getNextPageParam: getNextSearchCatalogPageParam,
     initialPageParam: 0,
     staleTime: 1000 * 60 * 5,
     enabled: isOnline,
@@ -160,7 +194,31 @@ export function useSearchResults({
     supportsInfiniteScroll,
   ]);
 
+  useEffect(() => {
+    if (!supportsInfiniteScroll) {
+      return;
+    }
+
+    const sentinelElement = sentinelRef.current;
+    if (!sentinelElement) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && hasNextPage && !isFetchingNextPage) {
+          void fetchNextPage();
+        }
+      },
+      { rootMargin: '800px', root: scrollContainerRef.current },
+    );
+
+    observer.observe(sentinelElement);
+    return () => observer.disconnect();
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage, scrollContainerRef, supportsInfiniteScroll]);
+
   return {
+    sentinelRef,
     results,
     suggestions,
     isLoading,

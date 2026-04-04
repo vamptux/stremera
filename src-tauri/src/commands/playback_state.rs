@@ -262,6 +262,31 @@ impl PlaybackStateService {
         self.with_resume_store(app, |resume_store| resume_store.load_entries())
     }
 
+    pub(crate) fn count_resume_entries(&self, app: &AppHandle) -> Result<usize, String> {
+        self.with_resume_store(app, |resume_store| resume_store.count_entries())
+    }
+
+    pub(crate) fn load_resume_entries_for_media_id(
+        &self,
+        app: &AppHandle,
+        media_id: &str,
+    ) -> Result<Vec<(String, WatchProgress)>, String> {
+        self.with_resume_store(app, |resume_store| {
+            resume_store.load_entries_for_media_id(media_id)
+        })
+    }
+
+    pub(crate) fn load_resume_entries_for_title(
+        &self,
+        app: &AppHandle,
+        media_type: &str,
+        media_id: &str,
+    ) -> Result<Vec<(String, WatchProgress)>, String> {
+        self.with_resume_store(app, |resume_store| {
+            resume_store.load_entries_for_title(media_type, media_id)
+        })
+    }
+
     pub(crate) fn merge_history_entries(
         &self,
         app: &AppHandle,
@@ -750,8 +775,6 @@ impl PlaybackStateService {
         let stream_health_index = load_index(&store, PLAYBACK_STREAM_HEALTH_INDEX_KEY)?;
         let source_health_index = load_index(&store, PLAYBACK_SOURCE_HEALTH_INDEX_KEY)?;
         let stream_family_index = load_index(&store, PLAYBACK_STREAM_FAMILY_INDEX_KEY)?;
-        let language_preferences_index =
-            load_index(&store, PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY)?;
         let episode_mapping_index = load_index(&store, PLAYBACK_EPISODE_MAPPING_INDEX_KEY)?;
 
         for key in &stream_health_index {
@@ -762,9 +785,6 @@ impl PlaybackStateService {
         }
         for key in &stream_family_index {
             store.delete(playback_stream_family_item_key(key));
-        }
-        for key in &language_preferences_index {
-            store.delete(playback_language_preferences_item_key(key));
         }
         for key in &episode_mapping_index {
             store.delete(playback_episode_mapping_item_key(key));
@@ -780,10 +800,6 @@ impl PlaybackStateService {
         );
         store.set(
             PLAYBACK_STREAM_FAMILY_INDEX_KEY,
-            json!(Vec::<String>::new()),
-        );
-        store.set(
-            PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY,
             json!(Vec::<String>::new()),
         );
         store.set(
@@ -1055,13 +1071,18 @@ fn merge_playback_language_preferences(
     defaults: PlaybackLanguagePreferences,
     scoped: Option<&PlaybackLanguagePreferencesSnapshot>,
 ) -> PlaybackLanguagePreferences {
+    let PlaybackLanguagePreferences {
+        preferred_audio_language,
+        preferred_subtitle_language,
+    } = defaults;
+
     PlaybackLanguagePreferences {
-        preferred_audio_language: defaults
-            .preferred_audio_language
-            .or_else(|| scoped.and_then(|snapshot| snapshot.preferred_audio_language.clone())),
-        preferred_subtitle_language: defaults
-            .preferred_subtitle_language
-            .or_else(|| scoped.and_then(|snapshot| snapshot.preferred_subtitle_language.clone())),
+        preferred_audio_language: scoped
+            .and_then(|snapshot| snapshot.preferred_audio_language.clone())
+            .or(preferred_audio_language),
+        preferred_subtitle_language: scoped
+            .and_then(|snapshot| snapshot.preferred_subtitle_language.clone())
+            .or(preferred_subtitle_language),
     }
 }
 
@@ -1725,7 +1746,7 @@ mod tests {
     }
 
     #[test]
-    fn global_language_preferences_override_scoped_fallbacks() {
+    fn scoped_language_preferences_override_global_defaults_per_field() {
         let defaults = PlaybackLanguagePreferences {
             preferred_audio_language: Some("en".to_string()),
             preferred_subtitle_language: Some("off".to_string()),
@@ -1740,7 +1761,7 @@ mod tests {
 
         let effective = merge_playback_language_preferences(defaults, Some(&scoped));
 
-        assert_eq!(effective.preferred_audio_language.as_deref(), Some("en"));
+        assert_eq!(effective.preferred_audio_language.as_deref(), Some("ja"));
         assert_eq!(
             effective.preferred_subtitle_language.as_deref(),
             Some("off")

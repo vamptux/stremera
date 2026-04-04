@@ -25,6 +25,8 @@ import { api, UserList, MediaItem } from '@/lib/api';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { invalidateListQueries } from '@/lib/query-invalidation';
+import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import {
   GripVertical,
   ChevronDown,
@@ -40,8 +42,7 @@ import {
   LayoutList,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { CreateListDialog } from '@/components/list/create-list-dialog';
-import { RenameListDialog } from '@/components/list/rename-list-dialog';
+import { CreateListDialog, RenameListDialog } from '@/components/list/list-editor-dialog';
 import { ListIcon } from '@/components/list/list-icons';
 
 // ─── Sortable List Card ────────────────────────────────────────────────────────
@@ -162,6 +163,7 @@ interface SortableItemRowProps {
 function SortableItemRow({ item, listId, viewMode }: SortableItemRowProps) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const detailsRouteType = resolvePlayerRouteMediaType(item.type, item.id);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: `${listId}::${item.id}`,
   });
@@ -174,8 +176,7 @@ function SortableItemRow({ item, listId, viewMode }: SortableItemRowProps) {
   const removeItem = useMutation({
     mutationFn: () => api.removeFromList(listId, item.id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['lists'] });
-      queryClient.invalidateQueries({ queryKey: ['item-lists', item.id] });
+      void invalidateListQueries(queryClient, item.id);
       toast.success(`Removed from list`, { description: item.title });
     },
     onError: () => toast.error('Failed to remove item'),
@@ -213,7 +214,7 @@ function SortableItemRow({ item, listId, viewMode }: SortableItemRowProps) {
 
         <div
           className='aspect-[2/3] cursor-pointer'
-          onClick={() => navigate(`/details/${item.type}/${item.id}`)}
+          onClick={() => navigate(`/details/${detailsRouteType}/${item.id}`)}
         >
           {item.poster ? (
             <img
@@ -267,7 +268,7 @@ function SortableItemRow({ item, listId, viewMode }: SortableItemRowProps) {
       {/* Poster thumb */}
       <div
         className='h-10 w-7 rounded overflow-hidden bg-zinc-800 shrink-0 cursor-pointer'
-        onClick={() => navigate(`/details/${item.type}/${item.id}`)}
+        onClick={() => navigate(`/details/${detailsRouteType}/${item.id}`)}
       >
         {item.poster ? (
           <img
@@ -290,7 +291,7 @@ function SortableItemRow({ item, listId, viewMode }: SortableItemRowProps) {
       {/* Title info */}
       <div
         className='flex-1 min-w-0 cursor-pointer'
-        onClick={() => navigate(`/details/${item.type}/${item.id}`)}
+        onClick={() => navigate(`/details/${detailsRouteType}/${item.id}`)}
       >
         <p className='text-sm font-medium text-zinc-200 group-hover:text-white transition-colors truncate'>
           {item.title}
@@ -359,7 +360,7 @@ function ListItemsView({ list }: { list: UserList }) {
     onError: () => {
       // Revert display order to whatever the server currently has
       setOrderedIds(list.item_ids);
-      queryClient.invalidateQueries({ queryKey: ['lists'] });
+      void invalidateListQueries(queryClient);
       toast.error('Failed to save order');
     },
   });
@@ -588,7 +589,7 @@ export function ListsManager() {
   const deleteList = useMutation({
     mutationFn: (id: string) => api.deleteList(id),
     onSuccess: (_, id) => {
-      queryClient.invalidateQueries({ queryKey: ['lists'] });
+      void invalidateListQueries(queryClient);
       setLocalLists([]);
       setExpanded((prev) => {
         const next = new Set(prev);
@@ -732,7 +733,6 @@ export function ListsManager() {
         open={createOpen}
         onOpenChange={setCreateOpen}
         onCreated={() => {
-          queryClient.invalidateQueries({ queryKey: ['lists'] });
           setLocalLists([]);
         }}
       />
@@ -745,7 +745,6 @@ export function ListsManager() {
             if (!open) setRenameTarget(null);
           }}
           onRenamed={() => {
-            queryClient.invalidateQueries({ queryKey: ['lists'] });
             setLocalLists([]);
             setRenameTarget(null);
           }}

@@ -351,10 +351,7 @@ pub async fn get_data_stats(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
 ) -> Result<DataStats, String> {
-    let history_count = playback_state
-        .load_resume_entries(&app)
-        .unwrap_or_default()
-        .len();
+    let history_count = playback_state.count_resume_entries(&app).unwrap_or_default();
 
     let library_store = app.store(LIBRARY_STORE_FILE).map_err(|e| e.to_string())?;
     let library_count = load_library_map(&library_store)?.len();

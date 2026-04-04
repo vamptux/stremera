@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { api, getErrorMessage } from '@/lib/api';
-import { useDownloads } from '@/hooks/use-downloads';
+import { useDownloads } from '@/contexts/download-context';
 import { Folder, Zap, Download, Wifi, X } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';

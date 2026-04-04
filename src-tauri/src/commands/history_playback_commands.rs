@@ -278,7 +278,7 @@ fn get_latest_history_playback_item(
     item: &WatchProgress,
 ) -> Result<WatchProgress, String> {
     let items = playback_state
-        .load_resume_entries(app)?
+        .load_resume_entries_for_title(app, &item.type_, &item.id)?
         .into_iter()
         .map(|(_, item)| item)
         .collect::<Vec<_>>();

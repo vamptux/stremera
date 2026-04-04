@@ -3,6 +3,7 @@ use super::history_helpers::{
     choose_continue_watching_entry_with_source_health,
     choose_exact_watch_progress_entry_with_source_health,
     choose_watch_history_entry_with_source_health, continue_watching_priority_score,
+    normalize_watch_progress_type,
     sanitize_watch_progress, should_skip_watch_progress_save,
 };
 use super::playback_state::PlaybackStateService;
@@ -170,15 +171,9 @@ pub async fn get_watch_history_for_id(
     }
 
     let mut list: Vec<WatchProgress> = playback_state
-        .load_resume_entries(&app)?
+        .load_resume_entries_for_media_id(&app, trimmed_id)?
         .into_iter()
-        .filter_map(|(_, item)| {
-            if item.id == trimmed_id {
-                Some(item)
-            } else {
-                None
-            }
-        })
+        .map(|(_, item)| item)
         .collect();
 
     list.sort_by(|a, b| b.last_watched.cmp(&a.last_watched));
@@ -194,8 +189,12 @@ pub async fn get_watch_progress(
     season: Option<u32>,
     episode: Option<u32>,
 ) -> Result<Option<WatchProgress>, String> {
+    let Some(normalized_type) = normalize_watch_progress_type(&type_) else {
+        return Ok(None);
+    };
+
     let items = playback_state
-        .load_resume_entries(&app)?
+        .load_resume_entries_for_title(&app, normalized_type.as_str(), id.trim())?
         .into_iter()
         .map(|(_, item)| item)
         .collect::<Vec<_>>();
@@ -272,24 +271,19 @@ pub async fn remove_all_from_watch_history(
         vec![format!("series:{}:", id), format!("anime:{}:", id)]
     };
 
-    let resume_keys: Vec<String> = playback_state
-        .load_resume_entries(&app)?
+    let keys_to_remove: HashSet<String> = playback_state
+        .load_resume_entries_for_media_id(&app, &id)?
         .into_iter()
-        .map(|(key, _)| key)
-        .collect();
-
-    let keys_to_remove: HashSet<String> = resume_keys
-        .iter()
-        .filter(|key| {
+        .filter_map(|(key, _)| {
             if type_lower == "movie" {
-                prefixes.iter().any(|prefix| *key == prefix)
+                prefixes.contains(&key).then_some(key)
             } else {
                 prefixes
                     .iter()
                     .any(|prefix| key.starts_with(prefix.as_str()))
+                    .then_some(key)
             }
         })
-        .cloned()
         .collect();
 
     if !keys_to_remove.is_empty() {

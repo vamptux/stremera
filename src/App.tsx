@@ -1,27 +1,119 @@
 import { Route, Routes } from 'react-router-dom';
+import { Suspense, lazy, type ReactNode, useEffect, useRef } from 'react';
+
+import { DownloadProvider } from '@/contexts/download-context';
+import { useAppUpdater } from '@/hooks/use-app-updater';
+import { getErrorMessage } from '@/lib/api';
+import { Toaster } from '@/components/ui/sonner';
 import { Layout } from './components/layout';
 import { Home } from './pages/home';
-import { Search } from './pages/search';
-import { Details } from './pages/details';
-import { Settings } from './pages/settings';
-import { Profile } from './pages/profile';
-import { Calendar } from './pages/calendar';
-import { Downloads } from './pages/downloads';
-import { Toaster } from '@/components/ui/sonner';
-import { useEffect, Suspense, lazy } from 'react';
 import { Loader2 } from 'lucide-react';
-import { DownloadProvider } from '@/contexts/download-context';
-import { AppUpdateManager } from '@/components/app-update-manager';
+import { toast } from 'sonner';
 
-// Lazy load Player to prevent libmpv from loading at startup
+const Search = lazy(() => import('./pages/search').then((module) => ({ default: module.Search })));
+const Details = lazy(() =>
+  import('./pages/details').then((module) => ({ default: module.Details })),
+);
+const Settings = lazy(() =>
+  import('./pages/settings/index').then((module) => ({ default: module.Settings })),
+);
+const Profile = lazy(() =>
+  import('./pages/profile').then((module) => ({ default: module.Profile })),
+);
+const Calendar = lazy(() =>
+  import('./pages/calendar').then((module) => ({ default: module.Calendar })),
+);
+const Downloads = lazy(() =>
+  import('./pages/downloads').then((module) => ({ default: module.Downloads })),
+);
 const Player = lazy(() => import('./pages/player').then((m) => ({ default: m.Player })));
+const UPDATE_TOAST_ID = 'app-update-toast';
 
-function PlayerLoader() {
+function FullScreenRouteLoader() {
   return (
     <div className='h-screen w-screen bg-black flex items-center justify-center'>
       <Loader2 className='h-8 w-8 animate-spin text-white/50' />
     </div>
   );
+}
+
+function ContentRouteLoader() {
+  return (
+    <div className='flex min-h-[60vh] w-full items-center justify-center'>
+      <Loader2 className='h-7 w-7 animate-spin text-white/35' />
+    </div>
+  );
+}
+
+function RouteSuspense({ children, fallback }: { children: ReactNode; fallback: ReactNode }) {
+  return <Suspense fallback={fallback}>{children}</Suspense>;
+}
+
+function AppUpdateManager() {
+  const didCheckRef = useRef(false);
+  const {
+    checkForUpdates,
+    installUpdate,
+    isLastNotifiedVersionReady,
+    isSupported,
+    lastNotifiedVersion,
+    markUpdateNotified,
+  } = useAppUpdater();
+
+  useEffect(() => {
+    if (import.meta.env.DEV || didCheckRef.current || !isSupported || !isLastNotifiedVersionReady) {
+      return;
+    }
+
+    didCheckRef.current = true;
+
+    void (async () => {
+      try {
+        const update = await checkForUpdates();
+        if (!update) return;
+
+        if (lastNotifiedVersion === update.version) {
+          return;
+        }
+
+        await markUpdateNotified(update.version).catch(() => undefined);
+
+        toast.info(`Update ${update.version} is ready`, {
+          description:
+            update.body?.trim() ||
+            'A signed desktop update is available. Install to restart into the latest version.',
+          duration: 15000,
+          action: {
+            label: 'Install',
+            onClick: () => {
+              toast.loading('Downloading update…', { id: UPDATE_TOAST_ID });
+              void installUpdate(update, (status) => {
+                toast.loading(status, { id: UPDATE_TOAST_ID });
+              }).catch((error) => {
+                toast.error('Failed to install update', {
+                  id: UPDATE_TOAST_ID,
+                  description: getErrorMessage(error),
+                });
+              });
+            },
+          },
+        });
+      } catch (error) {
+        if (import.meta.env.DEV) {
+          console.error('Automatic update check failed:', error);
+        }
+      }
+    })();
+  }, [
+    checkForUpdates,
+    installUpdate,
+    isLastNotifiedVersionReady,
+    isSupported,
+    lastNotifiedVersion,
+    markUpdateNotified,
+  ]);
+
+  return null;
 }
 
 function App() {
@@ -41,28 +133,77 @@ function App() {
         <Routes>
           <Route element={<Layout />}>
             <Route path='/' element={<Home />} />
-            <Route path='/search' element={<Search />} />
-            <Route path='/details/:type/:id' element={<Details />} />
-            <Route path='/settings' element={<Settings />} />
-            <Route path='/profile' element={<Profile />} />
-            <Route path='/library' element={<Profile />} />
-            <Route path='/downloads' element={<Downloads />} />
-            <Route path='/calendar' element={<Calendar />} />
+            <Route
+              path='/search'
+              element={
+                <RouteSuspense fallback={<ContentRouteLoader />}>
+                  <Search />
+                </RouteSuspense>
+              }
+            />
+            <Route
+              path='/details/:type/:id'
+              element={
+                <RouteSuspense fallback={<ContentRouteLoader />}>
+                  <Details />
+                </RouteSuspense>
+              }
+            />
+            <Route
+              path='/settings'
+              element={
+                <RouteSuspense fallback={<ContentRouteLoader />}>
+                  <Settings />
+                </RouteSuspense>
+              }
+            />
+            <Route
+              path='/profile'
+              element={
+                <RouteSuspense fallback={<ContentRouteLoader />}>
+                  <Profile />
+                </RouteSuspense>
+              }
+            />
+            <Route
+              path='/library'
+              element={
+                <RouteSuspense fallback={<ContentRouteLoader />}>
+                  <Profile />
+                </RouteSuspense>
+              }
+            />
+            <Route
+              path='/downloads'
+              element={
+                <RouteSuspense fallback={<ContentRouteLoader />}>
+                  <Downloads />
+                </RouteSuspense>
+              }
+            />
+            <Route
+              path='/calendar'
+              element={
+                <RouteSuspense fallback={<ContentRouteLoader />}>
+                  <Calendar />
+                </RouteSuspense>
+              }
+            />
           </Route>
           <Route
             path='/player/:type/:id'
             element={
-              <Suspense fallback={<PlayerLoader />}>
+              <RouteSuspense fallback={<FullScreenRouteLoader />}>
                 <Player />
-              </Suspense>
+              </RouteSuspense>
             }
           />
           <Route
             path='/player/:type/:id/:season/:episode'
             element={
-              <Suspense fallback={<PlayerLoader />}>
+              <RouteSuspense fallback={<FullScreenRouteLoader />}>
                 <Player />
-              </Suspense>
+              </RouteSuspense>
             }
           />
         </Routes>

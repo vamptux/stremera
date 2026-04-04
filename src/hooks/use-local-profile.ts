@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useEffectEvent, useMemo, useState } from 'react';
+import { useCallback, useMemo } from 'react';
 
+import { useLegacyStorageImport } from '@/hooks/use-legacy-storage-import';
 import {
   api,
   type LocalProfile,
@@ -9,16 +10,17 @@ import {
 } from '@/lib/api';
 import {
   clearLegacyStorageFeatureKeys,
-  markLegacyStorageFeatureComplete,
   readLegacyStorageFeature,
   type LegacyStorageReadResult,
 } from '@/lib/legacy-storage';
+import { runOptimisticQueryMutation } from '@/lib/optimistic-query';
 
 export type { LocalProfile, ProfileViewMode };
 
 const LEGACY_PROFILE_STORAGE_KEY = 'streamy_profile';
 const LEGACY_PROFILE_VIEW_STORAGE_KEY = 'streamy_profile_view';
 const PROFILE_LEGACY_STORAGE_FEATURE = 'profile-preferences';
+const PROFILE_PREFERENCES_QUERY_KEY = ['profilePreferences'] as const;
 const PROFILE_NAME_MAX_LENGTH = 32;
 const PROFILE_BIO_MAX_LENGTH = 80;
 const PROFILE_ACCENT_COLOR_REGEX = /^#[0-9a-fA-F]{6}$/;
@@ -125,75 +127,29 @@ export function useLocalProfile() {
   const queryClient = useQueryClient();
   const legacyProfilePreferencesRead = useMemo(() => readLegacyProfilePreferences(), []);
   const legacyProfilePreferences = legacyProfilePreferencesRead.value;
-  const [hasAttemptedLegacyImport, setHasAttemptedLegacyImport] = useState(
-    () => !legacyProfilePreferencesRead.hasLegacyData,
-  );
-  const markLegacyImportHandled = useEffectEvent(() => {
-    setHasAttemptedLegacyImport(true);
-  });
 
   const profilePreferencesQuery = useQuery({
-    queryKey: ['profilePreferences'],
+    queryKey: PROFILE_PREFERENCES_QUERY_KEY,
     queryFn: api.getProfilePreferences,
     staleTime: Infinity,
     gcTime: Infinity,
     placeholderData: legacyProfilePreferences ?? DEFAULT_PROFILE_PREFERENCES,
   });
 
-  useEffect(() => {
-    if (!legacyProfilePreferencesRead.hasLegacyData) {
-      markLegacyStorageFeatureComplete(PROFILE_LEGACY_STORAGE_FEATURE);
-    }
-  }, [legacyProfilePreferencesRead.hasLegacyData]);
-
-  useEffect(() => {
-    if (hasAttemptedLegacyImport || !profilePreferencesQuery.isSuccess) {
-      return;
-    }
-
-    if (!legacyProfilePreferencesRead.hasLegacyData) {
-      markLegacyImportHandled();
-      return;
-    }
-
-    if (!legacyProfilePreferences) {
-      clearLegacyProfilePreferences();
-      markLegacyImportHandled();
-      return;
-    }
-
-    let cancelled = false;
-
-    void api
-      .importLegacyProfilePreferences(
-        legacyProfilePreferences.profile,
-        legacyProfilePreferences.viewMode,
-      )
-      .then((savedPreferences) => {
-        if (cancelled) {
-          return;
-        }
-
-        queryClient.setQueryData<ProfilePreferences>(['profilePreferences'], savedPreferences);
-        clearLegacyProfilePreferences();
-        markLegacyImportHandled();
-      })
-      .catch(() => {
-        if (!cancelled) {
-          markLegacyImportHandled();
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    hasAttemptedLegacyImport,
-    legacyProfilePreferences,
-    legacyProfilePreferencesRead.hasLegacyData,
-    profilePreferencesQuery.isSuccess,
-    queryClient,
-  ]);
+  useLegacyStorageImport({
+    clearLegacy: clearLegacyProfilePreferences,
+    enabled: profilePreferencesQuery.isSuccess,
+    feature: PROFILE_LEGACY_STORAGE_FEATURE,
+    importLegacy: (preferences) =>
+      api.importLegacyProfilePreferences(preferences.profile, preferences.viewMode),
+    onImported: (savedPreferences) => {
+      queryClient.setQueryData<ProfilePreferences>(
+        PROFILE_PREFERENCES_QUERY_KEY,
+        savedPreferences,
+      );
+    },
+    readResult: legacyProfilePreferencesRead,
+  });
 
   const savePreferencesMutation = useMutation({
     mutationFn: (preferences: ProfilePreferences) =>
@@ -209,15 +165,13 @@ export function useLocalProfile() {
   const persistPreferences = useCallback(
     async (nextPreferences: ProfilePreferences) => {
       const sanitized = sanitizeProfilePreferences(nextPreferences);
-      queryClient.setQueryData<ProfilePreferences>(['profilePreferences'], sanitized);
-
-      try {
-        const savedPreferences = await savePreferencesMutation.mutateAsync(sanitized);
-        queryClient.setQueryData<ProfilePreferences>(['profilePreferences'], savedPreferences);
-      } catch (error) {
-        await queryClient.invalidateQueries({ queryKey: ['profilePreferences'] });
-        throw error;
-      }
+      await runOptimisticQueryMutation({
+        mutate: savePreferencesMutation.mutateAsync,
+        optimisticData: sanitized,
+        queryClient,
+        queryKey: PROFILE_PREFERENCES_QUERY_KEY,
+        variables: sanitized,
+      });
     },
     [queryClient, savePreferencesMutation],
   );

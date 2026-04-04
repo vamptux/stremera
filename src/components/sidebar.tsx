@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { useDownloads } from '@/hooks/use-downloads';
+import { useDownloads } from '@/contexts/download-context';
 import { useAppUpdater } from '@/hooks/use-app-updater';
 
 interface SidebarProps {

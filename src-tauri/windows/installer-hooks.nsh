@@ -1,4 +1,5 @@
 !macro NSIS_HOOK_PREINSTALL
+  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "Stremera"
   !insertmacro CheckIfAppIsRunning "streamy.exe" "Streamy"
 
   ReadRegStr $R0 SHCTX "Software\vamptux\Stremera" ""
@@ -17,7 +18,6 @@
 
   ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
     Delete "$INSTDIR\streamy.exe"
-    CopyFiles /SILENT "$INSTDIR\${MAINBINARYNAME}.exe" "$INSTDIR\streamy.exe"
 
     ${If} ${FileExists} "$DESKTOP\Streamy.lnk"
       !insertmacro UnpinShortcut "$DESKTOP\Streamy.lnk"

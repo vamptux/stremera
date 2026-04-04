@@ -503,6 +503,23 @@ fn merge_item_batches(
     Ok(items)
 }
 
+fn drain_unique_catalog_batch(
+    batch: Vec<MediaItem>,
+    seen_ids: &mut HashSet<String>,
+) -> (Vec<MediaItem>, usize) {
+    let mut unique_items = Vec::new();
+    let mut unique_count = 0usize;
+
+    for item in batch {
+        if seen_ids.insert(item.id.clone()) {
+            unique_count += 1;
+            unique_items.push(item);
+        }
+    }
+
+    (unique_items, unique_count)
+}
+
 fn slice_catalog_page(items: Vec<MediaItem>, skip: u32, page_limit: usize) -> SearchCatalogPage {
     let offset = skip as usize;
     if offset >= items.len() {
@@ -611,10 +628,13 @@ async fn fetch_addon_browse_items(
             break;
         }
 
-        for item in filter_items_by_year(batch, year_range) {
-            if seen_ids.insert(item.id.clone()) {
-                items.push(item);
-            }
+        let (unique_batch, unique_count) = drain_unique_catalog_batch(batch, &mut seen_ids);
+        if unique_count == 0 {
+            break;
+        }
+
+        for item in filter_items_by_year(unique_batch, year_range) {
+            items.push(item);
         }
 
         current_skip += batch_len as u32;
@@ -648,11 +668,15 @@ async fn fetch_default_addon_browse_page(
             break;
         }
 
-        let filtered_batch = filter_items_by_year(batch, year_range);
+        let (unique_batch, unique_count) = drain_unique_catalog_batch(batch, &mut seen_ids);
+        if unique_count == 0 {
+            next_skip = None;
+            break;
+        }
+
+        let filtered_batch = filter_items_by_year(unique_batch, year_range);
         for item in filtered_batch {
-            if seen_ids.insert(item.id.clone()) {
-                items.push(item);
-            }
+            items.push(item);
         }
 
         current_skip += batch_len as u32;
@@ -834,8 +858,9 @@ pub async fn query_search_catalog(
 
 #[cfg(test)]
 mod tests {
-    use super::{slice_catalog_page, sort_catalog_items, SearchSort};
+    use super::{drain_unique_catalog_batch, slice_catalog_page, sort_catalog_items, SearchSort};
     use crate::providers::MediaItem;
+    use std::collections::HashSet;
 
     fn build_item(id: &str, title: &str, year: Option<&str>) -> MediaItem {
         MediaItem {
@@ -888,5 +913,30 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, "2");
         assert_eq!(page.next_skip, Some(2));
+    }
+
+    #[test]
+    fn drain_unique_catalog_batch_reports_repeated_page() {
+        let mut seen_ids = HashSet::new();
+
+        let (first_batch, first_count) = drain_unique_catalog_batch(
+            vec![
+                build_item("1", "Alpha", Some("2024")),
+                build_item("2", "Beta", Some("2023")),
+            ],
+            &mut seen_ids,
+        );
+        assert_eq!(first_count, 2);
+        assert_eq!(first_batch.len(), 2);
+
+        let (repeated_batch, repeated_count) = drain_unique_catalog_batch(
+            vec![
+                build_item("1", "Alpha", Some("2024")),
+                build_item("2", "Beta", Some("2023")),
+            ],
+            &mut seen_ids,
+        );
+        assert_eq!(repeated_count, 0);
+        assert!(repeated_batch.is_empty());
     }
 }

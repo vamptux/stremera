@@ -9,7 +9,9 @@ use super::{
     WATCH_STATUS_INDEX_KEY, WATCH_STATUS_MAP_KEY, WATCH_STATUS_STORE_FILE,
 };
 use serde_json::json;
-use tauri::AppHandle;
+use std::fs;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_store::StoreExt;
 
 const ADDON_CONFIGS_KEY: &str = "addon_configs";
@@ -28,10 +30,114 @@ const STALE_DEBRID_KEYS: [&str; 5] = [
     "rd_client_secret",
     "rd_auth_method",
 ];
+const LEGACY_BUNDLE_IDENTIFIERS: [&str; 1] = ["com.vamptux.streamy"];
 
 pub(crate) fn run_startup_migrations(app: &AppHandle) -> Result<(), String> {
+    migrate_legacy_bundle_identifier_paths(app)?;
     migrate_settings_store(app)?;
     migrate_legacy_app_data_stores(app)?;
+    Ok(())
+}
+
+fn migrate_legacy_bundle_identifier_paths(app: &AppHandle) -> Result<(), String> {
+    for current_dir in [
+        resolve_app_data_dir(app)?,
+        resolve_app_local_data_dir(app)?,
+        resolve_app_config_dir(app)?,
+    ] {
+        migrate_legacy_bundle_identifier_directory(&current_dir)?;
+    }
+
+    Ok(())
+}
+
+fn resolve_app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path().app_data_dir().map_err(|error| error.to_string())
+}
+
+fn resolve_app_local_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())
+}
+
+fn resolve_app_config_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path().app_config_dir().map_err(|error| error.to_string())
+}
+
+fn migrate_legacy_bundle_identifier_directory(current_dir: &Path) -> Result<(), String> {
+    let Some(parent_dir) = current_dir.parent() else {
+        return Ok(());
+    };
+
+    for legacy_identifier in LEGACY_BUNDLE_IDENTIFIERS {
+        if current_dir.file_name().and_then(|name| name.to_str()) == Some(legacy_identifier) {
+            continue;
+        }
+
+        let legacy_dir = parent_dir.join(legacy_identifier);
+        if !legacy_dir.exists() {
+            continue;
+        }
+
+        if current_dir.exists() && directory_has_entries(current_dir)? {
+            return Ok(());
+        }
+
+        if current_dir.exists() {
+            fs::remove_dir_all(current_dir).map_err(|error| error.to_string())?;
+        }
+
+        relocate_directory(&legacy_dir, current_dir)?;
+        return Ok(());
+    }
+
+    Ok(())
+}
+
+fn directory_has_entries(path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let mut entries = fs::read_dir(path).map_err(|error| error.to_string())?;
+    Ok(entries
+        .next()
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .is_some())
+}
+
+fn relocate_directory(source: &Path, target: &Path) -> Result<(), String> {
+    if let Some(parent_dir) = target.parent() {
+        fs::create_dir_all(parent_dir).map_err(|error| error.to_string())?;
+    }
+
+    match fs::rename(source, target) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            copy_directory_contents(source, target)?;
+            fs::remove_dir_all(source).map_err(|error| error.to_string())
+        }
+    }
+}
+
+fn copy_directory_contents(source: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir_all(target).map_err(|error| error.to_string())?;
+
+    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+
+        if file_type.is_dir() {
+            copy_directory_contents(&source_path, &target_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &target_path).map_err(|error| error.to_string())?;
+        }
+    }
+
     Ok(())
 }
 

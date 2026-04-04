@@ -2,19 +2,33 @@ name: release
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish
+        required: true
+        type: string
   push:
     tags:
       - 'v*'
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   release-windows:
     runs-on: windows-latest
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -23,6 +37,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -30,7 +46,16 @@ jobs:
           workspaces: ./src-tauri -> target
 
       - name: Install frontend dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
+
+      - name: Verify release version
+        run: bun run release:version:check -- $env:RELEASE_TAG
+
+      - name: Lint frontend
+        run: bun run lint
+
+      - name: Lint Rust
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Build and publish Tauri release
         uses: tauri-apps/tauri-action@v0
@@ -39,9 +64,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Stremera ${{ github.ref_name }}
-          releaseBody: Signed Windows NSIS installer and updater artifacts.
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: Stremera ${{ env.RELEASE_TAG }}
+          releaseBody: |
+            Signed Windows NSIS installer and updater artifacts.
+            Published for the single-channel in-app updater.
           releaseDraft: false
           prerelease: false
           args: --bundles nsis

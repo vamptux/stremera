@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Download,
@@ -27,12 +27,9 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { useDownloads } from '@/hooks/use-downloads';
+import { useDownloads } from '@/contexts/download-context';
 import { api, DownloadItem } from '@/lib/api';
-import {
-  buildPlayerNavigationTarget,
-  type PlayerRouteMediaType,
-} from '@/lib/player-navigation';
+import { buildPlayerNavigationTarget, type PlayerRouteMediaType } from '@/lib/player-navigation';
 import { getLatestEpisodeResumeStartTime } from '@/lib/history-playback';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -60,21 +57,10 @@ function calculateEta(total: number, downloaded: number, speed: number) {
 }
 
 export function Downloads() {
-  const {
-    downloads,
-    refetchDownloads,
-    pauseActiveDownloads,
-    clearCompletedDownloads,
-  } = useDownloads();
+  const { downloads, pauseActiveDownloads, clearCompletedDownloads } = useDownloads();
   const [activeTab, setActiveTab] = useState('all');
   const [expandedSeries, setExpandedSeries] = useState<string | null>(null);
   const [bulkAction, setBulkAction] = useState<'pause-active' | 'clear-completed' | null>(null);
-
-  // Sync with backend every time the Downloads page is opened so stale
-  // in-memory state from a previous session is replaced with the persisted data.
-  useEffect(() => {
-    refetchDownloads();
-  }, [refetchDownloads]);
 
   const filteredDownloads = useMemo(() => {
     return downloads.filter((item) => {
@@ -104,7 +90,13 @@ export function Downloads() {
     });
 
     // Flatten groups with only 1 item back to singles
-    const finalGroups: { id: string; items: DownloadItem[]; title: string; poster?: string; createdAt: number }[] = [];
+    const finalGroups: {
+      id: string;
+      items: DownloadItem[];
+      title: string;
+      poster?: string;
+      createdAt: number;
+    }[] = [];
     Object.entries(groups).forEach(([key, items]) => {
       if (items.length > 1) {
         // Find common title prefix or use first item's title (cleaned)
@@ -119,7 +111,7 @@ export function Downloads() {
           ),
           title: items[0].title.split(/s\d+e\d+/i)[0].replace(/ - $/, '') || items[0].title,
           poster: items[0].poster,
-          createdAt: Math.max(...items.map(i => i.createdAt)),
+          createdAt: Math.max(...items.map((i) => i.createdAt)),
         });
       } else {
         singles.push(...items);
@@ -127,9 +119,9 @@ export function Downloads() {
     });
 
     // Sort by date added
-    return { 
-      groups: finalGroups.sort((a, b) => b.createdAt - a.createdAt), 
-      singles: singles.sort((a, b) => b.createdAt - a.createdAt) 
+    return {
+      groups: finalGroups.sort((a, b) => b.createdAt - a.createdAt),
+      singles: singles.sort((a, b) => b.createdAt - a.createdAt),
     };
   }, [filteredDownloads]);
 
@@ -292,7 +284,7 @@ export function Downloads() {
                   )}
                 </AnimatePresence>
               </div>
-                ))}
+            ))}
 
             {/* Singles */}
             {groupedItems.singles.map((item) => (
@@ -326,7 +318,8 @@ function buildFullPath(filePath: string, fileName: string) {
 }
 
 function DownloadCard({ item }: { item: DownloadItem }) {
-  const { pauseDownload, resumeDownload, cancelDownload, removeDownload, refetchDownloads } = useDownloads();
+  const { pauseDownload, resumeDownload, cancelDownload, removeDownload, refetchDownloads } =
+    useDownloads();
   const navigate = useNavigate();
 
   const handlePlay = async () => {
@@ -361,7 +354,9 @@ function DownloadCard({ item }: { item: DownloadItem }) {
       try {
         startTime =
           (await getLatestEpisodeResumeStartTime(id, type, item.season, item.episode)) ?? 0;
-      } catch { /* ignore — player will self-recover */ }
+      } catch {
+        /* ignore — player will self-recover */
+      }
     }
 
     const playerNavigation = buildPlayerNavigationTarget(type, id, {
@@ -382,12 +377,14 @@ function DownloadCard({ item }: { item: DownloadItem }) {
   };
 
   return (
-    <Card className={cn(
-      'group overflow-hidden rounded-lg transition-all duration-200 border hover:border-zinc-700/80',
-      item.status === 'error'
-        ? 'border-red-500/20 bg-red-950/10 hover:bg-red-950/20 hover:border-red-500/30'
-        : 'border-white/[0.04] bg-white/[0.02] hover:bg-white/[0.04]',
-    )}>
+    <Card
+      className={cn(
+        'group overflow-hidden rounded-lg transition-all duration-200 border hover:border-zinc-700/80',
+        item.status === 'error'
+          ? 'border-red-500/20 bg-red-950/10 hover:bg-red-950/20 hover:border-red-500/30'
+          : 'border-white/[0.04] bg-white/[0.02] hover:bg-white/[0.04]',
+      )}
+    >
       <div className='flex gap-4 p-3'>
         {/* Poster */}
         <div className='relative h-20 w-14 flex-shrink-0 overflow-hidden rounded-md bg-zinc-800 shadow-lg ring-1 ring-white/5 group-hover:ring-white/10 transition-all'>
@@ -450,10 +447,12 @@ function DownloadCard({ item }: { item: DownloadItem }) {
             </div>
 
             {/* Actions — always visible for error state, hover-reveal for others (DR1) */}
-            <div className={cn(
-              'flex items-center gap-1 transition-opacity duration-200',
-              item.status === 'error' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
-            )}>
+            <div
+              className={cn(
+                'flex items-center gap-1 transition-opacity duration-200',
+                item.status === 'error' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+              )}
+            >
               {/* Folder open — always available */}
               <Button
                 size='icon'
@@ -466,18 +465,17 @@ function DownloadCard({ item }: { item: DownloadItem }) {
               </Button>
 
               {/* Play while downloading — promoted out of the 3-dots menu */}
-              {(item.status === 'downloading' || item.status === 'paused') &&
-                item.progress > 0 && (
-                  <Button
-                    size='icon'
-                    variant='ghost'
-                    className='h-7 w-7 text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 rounded-md'
-                    title='Play partially downloaded file'
-                    onClick={handlePlay}
-                  >
-                    <Play className='h-3.5 w-3.5 fill-current' />
-                  </Button>
-                )}
+              {(item.status === 'downloading' || item.status === 'paused') && item.progress > 0 && (
+                <Button
+                  size='icon'
+                  variant='ghost'
+                  className='h-7 w-7 text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 rounded-md'
+                  title='Play partially downloaded file'
+                  onClick={handlePlay}
+                >
+                  <Play className='h-3.5 w-3.5 fill-current' />
+                </Button>
+              )}
 
               {/* Primary status action */}
               {item.status === 'completed' ? (

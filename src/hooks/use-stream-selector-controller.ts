@@ -9,13 +9,17 @@ import {
   type StreamSelectorPreferencesState,
   type TorrentioStream,
 } from '@/lib/api';
+import { useDebounce } from '@/hooks/use-debounce';
+import { useLegacyStorageImport } from '@/hooks/use-legacy-storage-import';
+import { useOnlineStatus } from '@/hooks/use-online-status';
 import {
   clearLegacyStorageFeatureKeys,
-  markLegacyStorageFeatureComplete,
   readLegacyStorageFeature,
   type LegacyStorageReadResult,
 } from '@/lib/legacy-storage';
-import { useOnlineStatus } from '@/hooks/use-online-status';
+import { buildPlayerNavigationTarget } from '@/lib/player-navigation';
+import { buildStreamRankingOptions } from '@/lib/stream-ranking';
+import { resolveStreamCandidate as resolvePlayableStreamCandidate } from '@/lib/stream-resolution';
 import {
   buildStreamStats,
   DEFAULT_FILTERS,
@@ -23,20 +27,19 @@ import {
   type BatchFilter,
   type FilterState,
   type QualityFilter,
-  type SourceFilter,
   type SortMode,
+  type SourceFilter,
 } from '@/lib/stream-selector-utils';
-import { buildPlayerNavigationTarget } from '@/lib/player-navigation';
-import { buildStreamRankingOptions } from '@/lib/stream-ranking';
-import { resolveStreamCandidate as resolvePlayableStreamCandidate } from '@/lib/stream-resolution';
 
 const isDev = import.meta.env.DEV;
 const LEGACY_STREAM_SELECTOR_FILTERS_STORAGE_KEY = 'streamy_stream_selector_filters';
 const STREAM_SELECTOR_LEGACY_STORAGE_FEATURE = 'stream-selector-preferences';
+const STREAM_SELECTOR_PREFERENCES_QUERY_KEY = ['streamSelectorPreferences'] as const;
 const QUALITY_FILTER_VALUES: QualityFilter[] = ['all', '4k', '1080p', '720p', 'sd'];
 const SOURCE_FILTER_VALUES: SourceFilter[] = ['all', 'cached'];
 const SORT_MODE_VALUES: SortMode[] = ['smart', 'quality', 'size', 'seeds'];
 const BATCH_FILTER_VALUES: BatchFilter[] = ['all', 'episodes', 'packs'];
+const STREAM_SELECTOR_PREFERENCE_SAVE_DELAY_MS = 200;
 
 export interface AddonHealthMetric {
   id: string;
@@ -47,10 +50,10 @@ export interface AddonHealthMetric {
   errorMessage?: string;
 }
 
-export interface ActiveResolveFeedback {
+interface ActiveResolveFeedback {
   mode: 'play' | 'download';
-  title: string;
   subtitle: string;
+  title: string;
 }
 
 interface UseStreamSelectorControllerArgs {
@@ -59,6 +62,7 @@ interface UseStreamSelectorControllerArgs {
   onBeforePlayerNavigation?: () => void | Promise<void>;
   type: 'movie' | 'series' | 'anime';
   id: string;
+  imdbId?: string;
   streamId?: string;
   currentStreamUrl?: string;
   season?: number;
@@ -84,35 +88,61 @@ interface UseStreamSelectorControllerArgs {
   }) => void | Promise<void>;
 }
 
-function isDebridProcessingError(message: string): boolean {
-  const lower = message.toLowerCase();
+interface ResolvedStreamSelection {
+  format: string;
+  is_web_friendly: boolean;
+  selectedStreamKey: string;
+  sourceName?: string;
+  streamFamily?: string;
+  url: string;
+}
+
+interface UseSelectorPreferencesStateArgs {
+  episode?: number;
+  isSeriesLike: boolean;
+  open: boolean;
+  season?: number;
+  selectorSessionKey: string;
+}
+
+interface UseSelectorResolutionArgs {
+  absoluteEpisode?: number;
+  absoluteSeason?: number;
+  aniskipEpisode?: number;
+  backdrop?: string;
+  episode?: number;
+  from?: string;
+  id: string;
+  imdbId?: string;
+  logo?: string;
+  lookupId: string;
+  onBeforePlayerNavigation?: () => void | Promise<void>;
+  onClose: () => void;
+  onStreamResolved?: (data: ResolvedStreamSelection) => void | Promise<void>;
+  open: boolean;
+  poster?: string;
+  season?: number;
+  selectorSessionKey: string;
+  startTime?: number;
+  streamMediaType: 'movie' | 'series' | 'anime';
+  title: string;
+}
+
+const SKIP_TIMES_STALE_TIME_MS = 1000 * 60 * 60 * 12;
+const SKIP_TIMES_GC_TIME_MS = 1000 * 60 * 60 * 24;
+
+function areFilterStatesEqual(left: FilterState, right: FilterState): boolean {
   return (
-    lower.includes('currently downloading on real-debrid') ||
-    lower.includes('timeout waiting for real-debrid')
+    left.quality === right.quality &&
+    left.source === right.source &&
+    left.addon === right.addon &&
+    left.sort === right.sort &&
+    left.batch === right.batch
   );
 }
 
-function isDebridSetupError(message: string): boolean {
-  const lower = message.toLowerCase();
-  return (
-    lower.includes('requires a configured debrid provider') ||
-    lower.includes('requires debrid or a direct-link addon') ||
-    lower.includes('api token is invalid or expired') ||
-    lower.includes('real-debrid auth error')
-  );
-}
-
-function isCloudflareError(message: string): boolean {
-  const lower = message.toLowerCase();
-  return (
-    lower.includes('cloudflare') ||
-    lower.includes('cf-ray') ||
-    lower.includes('access denied') ||
-    lower.includes('rate limit') ||
-    lower.includes('too many requests') ||
-    lower.includes('429') ||
-    lower.includes('403 forbidden')
-  );
+function buildFilterStateKey(filters: FilterState): string {
+  return [filters.quality, filters.source, filters.addon, filters.sort, filters.batch].join('|');
 }
 
 function normalizeStoredFilters(candidate: unknown, defaults: FilterState): FilterState {
@@ -174,6 +204,37 @@ function clearLegacyStreamSelectorPreferences() {
   ]);
 }
 
+function isDebridProcessingError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('currently downloading on real-debrid') ||
+    lower.includes('timeout waiting for real-debrid')
+  );
+}
+
+function isDebridSetupError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('requires a configured debrid provider') ||
+    lower.includes('requires debrid or a direct-link addon') ||
+    lower.includes('api token is invalid or expired') ||
+    lower.includes('real-debrid auth error')
+  );
+}
+
+function isCloudflareError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('cloudflare') ||
+    lower.includes('cf-ray') ||
+    lower.includes('access denied') ||
+    lower.includes('rate limit') ||
+    lower.includes('too many requests') ||
+    lower.includes('429') ||
+    lower.includes('403 forbidden')
+  );
+}
+
 function buildResolveFeedback(
   stream: TorrentioStream,
   mode: 'play' | 'download',
@@ -184,12 +245,450 @@ function buildResolveFeedback(
     'Selected stream';
   const subtitle = [stream.source_name?.trim(), stream.presentation.deliveryLabel]
     .filter(Boolean)
-    .join(' • ');
+    .join(' | ');
 
   return {
     mode,
-    title: normalizedTitle,
     subtitle,
+    title: normalizedTitle,
+  };
+}
+
+function useSelectorPreferencesState({
+  episode,
+  isSeriesLike,
+  open,
+  season,
+  selectorSessionKey,
+}: UseSelectorPreferencesStateArgs) {
+  const queryClient = useQueryClient();
+  const openSessionKeyRef = useRef<string | null>(null);
+  const hasHydratedFiltersRef = useRef(false);
+  const skipNextPreferenceSaveRef = useRef(false);
+  const saveStreamSelectorPreferencesQueueRef = useRef(Promise.resolve<void>(undefined));
+  const lastRequestedPreferenceKeyRef = useRef<string | null>(null);
+
+  const defaultFilters = useMemo<FilterState>(() => {
+    const preferEpisodeOnly = isSeriesLike && season !== undefined && episode !== undefined;
+    return {
+      ...DEFAULT_FILTERS,
+      batch: preferEpisodeOnly ? 'episodes' : 'all',
+    };
+  }, [episode, isSeriesLike, season]);
+
+  const legacyStreamSelectorPreferencesRead = useMemo(
+    () => readLegacyStreamSelectorPreferences(defaultFilters),
+    [defaultFilters],
+  );
+  const legacyStreamSelectorPreferences = legacyStreamSelectorPreferencesRead.value;
+  const [filters, setFilters] = useState<FilterState>(() =>
+    normalizeStoredFilters(legacyStreamSelectorPreferences, defaultFilters),
+  );
+  const latestFiltersRef = useRef(filters);
+  const debouncedFilters = useDebounce(filters, STREAM_SELECTOR_PREFERENCE_SAVE_DELAY_MS);
+
+  useEffect(() => {
+    latestFiltersRef.current = filters;
+  }, [filters]);
+
+  const streamSelectorPreferencesQuery = useQuery({
+    queryKey: STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
+    queryFn: api.getStreamSelectorPreferences,
+    enabled: open,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+
+  const persistedStreamSelectorPreferences = streamSelectorPreferencesQuery.isSuccess
+    ? streamSelectorPreferencesQuery.data.initialized
+      ? streamSelectorPreferencesQuery.data.preferences
+      : (legacyStreamSelectorPreferences ?? defaultFilters)
+    : (legacyStreamSelectorPreferences ?? defaultFilters);
+  const normalizedPersistedFilters = useMemo(
+    () => normalizeStoredFilters(persistedStreamSelectorPreferences, defaultFilters),
+    [defaultFilters, persistedStreamSelectorPreferences],
+  );
+
+  const persistStreamSelectorPreferences = useEffectEvent((nextFilters: FilterState) => {
+    const nextPreferenceKey = buildFilterStateKey(nextFilters);
+    if (lastRequestedPreferenceKeyRef.current === nextPreferenceKey) {
+      return;
+    }
+
+    lastRequestedPreferenceKeyRef.current = nextPreferenceKey;
+    saveStreamSelectorPreferencesQueueRef.current = saveStreamSelectorPreferencesQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const savedPreferences = await api.saveStreamSelectorPreferences(nextFilters);
+        lastRequestedPreferenceKeyRef.current = buildFilterStateKey(savedPreferences);
+        queryClient.setQueryData<StreamSelectorPreferencesState>(
+          STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
+          {
+            preferences: savedPreferences,
+            initialized: true,
+          },
+        );
+      })
+      .catch(() => {
+        if (lastRequestedPreferenceKeyRef.current === nextPreferenceKey) {
+          lastRequestedPreferenceKeyRef.current = null;
+        }
+      });
+  });
+
+  useLegacyStorageImport({
+    clearLegacy: clearLegacyStreamSelectorPreferences,
+    enabled: streamSelectorPreferencesQuery.isSuccess,
+    feature: STREAM_SELECTOR_LEGACY_STORAGE_FEATURE,
+    importLegacy: api.importLegacyStreamSelectorPreferences,
+    onImported: (savedPreferences) => {
+      queryClient.setQueryData<StreamSelectorPreferencesState>(
+        STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
+        {
+          preferences: savedPreferences,
+          initialized: true,
+        },
+      );
+    },
+    readResult: legacyStreamSelectorPreferencesRead,
+  });
+
+  useEffect(() => {
+    if (!open) {
+      if (streamSelectorPreferencesQuery.isSuccess && hasHydratedFiltersRef.current) {
+        if (skipNextPreferenceSaveRef.current) {
+          skipNextPreferenceSaveRef.current = false;
+        } else {
+          const latestFilters = latestFiltersRef.current;
+          if (!areFilterStatesEqual(latestFilters, normalizedPersistedFilters)) {
+            persistStreamSelectorPreferences(latestFilters);
+          }
+        }
+      }
+
+      openSessionKeyRef.current = null;
+      hasHydratedFiltersRef.current = false;
+      return;
+    }
+
+    if (!streamSelectorPreferencesQuery.isSuccess) {
+      return;
+    }
+
+    if (openSessionKeyRef.current === selectorSessionKey && hasHydratedFiltersRef.current) {
+      return;
+    }
+
+    openSessionKeyRef.current = selectorSessionKey;
+    hasHydratedFiltersRef.current = true;
+    skipNextPreferenceSaveRef.current = true;
+    lastRequestedPreferenceKeyRef.current = buildFilterStateKey(normalizedPersistedFilters);
+
+    const timer = window.setTimeout(() => {
+      setFilters(normalizedPersistedFilters);
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    normalizedPersistedFilters,
+    open,
+    selectorSessionKey,
+    streamSelectorPreferencesQuery.isSuccess,
+  ]);
+
+  useEffect(() => {
+    if (!open || !streamSelectorPreferencesQuery.isSuccess || !hasHydratedFiltersRef.current) {
+      return;
+    }
+
+    if (skipNextPreferenceSaveRef.current) {
+      skipNextPreferenceSaveRef.current = false;
+      return;
+    }
+
+    if (areFilterStatesEqual(debouncedFilters, normalizedPersistedFilters)) {
+      return;
+    }
+
+    persistStreamSelectorPreferences(debouncedFilters);
+  }, [
+    debouncedFilters,
+    normalizedPersistedFilters,
+    open,
+    streamSelectorPreferencesQuery.isSuccess,
+  ]);
+
+  return {
+    batchFilter: filters.batch,
+    defaultFilters,
+    filters,
+    hasActiveFilter: !areFilterStatesEqual(filters, defaultFilters),
+    qualityFilter: filters.quality,
+    setFilters,
+    sortMode: filters.sort,
+    sourceFilter: filters.source,
+  };
+}
+
+function useSelectorResolution({
+  absoluteEpisode,
+  absoluteSeason,
+  aniskipEpisode,
+  backdrop,
+  episode,
+  from,
+  id,
+  imdbId,
+  logo,
+  lookupId,
+  onBeforePlayerNavigation,
+  onClose,
+  onStreamResolved,
+  open,
+  poster,
+  season,
+  selectorSessionKey,
+  startTime,
+  streamMediaType,
+  title,
+}: UseSelectorResolutionArgs) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [downloadModalOpen, setDownloadModalOpen] = useState(false);
+  const [downloadData, setDownloadData] = useState<{ title: string; url: string } | null>(null);
+  const [activeResolveKey, setActiveResolveKey] = useState<string | null>(null);
+  const [activeResolveSessionKey, setActiveResolveSessionKey] = useState<string | null>(null);
+  const [activeResolveFeedback, setActiveResolveFeedback] = useState<ActiveResolveFeedback | null>(
+    null,
+  );
+  const isActiveResolveInCurrentSession = activeResolveSessionKey === selectorSessionKey;
+
+  const resetActiveResolveState = useCallback(() => {
+    setActiveResolveSessionKey(null);
+    setActiveResolveKey(null);
+    setActiveResolveFeedback(null);
+  }, []);
+
+  const closeSelector = useCallback(() => {
+    resetActiveResolveState();
+    onClose();
+  }, [onClose, resetActiveResolveState]);
+
+  const prefetchSkipTimes = useCallback(() => {
+    if (streamMediaType === 'movie') {
+      return;
+    }
+
+    const canonicalSeason = absoluteSeason ?? season;
+    const canonicalEpisode = absoluteEpisode ?? episode;
+    const skipTimesEpisode =
+      streamMediaType === 'anime' ? (aniskipEpisode ?? canonicalEpisode) : canonicalEpisode;
+    const normalizedImdbId = imdbId?.trim() || (id.trim().startsWith('tt') ? id.trim() : undefined);
+
+    if (!canonicalEpisode || !skipTimesEpisode) {
+      return;
+    }
+
+    if (streamMediaType === 'series' && !normalizedImdbId) {
+      return;
+    }
+
+    void queryClient.prefetchQuery({
+      queryKey: [
+        'skip-times',
+        streamMediaType,
+        id,
+        normalizedImdbId,
+        canonicalSeason,
+        canonicalEpisode,
+        skipTimesEpisode,
+        0,
+      ],
+      queryFn: () =>
+        api.getSkipTimes(streamMediaType, id, normalizedImdbId, canonicalSeason, skipTimesEpisode),
+      staleTime: SKIP_TIMES_STALE_TIME_MS,
+      gcTime: SKIP_TIMES_GC_TIME_MS,
+    });
+  }, [
+    absoluteEpisode,
+    absoluteSeason,
+    aniskipEpisode,
+    episode,
+    id,
+    imdbId,
+    queryClient,
+    season,
+    streamMediaType,
+  ]);
+
+  const clearClosedSelectorState = useEffectEvent(() => {
+    resetActiveResolveState();
+    setDownloadData(null);
+    setDownloadModalOpen(false);
+  });
+
+  useEffect(() => {
+    if (open) {
+      return;
+    }
+
+    clearClosedSelectorState();
+  }, [open]);
+
+  const resolveStreamCandidate = useCallback(
+    (stream: TorrentioStream) =>
+      resolvePlayableStreamCandidate(stream, {
+        episode,
+        season,
+      }),
+    [episode, season],
+  );
+
+  const resolveStreamMutation = useMutation({
+    mutationFn: resolveStreamCandidate,
+    onMutate: (stream) => {
+      setActiveResolveSessionKey(selectorSessionKey);
+      setActiveResolveKey(stream.streamKey);
+      setActiveResolveFeedback(buildResolveFeedback(stream, 'play'));
+    },
+    onSuccess: async (data, stream) => {
+      const feedback = buildResolveFeedback(stream, 'play');
+      prefetchSkipTimes();
+
+      if (onStreamResolved) {
+        void Promise.resolve(
+          onStreamResolved({
+            ...data,
+            selectedStreamKey: stream.streamKey,
+            sourceName: stream.source_name?.trim() || undefined,
+            streamFamily: stream.stream_family?.trim() || undefined,
+          }),
+        ).finally(() => {
+          closeSelector();
+        });
+        return;
+      }
+
+      const playerNavigation = buildPlayerNavigationTarget(streamMediaType, id, {
+        absoluteEpisode,
+        absoluteSeason: absoluteSeason ?? season,
+        aniskipEpisode,
+        backdrop,
+        format: data.format,
+        from,
+        logo,
+        openingStreamName: feedback.title,
+        openingStreamSource: feedback.subtitle,
+        poster,
+        selectedStreamKey: stream.streamKey,
+        startTime,
+        streamEpisode: episode,
+        streamFamily: stream.stream_family,
+        streamLookupId: lookupId,
+        streamSeason: season,
+        streamSourceName: stream.source_name,
+        streamUrl: data.url,
+        title,
+      });
+
+      await Promise.resolve(onBeforePlayerNavigation?.()).catch(() => undefined);
+      navigate(playerNavigation.target, { state: playerNavigation.state });
+      closeSelector();
+    },
+    onError: (error) => {
+      if (isDev) {
+        console.error('Stream resolution failed:', error);
+      }
+
+      const message = getErrorMessage(error);
+      if (isDebridProcessingError(message)) {
+        toast.info('Still downloading on Debrid', {
+          description: 'Real-Debrid is caching this file. Try again in a moment.',
+          duration: 4500,
+        });
+      } else if (isDebridSetupError(message)) {
+        toast.error('Stream needs debrid or direct playback', {
+          description: message,
+          duration: 6000,
+        });
+      } else if (isCloudflareError(message)) {
+        toast.warning('Blocked by Cloudflare / rate limit', {
+          description:
+            'The stream provider is rate-limiting requests. Wait 30 s then retry, or try another stream.',
+          duration: 7000,
+        });
+      } else {
+        toast.error('Failed to resolve stream', { description: message, duration: 5000 });
+      }
+    },
+    onSettled: () => {
+      resetActiveResolveState();
+    },
+  });
+
+  const resolveDownloadMutation = useMutation({
+    mutationFn: resolveStreamCandidate,
+    onMutate: (stream) => {
+      setActiveResolveSessionKey(selectorSessionKey);
+      setActiveResolveKey(stream.streamKey);
+      setActiveResolveFeedback(buildResolveFeedback(stream, 'download'));
+    },
+    onSuccess: (data) => {
+      setDownloadData({ title, url: data.url });
+      setDownloadModalOpen(true);
+    },
+    onError: (error) => {
+      toast.error('Failed to resolve stream for download', {
+        description: getErrorMessage(error),
+      });
+    },
+    onSettled: () => {
+      resetActiveResolveState();
+    },
+  });
+
+  const isAnyResolving = resolveStreamMutation.isPending || resolveDownloadMutation.isPending;
+
+  const handleRequestClose = useCallback(() => {
+    if (isAnyResolving) {
+      return;
+    }
+
+    closeSelector();
+  }, [closeSelector, isAnyResolving]);
+
+  const handleSelectStream = useCallback(
+    (stream: TorrentioStream) => {
+      if (isAnyResolving) {
+        return;
+      }
+
+      resolveStreamMutation.mutate(stream);
+    },
+    [isAnyResolving, resolveStreamMutation],
+  );
+
+  const handleDownloadStream = useCallback(
+    (stream: TorrentioStream) => {
+      if (isAnyResolving) {
+        return;
+      }
+
+      resolveDownloadMutation.mutate(stream);
+    },
+    [isAnyResolving, resolveDownloadMutation],
+  );
+
+  return {
+    activeResolveFeedback: isActiveResolveInCurrentSession ? activeResolveFeedback : null,
+    activeResolveKey: isActiveResolveInCurrentSession ? activeResolveKey : null,
+    downloadData,
+    downloadModalOpen,
+    handleDownloadStream,
+    handleRequestClose,
+    handleSelectStream,
+    isAnyResolving,
+    setDownloadModalOpen,
   };
 }
 
@@ -199,6 +698,7 @@ export function useStreamSelectorController({
   onBeforePlayerNavigation,
   type,
   id,
+  imdbId,
   streamId,
   currentStreamUrl,
   season,
@@ -216,73 +716,32 @@ export function useStreamSelectorController({
   inlineMode = false,
   onStreamResolved,
 }: UseStreamSelectorControllerArgs) {
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const isOnline = useOnlineStatus();
-  const [downloadModalOpen, setDownloadModalOpen] = useState(false);
-  const [downloadData, setDownloadData] = useState<{ url: string; title: string } | null>(null);
-  const [activeResolveKey, setActiveResolveKey] = useState<string | null>(null);
-  const [activeResolveFeedback, setActiveResolveFeedback] =
-    useState<ActiveResolveFeedback | null>(null);
-  const openSessionKeyRef = useRef<string | null>(null);
-  const hasHydratedFiltersRef = useRef(false);
-  const skipNextPreferenceSaveRef = useRef(false);
   const isSeriesLike = type === 'series' || type === 'anime';
   const streamMediaType: 'movie' | 'series' | 'anime' =
     type === 'anime' || (type === 'series' && id.trim().toLowerCase().startsWith('kitsu:'))
       ? 'anime'
       : type;
 
-  const defaultFilters = useMemo<FilterState>(() => {
-    const preferEpisodeOnly = isSeriesLike && season !== undefined && episode !== undefined;
-    return {
-      ...DEFAULT_FILTERS,
-      batch: preferEpisodeOnly ? 'episodes' : 'all',
-    };
-  }, [isSeriesLike, season, episode]);
-
-  const legacyStreamSelectorPreferencesRead = useMemo(
-    () => readLegacyStreamSelectorPreferences(defaultFilters),
-    [defaultFilters],
-  );
-  const legacyStreamSelectorPreferences = legacyStreamSelectorPreferencesRead.value;
-  const [hasImportedLegacyStreamSelectorPreferences, setHasImportedLegacyStreamSelectorPreferences] =
-    useState(() => !legacyStreamSelectorPreferencesRead.hasLegacyData);
-  const markLegacyImportHandled = useEffectEvent(() => {
-    setHasImportedLegacyStreamSelectorPreferences(true);
-  });
-  const [filters, setFilters] = useState<FilterState>(() =>
-    normalizeStoredFilters(legacyStreamSelectorPreferences, defaultFilters),
-  );
-  const {
-    quality: qualityFilter,
-    source: sourceFilter,
-    sort: sortMode,
-    batch: batchFilter,
-  } = filters;
-
-  const closeSelector = useCallback(() => {
-    setActiveResolveKey(null);
-    setActiveResolveFeedback(null);
-    onClose();
-  }, [onClose]);
-
   const lookupId = streamId || id;
   const normalizedCurrentStreamUrl = currentStreamUrl?.trim();
   const selectorSessionKey = `${inlineMode ? 'inline' : 'dialog'}|${lookupId}|${season ?? 'na'}|${episode ?? 'na'}|${absoluteEpisode ?? 'na'}`;
-  const streamSelectorPreferencesQuery = useQuery({
-    queryKey: ['streamSelectorPreferences'],
-    queryFn: api.getStreamSelectorPreferences,
-    enabled: open,
-    staleTime: Infinity,
-    gcTime: Infinity,
+  const {
+    batchFilter,
+    defaultFilters,
+    filters,
+    hasActiveFilter,
+    qualityFilter,
+    setFilters,
+    sortMode,
+    sourceFilter,
+  } = useSelectorPreferencesState({
+    episode,
+    isSeriesLike,
+    open,
+    season,
+    selectorSessionKey,
   });
-  const persistedStreamSelectorPreferences =
-    streamSelectorPreferencesQuery.isSuccess
-      ? streamSelectorPreferencesQuery.data.initialized
-        ? streamSelectorPreferencesQuery.data.preferences
-        : legacyStreamSelectorPreferences ?? defaultFilters
-      : legacyStreamSelectorPreferences ?? defaultFilters;
   const compactOverview = useMemo(() => {
     if (!overview) return '';
     const normalized = overview.replace(/\s+/g, ' ').trim();
@@ -290,132 +749,38 @@ export function useStreamSelectorController({
     if (normalized.length <= maxChars) return normalized;
     return `${normalized.slice(0, maxChars).trimEnd()}…`;
   }, [overview]);
-
-  useEffect(() => {
-    if (!legacyStreamSelectorPreferencesRead.hasLegacyData) {
-      markLegacyStorageFeatureComplete(STREAM_SELECTOR_LEGACY_STORAGE_FEATURE);
-    }
-  }, [legacyStreamSelectorPreferencesRead.hasLegacyData]);
-
-  useEffect(() => {
-    if (!open) {
-      openSessionKeyRef.current = null;
-      hasHydratedFiltersRef.current = false;
-      return;
-    }
-
-    if (!streamSelectorPreferencesQuery.isSuccess) {
-      return;
-    }
-
-    if (openSessionKeyRef.current === selectorSessionKey && hasHydratedFiltersRef.current) {
-      return;
-    }
-
-    openSessionKeyRef.current = selectorSessionKey;
-    hasHydratedFiltersRef.current = true;
-    skipNextPreferenceSaveRef.current = true;
-
-    const timer = window.setTimeout(() => {
-      setFilters(normalizeStoredFilters(persistedStreamSelectorPreferences, defaultFilters));
-      setActiveResolveKey(null);
-      setActiveResolveFeedback(null);
-    }, 0);
-
-    return () => window.clearTimeout(timer);
-  }, [
-    defaultFilters,
+  const {
+    activeResolveFeedback,
+    activeResolveKey,
+    downloadData,
+    downloadModalOpen,
+    handleDownloadStream,
+    handleRequestClose,
+    handleSelectStream,
+    isAnyResolving,
+    setDownloadModalOpen,
+  } = useSelectorResolution({
+    absoluteEpisode,
+    absoluteSeason,
+    aniskipEpisode,
+    backdrop,
+    episode,
+    from,
+    id,
+    imdbId,
+    logo,
+    lookupId,
+    onBeforePlayerNavigation,
+    onClose,
+    onStreamResolved,
     open,
-    persistedStreamSelectorPreferences,
+    poster,
+    season,
     selectorSessionKey,
-    streamSelectorPreferencesQuery.isSuccess,
-  ]);
-
-  useEffect(() => {
-    if (hasImportedLegacyStreamSelectorPreferences || !streamSelectorPreferencesQuery.isSuccess) {
-      return;
-    }
-
-    if (!legacyStreamSelectorPreferencesRead.hasLegacyData) {
-      markLegacyImportHandled();
-      return;
-    }
-
-    if (!legacyStreamSelectorPreferences) {
-      clearLegacyStreamSelectorPreferences();
-      markLegacyImportHandled();
-      return;
-    }
-
-    let cancelled = false;
-
-    void api
-      .importLegacyStreamSelectorPreferences(legacyStreamSelectorPreferences)
-      .then((savedPreferences) => {
-        if (cancelled) {
-          return;
-        }
-
-        queryClient.setQueryData<StreamSelectorPreferencesState>(
-          ['streamSelectorPreferences'],
-          {
-            preferences: savedPreferences,
-            initialized: true,
-          },
-        );
-        clearLegacyStreamSelectorPreferences();
-        markLegacyImportHandled();
-      })
-      .catch(() => {
-        if (!cancelled) {
-          markLegacyImportHandled();
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    hasImportedLegacyStreamSelectorPreferences,
-    legacyStreamSelectorPreferences,
-    legacyStreamSelectorPreferencesRead.hasLegacyData,
-    queryClient,
-    streamSelectorPreferencesQuery.isSuccess,
-  ]);
-
-  const persistStreamSelectorPreferences = useEffectEvent((nextFilters: FilterState) => {
-    void api.saveStreamSelectorPreferences(nextFilters).then((savedPreferences) => {
-      queryClient.setQueryData<StreamSelectorPreferencesState>(
-        ['streamSelectorPreferences'],
-        {
-          preferences: savedPreferences,
-          initialized: true,
-        },
-      );
-    });
+    startTime,
+    streamMediaType,
+    title,
   });
-
-  useEffect(() => {
-    if (!open || !streamSelectorPreferencesQuery.isSuccess || !hasHydratedFiltersRef.current) {
-      return;
-    }
-
-    if (skipNextPreferenceSaveRef.current) {
-      skipNextPreferenceSaveRef.current = false;
-      return;
-    }
-
-    persistStreamSelectorPreferences(filters);
-  }, [filters, open, streamSelectorPreferencesQuery.isSuccess]);
-
-  const resolveStreamCandidate = useCallback(
-    (stream: TorrentioStream) =>
-      resolvePlayableStreamCandidate(stream, {
-        season,
-        episode,
-      }),
-    [season, episode],
-  );
 
   const {
     data: addonConfigs = [],
@@ -525,115 +890,6 @@ export function useStreamSelectorController({
     return { healthy, degraded, offline };
   }, [addonHealthMetrics]);
 
-  const resolveStreamMutation = useMutation({
-    mutationFn: resolveStreamCandidate,
-    onMutate: (stream) => {
-      setActiveResolveKey(stream.streamKey);
-      setActiveResolveFeedback(buildResolveFeedback(stream, 'play'));
-    },
-    onSuccess: async (data, stream) => {
-      const feedback = buildResolveFeedback(stream, 'play');
-      if (onStreamResolved) {
-        void Promise.resolve(
-          onStreamResolved({
-            ...data,
-            selectedStreamKey: stream.streamKey,
-            sourceName: stream.source_name?.trim() || undefined,
-            streamFamily: stream.stream_family?.trim() || undefined,
-          }),
-        ).finally(() => {
-          closeSelector();
-        });
-        return;
-      }
-
-      const playerSeason = absoluteSeason ?? season;
-      const playerEpisode = absoluteEpisode ?? episode;
-      const playerNavigation = buildPlayerNavigationTarget(streamMediaType, id, {
-        streamUrl: data.url,
-        streamLookupId: lookupId,
-        streamSeason: season,
-        streamEpisode: episode,
-        absoluteSeason: playerSeason,
-        absoluteEpisode: playerEpisode,
-        selectedStreamKey: stream.streamKey,
-        streamSourceName: stream.source_name,
-        streamFamily: stream.stream_family,
-        openingStreamName: feedback.title,
-        openingStreamSource: feedback.subtitle,
-        title,
-        poster,
-        backdrop,
-        logo,
-        format: data.format,
-        startTime,
-        aniskipEpisode,
-        from,
-      });
-
-      await Promise.resolve(onBeforePlayerNavigation?.()).catch(() => undefined);
-
-      navigate(playerNavigation.target, { state: playerNavigation.state });
-      closeSelector();
-    },
-    onError: (error) => {
-      if (isDev) console.error('Stream resolution failed:', error);
-      const message = getErrorMessage(error);
-
-      if (isDebridProcessingError(message)) {
-        toast.info('Still downloading on Debrid', {
-          description: 'Real-Debrid is caching this file. Try again in a moment.',
-          duration: 4500,
-        });
-      } else if (isDebridSetupError(message)) {
-        toast.error('Stream needs debrid or direct playback', {
-          description: message,
-          duration: 6000,
-        });
-      } else if (isCloudflareError(message)) {
-        toast.warning('Blocked by Cloudflare / rate limit', {
-          description:
-            'The stream provider is rate-limiting requests. Wait 30 s then retry, or try another stream.',
-          duration: 7000,
-        });
-      } else {
-        toast.error('Failed to resolve stream', { description: message, duration: 5000 });
-      }
-    },
-    onSettled: () => {
-      setActiveResolveKey(null);
-      setActiveResolveFeedback(null);
-    },
-  });
-
-  const resolveDownloadMutation = useMutation({
-    mutationFn: resolveStreamCandidate,
-    onMutate: (stream) => {
-      setActiveResolveKey(stream.streamKey);
-      setActiveResolveFeedback(buildResolveFeedback(stream, 'download'));
-    },
-    onSuccess: (data) => {
-      setDownloadData({ url: data.url, title });
-      setDownloadModalOpen(true);
-    },
-    onError: (error) => {
-      toast.error('Failed to resolve stream for download', {
-        description: getErrorMessage(error),
-      });
-    },
-    onSettled: () => {
-      setActiveResolveKey(null);
-      setActiveResolveFeedback(null);
-    },
-  });
-
-  const isAnyResolving = resolveStreamMutation.isPending || resolveDownloadMutation.isPending;
-
-  const handleRequestClose = useCallback(() => {
-    if (isAnyResolving) return;
-    closeSelector();
-  }, [closeSelector, isAnyResolving]);
-
   const handleDialogOpenChange = useCallback(
     (nextOpen: boolean) => {
       if (!nextOpen) {
@@ -655,28 +911,7 @@ export function useStreamSelectorController({
 
   const streamStats = useMemo(() => buildStreamStats(debridStreams), [debridStreams]);
   const showBatchFilter = isSeriesLike && season !== undefined && episode !== undefined;
-  const hasActiveFilter =
-    qualityFilter !== defaultFilters.quality ||
-    sourceFilter !== defaultFilters.source ||
-    effectiveAddonFilter !== defaultFilters.addon ||
-    sortMode !== defaultFilters.sort ||
-    batchFilter !== defaultFilters.batch;
-
-  const handleSelectStream = useCallback(
-    (stream: TorrentioStream) => {
-      if (isAnyResolving) return;
-      resolveStreamMutation.mutate(stream);
-    },
-    [isAnyResolving, resolveStreamMutation],
-  );
-
-  const handleDownloadStream = useCallback(
-    (stream: TorrentioStream) => {
-      if (isAnyResolving) return;
-      resolveDownloadMutation.mutate(stream);
-    },
-    [isAnyResolving, resolveDownloadMutation],
-  );
+  const hasSelectedFilter = hasActiveFilter || effectiveAddonFilter !== defaultFilters.addon;
 
   return {
     activeResolveFeedback,
@@ -696,7 +931,7 @@ export function useStreamSelectorController({
     handleDownloadStream,
     handleRequestClose,
     handleSelectStream,
-    hasActiveFilter,
+    hasActiveFilter: hasSelectedFilter,
     healthSummary,
     isAnyResolving,
     isLoading,

@@ -51,6 +51,9 @@ impl ResumeStore {
                 CREATE INDEX IF NOT EXISTS idx_watch_progress_title_recency
                     ON watch_progress(media_type, media_id, last_watched DESC, history_key DESC);
 
+                CREATE INDEX IF NOT EXISTS idx_watch_progress_media_id_recency
+                    ON watch_progress(media_id, last_watched DESC, history_key DESC);
+
                 PRAGMA user_version = 1;
                 ",
             )
@@ -128,6 +131,110 @@ impl ResumeStore {
 
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("Failed to decode playback resume rows: {}", error))
+    }
+
+    pub(crate) fn count_entries(&mut self) -> Result<usize, String> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM watch_progress", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| usize::try_from(count.max(0)).unwrap_or(usize::MAX))
+            .map_err(|error| format!("Failed to count playback resume rows: {}", error))
+    }
+
+    pub(crate) fn load_entries_for_media_id(
+        &mut self,
+        media_id: &str,
+    ) -> Result<Vec<(String, WatchProgress)>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "
+                SELECT
+                    history_key,
+                    media_id,
+                    media_type,
+                    season,
+                    episode,
+                    absolute_season,
+                    absolute_episode,
+                    stream_season,
+                    stream_episode,
+                    aniskip_episode,
+                    position,
+                    duration,
+                    last_watched,
+                    title,
+                    poster,
+                    backdrop,
+                    last_stream_url,
+                    last_stream_format,
+                    last_stream_lookup_id,
+                    last_stream_key,
+                    source_name,
+                    stream_family
+                FROM watch_progress
+                WHERE media_id = ?1
+                ORDER BY last_watched DESC, history_key DESC
+                ",
+            )
+            .map_err(|error| {
+                format!("Failed to prepare playback resume media-id read: {}", error)
+            })?;
+
+        let rows = statement
+            .query_map(params![media_id], read_watch_progress_row)
+            .map_err(|error| format!("Failed to query playback resume media-id rows: {}", error))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to decode playback resume media-id rows: {}", error))
+    }
+
+    pub(crate) fn load_entries_for_title(
+        &mut self,
+        media_type: &str,
+        media_id: &str,
+    ) -> Result<Vec<(String, WatchProgress)>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "
+                SELECT
+                    history_key,
+                    media_id,
+                    media_type,
+                    season,
+                    episode,
+                    absolute_season,
+                    absolute_episode,
+                    stream_season,
+                    stream_episode,
+                    aniskip_episode,
+                    position,
+                    duration,
+                    last_watched,
+                    title,
+                    poster,
+                    backdrop,
+                    last_stream_url,
+                    last_stream_format,
+                    last_stream_lookup_id,
+                    last_stream_key,
+                    source_name,
+                    stream_family
+                FROM watch_progress
+                WHERE media_type = ?1 AND media_id = ?2
+                ORDER BY last_watched DESC, history_key DESC
+                ",
+            )
+            .map_err(|error| format!("Failed to prepare playback resume title read: {}", error))?;
+
+        let rows = statement
+            .query_map(params![media_type, media_id], read_watch_progress_row)
+            .map_err(|error| format!("Failed to query playback resume title rows: {}", error))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to decode playback resume title rows: {}", error))
     }
 
     pub(crate) fn merge_entries(

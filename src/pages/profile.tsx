@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { MediaCard, MediaCardSkeleton } from '@/components/media-card';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -35,7 +35,16 @@ import {
 import { cn } from '@/lib/utils';
 import { ListsManager } from '@/components/list/lists-manager';
 import { useLocalProfile, LocalProfile } from '@/hooks/use-local-profile';
+import {
+  useContinueWatching,
+  useLibraryItems,
+  useLists,
+  useWatchHistory,
+  useWatchStatuses,
+} from '@/hooks/use-media-library';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { invalidatePlaybackHistoryQueries } from '@/lib/query-invalidation';
+import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -77,30 +86,15 @@ export function Profile() {
   const defaultTab = location.pathname === '/library' ? 'library' : 'history';
   const [activeTab, setActiveTab] = useState<string>(defaultTab);
 
-  const { data: library, isLoading: libraryLoading } = useQuery({
-    queryKey: ['library'],
-    queryFn: api.getLibrary,
-  });
+  const { data: library, isLoading: libraryLoading } = useLibraryItems();
 
-  const { data: history, isLoading: historyLoading } = useQuery({
-    queryKey: ['watch-history'],
-    queryFn: api.getWatchHistory,
-  });
+  const { data: history, isLoading: historyLoading } = useWatchHistory();
 
-  const { data: continueWatching, isLoading: continueWatchingLoading } = useQuery({
-    queryKey: ['continue-watching'],
-    queryFn: api.getContinueWatching,
-  });
+  const { data: continueWatching, isLoading: continueWatchingLoading } = useContinueWatching();
 
-  const { data: lists } = useQuery({
-    queryKey: ['lists'],
-    queryFn: api.getLists,
-    staleTime: 1000 * 30,
-  });
+  const { data: lists } = useLists({ staleTime: 1000 * 30 });
 
-  const { data: allWatchStatuses } = useQuery({
-    queryKey: ['watch-statuses'],
-    queryFn: api.getAllWatchStatuses,
+  const { data: allWatchStatuses } = useWatchStatuses({
     staleTime: 1000 * 60 * 5,
   });
 
@@ -446,7 +440,12 @@ export function Profile() {
               viewMode === 'grid' ? (
                 <MediaGrid>
                   {filteredLibrary.map((item) => (
-                    <MediaCard key={item.id} item={item} />
+                    <MediaCard
+                      key={item.id}
+                      item={item}
+                      currentStatusOverride={allWatchStatuses?.[item.id] ?? null}
+                      isInLibraryOverride
+                    />
                   ))}
                 </MediaGrid>
               ) : (
@@ -667,13 +666,14 @@ function LibraryList({
 function LibraryListRow({ item, status }: { item: MediaItem; status?: string }) {
   const navigate = useNavigate();
   const location = useLocation();
+  const detailsRouteType = resolvePlayerRouteMediaType(item.type, item.id);
 
   return (
     <button
       type='button'
       className='w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-white/[0.02] border border-white/[0.05] hover:bg-white/[0.05] hover:border-white/[0.10] transition-colors text-left group'
       onClick={() =>
-        navigate(`/details/${item.type}/${item.id}`, {
+        navigate(`/details/${detailsRouteType}/${item.id}`, {
           state: { from: `${location.pathname}${location.search}` },
         })
       }
@@ -759,8 +759,7 @@ function HistoryListRow({ item }: { item: WatchProgress }) {
       await api.removeFromWatchHistory(item.id, item.type_, item.season, item.episode);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['continue-watching'] });
-      queryClient.invalidateQueries({ queryKey: ['watch-history'] });
+      void invalidatePlaybackHistoryQueries(queryClient);
       toast.success('Removed from history');
     },
     onError: (err) => {
@@ -1153,8 +1152,7 @@ function HistoryItem({
       await api.removeFromWatchHistory(item.id, item.type_, item.season, item.episode);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['continue-watching'] });
-      queryClient.invalidateQueries({ queryKey: ['watch-history'] });
+      void invalidatePlaybackHistoryQueries(queryClient);
       toast.success('Removed from history');
     },
     onError: (err) => {

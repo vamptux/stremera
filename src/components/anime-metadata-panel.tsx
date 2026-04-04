@@ -1,3 +1,4 @@
+import { useQuery } from '@tanstack/react-query';
 import {
   AlertCircle,
   Building2,
@@ -9,7 +10,12 @@ import {
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { type AnimeSupplementalMetadata } from '@/lib/api';
+import { api, type AnimeSupplementalMetadata } from '@/lib/api';
+
+interface AnimeMetadataSectionProps {
+  enabled: boolean;
+  mediaId: string;
+}
 
 interface AnimeMetadataPanelProps {
   errorMessage?: string;
@@ -79,6 +85,33 @@ function summarizeLanguages(languages: string[]): string | null {
   if (languages.length === 0) return null;
   if (languages.length <= 3) return languages.join(', ');
   return `${languages.slice(0, 3).join(', ')} +${languages.length - 3}`;
+}
+
+export function AnimeMetadataSection({ enabled, mediaId }: AnimeMetadataSectionProps) {
+  const {
+    data: animeMetadata,
+    error: animeMetadataError,
+    isLoading: isLoadingAnimeMetadata,
+    refetch: refetchAnimeMetadata,
+  } = useQuery({
+    queryKey: ['kitsu-anime-metadata', mediaId],
+    queryFn: () => api.getKitsuAnimeMetadata(mediaId),
+    enabled,
+    staleTime: 1000 * 60 * 30,
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+
+  return (
+    <AnimeMetadataPanel
+      errorMessage={animeMetadataError instanceof Error ? animeMetadataError.message : undefined}
+      isLoading={isLoadingAnimeMetadata}
+      metadata={animeMetadata}
+      onRetry={() => {
+        void refetchAnimeMetadata();
+      }}
+    />
+  );
 }
 
 export function AnimeMetadataPanel({

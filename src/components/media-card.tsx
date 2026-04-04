@@ -1,17 +1,11 @@
-import { Link, useLocation, useNavigate } from 'react-router-dom';
-import {
-  MediaItem,
-  UserList,
-  WatchStatus,
-  WATCH_STATUS_LABELS,
-  WATCH_STATUS_COLORS,
-  api,
-} from '@/lib/api';
+import { Link, useLocation } from 'react-router-dom';
+import { MediaItem, WatchStatus, WATCH_STATUS_LABELS, WATCH_STATUS_COLORS, api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import {
   Play,
   Plus,
   Check,
+  Loader2,
   Volume2,
   VolumeX,
   Bookmark,
@@ -22,11 +16,30 @@ import {
 } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { useState, useRef, useCallback, useEffect } from 'react';
+import {
+  useState,
+  useRef,
+  useCallback,
+  useEffect,
+  type MouseEvent as ReactMouseEvent,
+  type SetStateAction,
+} from 'react';
 import { createPortal } from 'react-dom';
-import { CreateListDialog } from '@/components/list/create-list-dialog';
+import { CreateListDialog } from '@/components/list/list-editor-dialog';
 import { ListIcon } from '@/components/list/list-icons';
+import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
+import {
+  useIsItemInLibrary,
+  useItemWatchStatus,
+  useItemListIds,
+  useLatestWatchHistoryEntry,
+  useLists,
+  useMediaCollectionActions,
+} from '@/hooks/use-media-library';
 import { buildYouTubeEmbedUrl, extractYouTubeVideoId } from '@/lib/trailer-utils';
+import { invalidateWatchStatusQueries } from '@/lib/query-invalidation';
+import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
+import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
 
 // ── Rating helpers ─────────────────────────────────────────────────────────────
 // Normalise a rating string (IMDb "8.3" or percentage "83") to a 0-100 score.
@@ -67,16 +80,137 @@ const MIN_PROGRESS_BAR_PERCENT = 2;
 interface MediaCardProps {
   item: MediaItem;
   className?: string;
+  currentStatusOverride?: WatchStatus | null;
+  isInLibraryOverride?: boolean;
   progress?: number;
-  onPlay?: (e: React.MouseEvent) => void;
-  onRemoveFromContinue?: (e: React.MouseEvent) => void;
+  onPlay?: (event: ReactMouseEvent) => void;
+  onRemoveFromContinue?: (event: ReactMouseEvent) => void;
   showLibraryContext?: boolean;
   subtitle?: string;
+}
+
+interface MediaCardPosterProps {
+  currentStatus: WatchStatus | null;
+  from: string;
+  isInLibrary: boolean;
+  item: MediaItem;
+  onPlay?: (event: ReactMouseEvent) => void;
+  onPrefetchDetails?: () => void;
+  progress?: number;
+  showLibraryContext?: boolean;
+  subtitle?: string;
+}
+
+function MediaCardPoster({
+  currentStatus,
+  from,
+  isInLibrary,
+  item,
+  onPlay,
+  onPrefetchDetails,
+  progress,
+  showLibraryContext = false,
+  subtitle,
+}: MediaCardPosterProps) {
+  const detailsRouteType = resolvePlayerRouteMediaType(item.type, item.id);
+  const showProgress = progress !== undefined && progress >= MIN_PROGRESS_BAR_PERCENT;
+
+  return (
+    <>
+      <Link
+        to={`/details/${detailsRouteType}/${item.id}`}
+        state={{ from }}
+        className={cn('block relative transition-opacity duration-150 opacity-100')}
+        onClick={onPlay ? (event) => onPlay(event) : undefined}
+        onFocus={onPrefetchDetails}
+        onPointerDown={onPrefetchDetails}
+      >
+        <div
+          className={cn('relative rounded-xl bg-zinc-900', 'transition-[box-shadow] duration-150')}
+        >
+          <div className='relative aspect-[2/3] rounded-xl overflow-hidden bg-zinc-900'>
+            {item.poster ? (
+              <img
+                src={item.poster}
+                alt={item.title}
+                className='object-cover w-full h-full'
+                loading='lazy'
+              />
+            ) : (
+              <div className='flex items-center justify-center w-full h-full text-zinc-600 text-xs p-2 text-center'>
+                <span className='line-clamp-2'>{item.title}</span>
+              </div>
+            )}
+
+            {currentStatus && (
+              <div
+                className={cn(
+                  'absolute top-1.5 left-1.5 z-10 px-1.5 py-[3px] rounded text-[9px] font-bold border backdrop-blur-sm',
+                  WATCH_STATUS_COLORS[currentStatus].bg,
+                  WATCH_STATUS_COLORS[currentStatus].border,
+                  WATCH_STATUS_COLORS[currentStatus].text,
+                )}
+              >
+                {WATCH_STATUS_LABELS[currentStatus]}
+              </div>
+            )}
+
+            {(subtitle || (showLibraryContext && isInLibrary)) && (
+              <div className='absolute bottom-1.5 left-1.5 z-10 flex max-w-[calc(100%-12px)] flex-col items-start gap-1'>
+                {showLibraryContext && isInLibrary && (
+                  <div className='rounded border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-[3px] text-[9px] font-semibold text-emerald-300 backdrop-blur-sm'>
+                    In Library
+                  </div>
+                )}
+                {subtitle && (
+                  <div className='rounded bg-black/70 px-1.5 py-[3px] text-[9px] font-semibold text-white/80 backdrop-blur-sm'>
+                    {subtitle}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {showProgress && (
+              <div className='absolute bottom-0 left-0 right-0 z-20 h-1 bg-zinc-800/50'>
+                <div className='h-full bg-white' style={{ width: `${progress}%` }} />
+              </div>
+            )}
+          </div>
+        </div>
+      </Link>
+
+      <div className='mt-2 px-0.5 space-y-0.5'>
+        <p className='text-[12.5px] font-medium text-white/90 leading-tight line-clamp-2 tracking-[-0.01em]'>
+          {item.title}
+        </p>
+        {item.displayYear && (
+          <p className='text-[11px] text-zinc-500 leading-none'>{item.displayYear}</p>
+        )}
+      </div>
+    </>
+  );
+}
+
+function useSyncedBooleanState(initialState = false) {
+  const [state, setState] = useState(initialState);
+  const stateRef = useRef(state);
+
+  const setSyncedState = useCallback((nextState: SetStateAction<boolean>) => {
+    setState((currentState) => {
+      const resolvedState = typeof nextState === 'function' ? nextState(currentState) : nextState;
+      stateRef.current = resolvedState;
+      return resolvedState;
+    });
+  }, []);
+
+  return [state, setSyncedState, stateRef] as const;
 }
 
 export function MediaCard({
   item,
   className,
+  currentStatusOverride,
+  isInLibraryOverride,
   progress,
   onPlay,
   onRemoveFromContinue,
@@ -84,32 +218,79 @@ export function MediaCard({
   subtitle,
 }: MediaCardProps) {
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
   const location = useLocation();
   const from = `${location.pathname}${location.search}`;
+  const detailsRouteType = resolvePlayerRouteMediaType(item.type, item.id);
+  const shouldIncludeDetailsEpisodes = !(
+    item.id.startsWith('kitsu:') && detailsRouteType === 'anime'
+  );
   const isSearchPage = location.pathname.startsWith('/search');
+  const prefetchDetails = useCallback(() => {
+    prefetchDetailsRouteData(queryClient, {
+      mediaId: item.id,
+      mediaType: item.type,
+    });
+  }, [item.id, item.type, queryClient]);
 
   // ── Hover popup state ──────────────────────────────────────────────────
   const [showPopup, setShowPopup] = useState(false);
   const [playingTrailer, setPlayingTrailer] = useState(false);
   const [trailerMuted, setTrailerMuted] = useState(true);
   const [detailsFetchReady, setDetailsFetchReady] = useState(false);
-  const [showListPicker, setShowListPicker] = useState(false);
-  const [createListOpen, setCreateListOpen] = useState(false);
+  const [showListPicker, setShowListPickerState, showListPickerRef] = useSyncedBooleanState();
+  const [createListOpen, setCreateListOpenState, createListOpenRef] = useSyncedBooleanState();
   const cardRef = useRef<HTMLDivElement>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const leaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const popupOpenRef = useRef(false);
-  const showListPickerRef = useRef(false);
-  const createListOpenRef = useRef(false);
   // F2: store scroll RAF id in a ref so it can be safely cancelled on unmount
   const scrollRafRef = useRef<number | null>(null);
   const [popupPos, setPopupPos] = useState<{ top: number; left: number } | null>(null);
   const hoverCooldownUntilRef = useRef(0);
   const detailsFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const trailerStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const popupContainerRef = useRef<HTMLDivElement>(null);
   const pointerPosRef = useRef<{ x: number; y: number } | null>(null);
   const popupOpenScrollTopRef = useRef<number | null>(null);
+
+  const clearHoverOpenTimer = useCallback(() => {
+    if (hoverTimer.current) {
+      clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+  }, []);
+
+  const clearHoverLeaveTimer = useCallback(() => {
+    if (leaveTimer.current) {
+      clearTimeout(leaveTimer.current);
+      leaveTimer.current = null;
+    }
+  }, []);
+
+  const cancelScrollReposition = useCallback(() => {
+    if (scrollRafRef.current !== null) {
+      window.cancelAnimationFrame(scrollRafRef.current);
+      scrollRafRef.current = null;
+    }
+  }, []);
+
+  const clearDetailsFetchTimer = useCallback(() => {
+    if (detailsFetchTimerRef.current) {
+      clearTimeout(detailsFetchTimerRef.current);
+      detailsFetchTimerRef.current = null;
+    }
+  }, []);
+
+  const clearTrailerStartTimer = useCallback(() => {
+    if (trailerStartTimerRef.current) {
+      clearTimeout(trailerStartTimerRef.current);
+      trailerStartTimerRef.current = null;
+    }
+  }, []);
+  const hasLockedPopupInteraction = useCallback(
+    () => showListPickerRef.current || createListOpenRef.current,
+    [createListOpenRef, showListPickerRef],
+  );
 
   const releasePopupOpenCounter = useCallback(() => {
     if (popupOpenRef.current) {
@@ -118,18 +299,31 @@ export function MediaCard({
     }
   }, []);
 
+  const resetPopupVisualState = useCallback(() => {
+    setPlayingTrailer(false);
+    setTrailerMuted(true);
+    setPopupPos(null);
+    setShowListPickerState(false);
+  }, [setShowListPickerState]);
+
   const closePopup = useCallback(() => {
-      releasePopupOpenCounter();
-      setShowPopup(false);
-      setPlayingTrailer(false);
-      setTrailerMuted(true);
-      setPopupPos(null);
-      setShowListPicker(false);
-      showListPickerRef.current = false;
-      createListOpenRef.current = false;
-    },
-    [releasePopupOpenCounter],
-  );
+    clearHoverOpenTimer();
+    clearHoverLeaveTimer();
+    cancelScrollReposition();
+    clearDetailsFetchTimer();
+    clearTrailerStartTimer();
+    releasePopupOpenCounter();
+    setShowPopup(false);
+    resetPopupVisualState();
+  }, [
+    cancelScrollReposition,
+    clearDetailsFetchTimer,
+    clearHoverLeaveTimer,
+    clearHoverOpenTimer,
+    clearTrailerStartTimer,
+    releasePopupOpenCounter,
+    resetPopupVisualState,
+  ]);
 
   const computePopupPos = useCallback((): { top: number; left: number } | null => {
     if (!cardRef.current || !cardRef.current.isConnected) return null;
@@ -163,14 +357,8 @@ export function MediaCard({
 
   const handleMouseEnter = useCallback(() => {
     if (Date.now() < hoverCooldownUntilRef.current) return;
-    if (leaveTimer.current) {
-      clearTimeout(leaveTimer.current);
-      leaveTimer.current = null;
-    }
-    if (hoverTimer.current) {
-      clearTimeout(hoverTimer.current);
-      hoverTimer.current = null;
-    }
+    clearHoverLeaveTimer();
+    clearHoverOpenTimer();
     // Delay both the query fetch and the popup open by the same timer so we
     // don't fire API requests for every card the cursor merely sweeps over.
     const openDelay = isSearchPage ? SEARCH_HOVER_OPEN_DELAY_MS : HOVER_OPEN_DELAY_MS;
@@ -179,6 +367,7 @@ export function MediaCard({
     hoverTimer.current = setTimeout(() => {
       const nextPos = computePopupPos();
       if (!nextPos) return;
+      prefetchDetails();
       setPopupPos(nextPos);
       popupOpenScrollTopRef.current = getScrollTopSnapshot();
       if (!popupOpenRef.current) {
@@ -187,29 +376,34 @@ export function MediaCard({
       }
       setShowPopup(true);
     }, delay);
-  }, [computePopupPos, isSearchPage, getScrollTopSnapshot]);
+  }, [
+    clearHoverLeaveTimer,
+    clearHoverOpenTimer,
+    computePopupPos,
+    getScrollTopSnapshot,
+    isSearchPage,
+    prefetchDetails,
+  ]);
 
   const handleMouseLeave = useCallback(() => {
     // Keep popup open while list picker or create list dialog is in use
-    if (showListPickerRef.current || createListOpenRef.current) return;
-    if (hoverTimer.current) {
-      clearTimeout(hoverTimer.current);
-      hoverTimer.current = null;
-    }
+    if (hasLockedPopupInteraction()) return;
+    clearHoverOpenTimer();
+    clearHoverLeaveTimer();
     leaveTimer.current = setTimeout(() => {
-      if (showListPickerRef.current || createListOpenRef.current) return;
+      if (hasLockedPopupInteraction()) return;
       closePopup();
     }, HOVER_LEAVE_DELAY_MS);
-  }, [closePopup]);
+  }, [clearHoverLeaveTimer, clearHoverOpenTimer, closePopup, hasLockedPopupInteraction]);
 
-  const toggleListPicker = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setShowListPicker((v) => {
-      showListPickerRef.current = !v;
-      return !v;
-    });
-  }, []);
+  const toggleListPicker = useCallback(
+    (e: ReactMouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setShowListPickerState((currentState) => !currentState);
+    },
+    [setShowListPickerState],
+  );
 
   // ── Compute fixed popup position ─────────────────────────────────────
   const computePos = useCallback(() => {
@@ -300,39 +494,41 @@ export function MediaCard({
     window.addEventListener('scroll', onScroll, { passive: true, capture: true });
     window.addEventListener('resize', onResize, { passive: true });
     return () => {
-      if (scrollRafRef.current !== null) {
-        window.cancelAnimationFrame(scrollRafRef.current);
-        scrollRafRef.current = null;
-      }
+      cancelScrollReposition();
       window.removeEventListener('mousemove', onPointerMove);
       window.removeEventListener('scroll', onScroll, { capture: true });
       window.removeEventListener('resize', onResize);
     };
-  }, [showPopup, computePos, computePopupPos, closePopup, isPointInsideRect, getScrollTopSnapshot]);
+  }, [
+    showPopup,
+    cancelScrollReposition,
+    computePos,
+    computePopupPos,
+    closePopup,
+    isPointInsideRect,
+    getScrollTopSnapshot,
+  ]);
 
   useEffect(() => {
     return () => {
-      if (hoverTimer.current) {
-        clearTimeout(hoverTimer.current);
-        hoverTimer.current = null;
-      }
-      if (leaveTimer.current) {
-        clearTimeout(leaveTimer.current);
-        leaveTimer.current = null;
-      }
-      if (detailsFetchTimerRef.current) {
-        clearTimeout(detailsFetchTimerRef.current);
-        detailsFetchTimerRef.current = null;
-      }
+      clearHoverOpenTimer();
+      clearHoverLeaveTimer();
+      clearDetailsFetchTimer();
+      clearTrailerStartTimer();
+      cancelScrollReposition();
       releasePopupOpenCounter();
     };
-  }, [releasePopupOpenCounter]);
+  }, [
+    cancelScrollReposition,
+    clearDetailsFetchTimer,
+    clearHoverLeaveTimer,
+    clearHoverOpenTimer,
+    clearTrailerStartTimer,
+    releasePopupOpenCounter,
+  ]);
 
   useEffect(() => {
-    if (detailsFetchTimerRef.current) {
-      clearTimeout(detailsFetchTimerRef.current);
-      detailsFetchTimerRef.current = null;
-    }
+    clearDetailsFetchTimer();
 
     if (!showPopup) {
       setDetailsFetchReady(false);
@@ -346,44 +542,42 @@ export function MediaCard({
     }, delay);
 
     return () => {
-      if (detailsFetchTimerRef.current) {
-        clearTimeout(detailsFetchTimerRef.current);
-        detailsFetchTimerRef.current = null;
-      }
+      clearDetailsFetchTimer();
     };
-  }, [showPopup, isSearchPage]);
+  }, [clearDetailsFetchTimer, showPopup, isSearchPage]);
 
   // Lazy-fetch details on hover. Resolves instantly if already in React Query cache.
   const { data: details } = useQuery({
-    queryKey: ['details', item.type, item.id],
-    queryFn: () => api.getMediaDetails(item.type, item.id),
+    queryKey: ['details', detailsRouteType, item.id],
+    queryFn: () =>
+      api.getMediaDetails(detailsRouteType, item.id, {
+        includeEpisodes: shouldIncludeDetailsEpisodes,
+      }),
     enabled: showPopup && detailsFetchReady,
-    staleTime: 1000 * 60 * 60 * 2,
+    staleTime: 1000 * 60 * 30,
     gcTime: 1000 * 60 * 60 * 6,
   });
 
   // Lists (shared cached, gated on hover)
-  const { data: lists } = useQuery({
-    queryKey: ['lists'],
-    queryFn: api.getLists,
+  const { data: lists } = useLists({
     enabled: showPopup,
     staleTime: 1000 * 15,
   });
 
-  const { data: itemListIds } = useQuery({
-    queryKey: ['item-lists', item.id],
-    queryFn: () => api.checkItemInLists(item.id),
+  const { data: itemListIds } = useItemListIds(item.id, {
     enabled: showPopup,
     staleTime: 1000 * 15,
   });
-
-  // Watch status (shared global cache — present regardless of hover so badges show on posters)
-  const { data: allWatchStatuses } = useQuery({
-    queryKey: ['watch-statuses'],
-    queryFn: api.getAllWatchStatuses,
-    staleTime: 1000 * 60 * 5,
+  const { data: historyEntry } = useLatestWatchHistoryEntry(item.id, {
+    enabled: showPopup && !onPlay,
   });
-  const currentStatus = (allWatchStatuses?.[item.id] ?? null) as WatchStatus | null;
+
+  const shouldResolveWatchStatus = currentStatusOverride === undefined;
+  const { data: resolvedCurrentStatus = null } = useItemWatchStatus(item.id, {
+    enabled: shouldResolveWatchStatus,
+  });
+  const currentStatus =
+    currentStatusOverride !== undefined ? currentStatusOverride : resolvedCurrentStatus;
 
   // Derived popup data
   const ratingRaw = details?.rating ?? null;
@@ -410,99 +604,38 @@ export function MediaCard({
   const backdropSrc = details?.backdrop || item.backdrop || item.poster;
 
   // Auto-start trailer shortly after popup+data are both ready
-  const trailerStartTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (trailerStartTimer.current) {
-      clearTimeout(trailerStartTimer.current);
-      trailerStartTimer.current = null;
-    }
+    clearTrailerStartTimer();
     if (showPopup && trailerVideoId) {
-      trailerStartTimer.current = setTimeout(() => setPlayingTrailer(true), 250);
+      trailerStartTimerRef.current = setTimeout(() => setPlayingTrailer(true), 250);
     }
     if (!showPopup) {
       setPlayingTrailer(false);
       setTrailerMuted(true);
     }
     return () => {
-      if (trailerStartTimer.current) clearTimeout(trailerStartTimer.current);
+      clearTrailerStartTimer();
     };
-  }, [showPopup, trailerVideoId]);
+  }, [clearTrailerStartTimer, showPopup, trailerVideoId]);
 
   // ── Library ────────────────────────────────────────────────────────────
-  const { data: library } = useQuery({
-    queryKey: ['library'],
-    queryFn: api.getLibrary,
-    staleTime: 1000 * 60 * 5,
+  const shouldResolveLibraryMembership = isInLibraryOverride === undefined;
+  const { data: resolvedIsInLibrary = false } = useIsItemInLibrary(item.id, {
+    enabled: shouldResolveLibraryMembership,
   });
-  const isInLibrary = library?.some((l) => l.id === item.id) ?? false;
-
-  const toggleLibrary = useMutation({
-    mutationFn: async (e: React.MouseEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (isInLibrary) {
-        await api.removeFromLibrary(item.id);
-        return 'removed' as const;
-      }
-      await api.addToLibrary(item);
-      return 'added' as const;
-    },
-    // Optimistic update — button state flips instantly, no flicker
-    onMutate: async (e: React.MouseEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      await queryClient.cancelQueries({ queryKey: ['library'] });
-      const previous = queryClient.getQueryData<MediaItem[]>(['library']);
-      if (isInLibrary) {
-        queryClient.setQueryData<MediaItem[]>(
-          ['library'],
-          (old) => old?.filter((l) => l.id !== item.id) ?? [],
-        );
-      } else {
-        queryClient.setQueryData<MediaItem[]>(['library'], (old) => [...(old ?? []), item]);
-      }
-      return { previous };
-    },
-    onError: (_err, _vars, context) => {
-      if (context?.previous) queryClient.setQueryData<MediaItem[]>(['library'], context.previous);
-      toast.error('Failed to update library');
-    },
-    onSuccess: (action) => {
-      toast.success(action === 'added' ? 'Added to Library' : 'Removed from Library', {
-        description: item.title,
-      });
-    },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['library'] }),
+  const isInLibrary = isInLibraryOverride ?? resolvedIsInLibrary;
+  const { addItemToNewList, toggleLibrary, toggleListMembership } = useMediaCollectionActions({
+    item,
+    isInLibrary,
+    itemListIds,
+    lists,
+    optimisticLibrary: true,
   });
-
-  // ── Add to list ────────────────────────────────────────────────────────
-  const addToList = useMutation({
-    mutationFn: async (list: UserList) => {
-      if (itemListIds?.includes(list.id)) {
-        await api.removeFromList(list.id, item.id);
-        return { action: 'removed' as const, listName: list.name, listId: list.id };
-      }
-      await api.addToList(list.id, item);
-      return { action: 'added' as const, listName: list.name, listId: list.id };
-    },
-    onSuccess: ({ action, listName, listId }) => {
-      queryClient.invalidateQueries({ queryKey: ['lists'] });
-      queryClient.invalidateQueries({ queryKey: ['item-lists', item.id] });
-      if (action === 'added') {
-        // Duplicate detection: warn if the item is already in other lists
-        const alreadyIn =
-          lists?.filter((l) => l.id !== listId && itemListIds?.includes(l.id)) ?? [];
-        if (alreadyIn.length > 0) {
-          const names = alreadyIn.map((l) => `"${l.name}"`).join(', ');
-          toast.success(`Added to "${listName}"`, { description: `⚠ Also in ${names}` });
-        } else {
-          toast.success(`Added to "${listName}"`, { description: item.title });
-        }
-      } else {
-        toast.success(`Removed from "${listName}"`, { description: item.title });
-      }
-    },
-    onError: () => toast.error('Failed to update list'),
+  const primaryPlayback = useMediaPrimaryPlayback({
+    from,
+    historyEntry,
+    item,
+    surface: 'card',
   });
 
   // ── Watch status ───────────────────────────────────────────────────────
@@ -527,16 +660,18 @@ export function MediaCard({
         queryClient.setQueryData<Record<string, WatchStatus>>(['watch-statuses'], context.previous);
       toast.error('Failed to update status');
     },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['watch-statuses'] }),
+    onSettled: () => {
+      void invalidateWatchStatusQueries(queryClient);
+    },
   });
 
   const safeProgress =
     typeof progress === 'number' && Number.isFinite(progress)
       ? Math.min(100, Math.max(0, progress))
       : undefined;
-  const showProgress = safeProgress !== undefined && safeProgress >= MIN_PROGRESS_BAR_PERCENT;
 
   const isInAnyList = (itemListIds?.length ?? 0) > 0;
+  const primaryActionLabel = onPlay ? 'Resume' : primaryPlayback.primaryActionLabel;
 
   return (
     <div
@@ -545,81 +680,17 @@ export function MediaCard({
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
-      {/* ── Base poster card ─────────────────────────────────────── */}
-      <Link
-        to={`/details/${item.type}/${item.id}`}
-        state={{ from }}
-        className={cn('block relative transition-opacity duration-150 opacity-100')}
-        onClick={onPlay ? (e) => onPlay(e) : undefined}
-      >
-        <div
-          className={cn(
-            'relative rounded-xl bg-zinc-900',
-            // No pre-popup scale — the popup IS the hover effect. A faint ring is
-            // enough micro-feedback without creating a "double" visual event.
-            'transition-[box-shadow] duration-150',
-          )}
-        >
-          <div className='relative aspect-[2/3] rounded-xl overflow-hidden bg-zinc-900'>
-            {item.poster ? (
-              <img
-                src={item.poster}
-                alt={item.title}
-                className='object-cover w-full h-full'
-                loading='lazy'
-              />
-            ) : (
-              <div className='flex items-center justify-center w-full h-full text-zinc-600 text-xs p-2 text-center'>
-                <span className='line-clamp-2'>{item.title}</span>
-              </div>
-            )}
-            {/* Watch status badge overlay on poster */}
-            {currentStatus && (
-              <div
-                className={cn(
-                  'absolute top-1.5 left-1.5 z-10 px-1.5 py-[3px] rounded text-[9px] font-bold border backdrop-blur-sm',
-                  WATCH_STATUS_COLORS[currentStatus].bg,
-                  WATCH_STATUS_COLORS[currentStatus].border,
-                  WATCH_STATUS_COLORS[currentStatus].text,
-                )}
-              >
-                {WATCH_STATUS_LABELS[currentStatus]}
-              </div>
-            )}
-            {(subtitle || (showLibraryContext && isInLibrary)) && (
-              <div className='absolute bottom-1.5 left-1.5 z-10 flex max-w-[calc(100%-12px)] flex-col items-start gap-1'>
-                {showLibraryContext && isInLibrary && (
-                  <div className='rounded border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-[3px] text-[9px] font-semibold text-emerald-300 backdrop-blur-sm'>
-                    In Library
-                  </div>
-                )}
-                {subtitle && (
-                  <div className='rounded bg-black/70 px-1.5 py-[3px] text-[9px] font-semibold text-white/80 backdrop-blur-sm'>
-                    {subtitle}
-                  </div>
-                )}
-              </div>
-            )}
-            {showProgress && (
-              <div className='absolute bottom-0 left-0 right-0 h-1 bg-zinc-800/50 z-20'>
-                <div className='h-full bg-white' style={{ width: `${safeProgress}%` }} />
-              </div>
-            )}
-          </div>
-        </div>
-      </Link>
-
-      {/* Title + year below poster */}
-      <div className='mt-2 px-0.5 space-y-0.5'>
-        <p className='text-[12.5px] font-medium text-white/90 leading-tight line-clamp-2 tracking-[-0.01em]'>
-          {item.title}
-        </p>
-        {item.displayYear && (
-          <p className='text-[11px] text-zinc-500 leading-none'>
-            {item.displayYear}
-          </p>
-        )}
-      </div>
+      <MediaCardPoster
+        currentStatus={currentStatus}
+        from={from}
+        isInLibrary={isInLibrary}
+        item={item}
+        onPlay={onPlay}
+        onPrefetchDetails={prefetchDetails}
+        progress={safeProgress}
+        showLibraryContext={showLibraryContext}
+        subtitle={subtitle}
+      />
 
       {/* ── Hover popup card — rendered via portal so it never affects page scroll ── */}
       {showPopup &&
@@ -646,10 +717,7 @@ export function MediaCard({
                 pointerEvents: 'auto',
               }}
               onMouseEnter={() => {
-                if (leaveTimer.current) {
-                  clearTimeout(leaveTimer.current);
-                  leaveTimer.current = null;
-                }
+                clearHoverLeaveTimer();
               }}
               onMouseLeave={handleMouseLeave}
               onWheel={forwardWheelToScrollContainer}
@@ -735,9 +803,9 @@ export function MediaCard({
                             onClick={(e) => {
                               e.preventDefault();
                               e.stopPropagation();
-                              addToList.mutate(list);
+                              toggleListMembership.mutate(list);
                             }}
-                            disabled={addToList.isPending}
+                            disabled={toggleListMembership.isPending}
                           >
                             <span className='text-zinc-400 shrink-0'>
                               <ListIcon iconId={list.icon} size={13} />
@@ -766,7 +834,7 @@ export function MediaCard({
                       onClick={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        setCreateListOpen(true);
+                        setCreateListOpenState(true);
                       }}
                     >
                       <ListPlus className='h-3.5 w-3.5 shrink-0' />
@@ -830,12 +898,21 @@ export function MediaCard({
                       onClick={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        if (onPlay) onPlay(e);
-                        else navigate(`/details/${item.type}/${item.id}`, { state: { from } });
+                        if (onPlay) {
+                          onPlay(e);
+                          return;
+                        }
+
+                        void primaryPlayback.handlePrimaryAction();
                       }}
+                      disabled={primaryPlayback.isResolvingPrimaryAction}
                     >
-                      <Play className='h-3 w-3 fill-current' />
-                      Watch
+                      {primaryPlayback.isResolvingPrimaryAction ? (
+                        <Loader2 className='h-3 w-3 animate-spin' />
+                      ) : (
+                        <Play className='h-3 w-3 fill-current' />
+                      )}
+                      {primaryActionLabel}
                     </button>
 
                     {/* Library toggle */}
@@ -846,15 +923,19 @@ export function MediaCard({
                         isInLibrary
                           ? 'bg-green-500/20 text-green-400 border-green-500/30 hover:bg-green-500/30'
                           : 'bg-white/[0.06] text-zinc-400 border-white/[0.08] hover:bg-white/[0.12] hover:text-white hover:border-white/15',
+                        toggleLibrary.isPending && 'cursor-wait opacity-70',
                       )}
                       title={isInLibrary ? 'Remove from Library' : 'Add to Library'}
+                      disabled={toggleLibrary.isPending}
                       onClick={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        toggleLibrary.mutate(e);
+                        toggleLibrary.mutate();
                       }}
                     >
-                      {isInLibrary ? (
+                      {toggleLibrary.isPending ? (
+                        <Loader2 className='h-3.5 w-3.5 animate-spin' />
+                      ) : isInLibrary ? (
                         <Check className='h-3.5 w-3.5' />
                       ) : (
                         <Plus className='h-3.5 w-3.5' />
@@ -912,8 +993,10 @@ export function MediaCard({
                             isActive
                               ? cn(colors.bg, colors.border, colors.text)
                               : 'bg-white/[0.06] border-white/[0.1] text-zinc-400 hover:bg-white/12 hover:text-zinc-100 hover:border-white/20',
+                            watchStatusMutation.isPending && 'cursor-wait opacity-70',
                           )}
                           title={WATCH_STATUS_LABELS[status]}
+                          disabled={watchStatusMutation.isPending}
                           onClick={(e) => {
                             e.preventDefault();
                             e.stopPropagation();
@@ -933,7 +1016,7 @@ export function MediaCard({
               {/* Backdrop-level click → navigate to details (below info panel in z-order) */}
               {!showListPicker && (
                 <Link
-                  to={`/details/${item.type}/${item.id}`}
+                  to={`/details/${detailsRouteType}/${item.id}`}
                   state={{ from }}
                   className='absolute inset-0 z-0'
                   onClick={
@@ -957,15 +1040,14 @@ export function MediaCard({
       <CreateListDialog
         open={createListOpen}
         onOpenChange={(open) => {
-          setCreateListOpen(open);
-          createListOpenRef.current = open;
-          if (!open) {
+          setCreateListOpenState(open);
+          if (!open && showPopup) {
             // Dialog closed — restore list picker lock so popup stays open for further actions
-            showListPickerRef.current = true;
+            setShowListPickerState(true);
           }
         }}
         onCreated={(newList) => {
-          addToList.mutate(newList);
+          void addItemToNewList(newList);
         }}
       />
     </div>

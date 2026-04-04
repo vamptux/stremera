@@ -49,6 +49,23 @@ impl Netflix {
             .collect()
     }
 
+    fn extend_unique_items(
+        all_items: &mut Vec<MediaItem>,
+        seen: &mut HashSet<String>,
+        batch: Vec<MediaItem>,
+    ) -> usize {
+        let mut inserted = 0usize;
+
+        for item in batch {
+            if seen.insert(item.id.clone()) {
+                inserted += 1;
+                all_items.push(item);
+            }
+        }
+
+        inserted
+    }
+
     pub async fn get_catalog(
         &self,
         catalog_id: &str,
@@ -65,8 +82,7 @@ impl Netflix {
         //     `None`, which halts the loop — no retry needed.
         //   • An empty `metas` array (instead of 404) also stops the loop.
         //   • Some catalog mirrors may NOT honour skip and always return the same
-        //     first page.  The frontend's `getNextPageParam` deduplicates by item
-        //     id, so it will see 0 new items and stop paginating automatically.
+        //     first page. Stop as soon as a repeated page contributes no new ids.
         let mut all_items: Vec<MediaItem> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
 
@@ -93,11 +109,7 @@ impl Netflix {
         #[cfg(debug_assertions)]
         eprintln!("Fetching Netflix Catalog: {}", base_url);
         let first_page = self.fetch_page(&base_url).await?;
-        for item in first_page {
-            if seen.insert(item.id.clone()) {
-                all_items.push(item);
-            }
-        }
+        Self::extend_unique_items(&mut all_items, &mut seen, first_page);
 
         // Some deployments support Stremio-style skip pagination even if not declared in manifest.
         // Try several pages for richer catalogs and stop on 404.
@@ -115,10 +127,9 @@ impl Netflix {
                     if items.is_empty() {
                         break;
                     }
-                    for item in items {
-                        if seen.insert(item.id.clone()) {
-                            all_items.push(item);
-                        }
+
+                    if Self::extend_unique_items(&mut all_items, &mut seen, items) == 0 {
+                        break;
                     }
                 }
             }
@@ -197,9 +208,49 @@ struct Meta {
 mod tests {
     use super::*;
 
+    fn build_item(id: &str) -> MediaItem {
+        MediaItem {
+            id: id.to_string(),
+            title: id.to_string(),
+            poster: None,
+            backdrop: None,
+            logo: None,
+            description: None,
+            year: None,
+            primary_year: None,
+            display_year: None,
+            type_: "movie".to_string(),
+            relation_role: None,
+            relation_context_label: None,
+            relation_preferred_season: None,
+        }
+    }
+
     #[test]
     fn parse_catalog_response_treats_empty_object_as_empty_catalog() {
         let catalog = Netflix::parse_catalog_response("{}").expect("empty catalog response");
         assert!(catalog.metas.is_empty());
+    }
+
+    #[test]
+    fn extend_unique_items_detects_repeated_page() {
+        let mut all_items = Vec::new();
+        let mut seen = HashSet::new();
+
+        let inserted = Netflix::extend_unique_items(
+            &mut all_items,
+            &mut seen,
+            vec![build_item("1"), build_item("2")],
+        );
+        assert_eq!(inserted, 2);
+        assert_eq!(all_items.len(), 2);
+
+        let repeated_inserted = Netflix::extend_unique_items(
+            &mut all_items,
+            &mut seen,
+            vec![build_item("1"), build_item("2")],
+        );
+        assert_eq!(repeated_inserted, 0);
+        assert_eq!(all_items.len(), 2);
     }
 }

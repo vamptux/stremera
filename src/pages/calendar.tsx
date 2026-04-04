@@ -1,4 +1,4 @@
-import { useQuery, useQueries } from "@tanstack/react-query";
+import { useQueries } from "@tanstack/react-query";
 import { api, type MediaItem, type WatchStatus } from "@/lib/api";
 import { format, parseISO, isSameDay, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, addMonths, subMonths, startOfWeek, endOfWeek, addDays, startOfDay, endOfDay, isWithinInterval, isValid } from "date-fns";
 import { Link, useLocation } from "react-router-dom";
@@ -7,6 +7,7 @@ import { useEffect, useEffectEvent, useState, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { useLibraryItems, useWatchHistory, useWatchStatuses } from '@/hooks/use-media-library';
 
 const DETAILS_BATCH_SIZE = 12;
 
@@ -37,20 +38,13 @@ export function Calendar() {
   const from = `${location.pathname}${location.search}`;
 
   // 1. Get Library
-  const { data: library, isLoading: libraryLoading } = useQuery({
-    queryKey: ['library'],
-    queryFn: api.getLibrary,
-  });
+  const { data: library, isLoading: libraryLoading } = useLibraryItems();
 
-  const { data: allWatchStatuses } = useQuery({
-    queryKey: ['watch-statuses'],
-    queryFn: api.getAllWatchStatuses,
+  const { data: allWatchStatuses } = useWatchStatuses({
     staleTime: 1000 * 60 * 5,
   });
 
-  const { data: watchHistory } = useQuery({
-    queryKey: ['watch-history'],
-    queryFn: api.getWatchHistory,
+  const { data: watchHistory } = useWatchHistory({
     staleTime: 1000 * 60 * 3,
   });
 

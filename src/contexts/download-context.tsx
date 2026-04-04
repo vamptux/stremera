@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   api,
@@ -7,28 +15,73 @@ import {
   type DownloadProgressEvent,
   type StartDownloadParams,
 } from '@/lib/api';
-import { DownloadContext } from '@/contexts/download-context-core';
 import { toast } from 'sonner';
+
+export interface DownloadContextType {
+  downloads: DownloadItem[];
+  activeCount: number;
+  startDownload: (params: StartDownloadParams) => Promise<string>;
+  pauseDownload: (id: string) => Promise<void>;
+  pauseActiveDownloads: () => Promise<number>;
+  resumeDownload: (id: string) => Promise<void>;
+  cancelDownload: (id: string) => Promise<void>;
+  removeDownload: (id: string, deleteFile: boolean) => Promise<void>;
+  clearCompletedDownloads: (deleteFile?: boolean) => Promise<number>;
+  setBandwidthLimit: (limit?: number) => Promise<void>;
+  refetchDownloads: () => Promise<void>;
+}
+
+export const DownloadContext = createContext<DownloadContextType | undefined>(undefined);
+
+export function useDownloads() {
+  const context = useContext(DownloadContext);
+  if (context === undefined) {
+    throw new Error('useDownloads must be used within a DownloadProvider');
+  }
+
+  return context;
+}
 
 const isDev = import.meta.env.DEV;
 
 export function DownloadProvider({ children }: { children: React.ReactNode }) {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
+  const downloadsRef = useRef<DownloadItem[]>([]);
+  const refetchPromiseRef = useRef<Promise<DownloadItem[]> | null>(null);
+
+  useEffect(() => {
+    downloadsRef.current = downloads;
+  }, [downloads]);
 
   const refetchDownloads = useCallback(async () => {
-    const items = await api.getDownloads();
-    setDownloads(items);
-    return items;
+    if (refetchPromiseRef.current) {
+      return refetchPromiseRef.current;
+    }
+
+    const refreshPromise = api
+      .getDownloads()
+      .then((items) => {
+        downloadsRef.current = items;
+        setDownloads(items);
+        return items;
+      })
+      .finally(() => {
+        refetchPromiseRef.current = null;
+      });
+
+    refetchPromiseRef.current = refreshPromise;
+    return refreshPromise;
   }, []);
 
   // Initial fetch
   useEffect(() => {
     let active = true;
 
-    api
-      .getDownloads()
+    refetchDownloads()
       .then((items) => {
-        if (active) setDownloads(items);
+        if (active) {
+          downloadsRef.current = items;
+        }
       })
       .catch((error) => {
         if (!active) return;
@@ -39,7 +92,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     return () => {
       active = false;
     };
-  }, []);
+  }, [refetchDownloads]);
 
   // Event listener
   useEffect(() => {
@@ -48,12 +101,22 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
 
     void listen<DownloadProgressEvent>('download://progress', (event) => {
       const payload = event.payload;
+      const hasKnownDownload = downloadsRef.current.some((download) => download.id === payload.id);
+
+      if (!hasKnownDownload) {
+        void refetchDownloads().catch((error) => {
+          if (isDev) console.error('Failed to refresh downloads after progress event:', error);
+        });
+        return;
+      }
+
       setDownloads((prev) => {
         const index = prev.findIndex((d) => d.id === payload.id);
         if (index === -1) return prev;
 
         const newDownloads = [...prev];
         newDownloads[index] = { ...newDownloads[index], ...payload };
+        downloadsRef.current = newDownloads;
         return newDownloads;
       });
     })
@@ -74,7 +137,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       disposed = true;
       cleanup?.();
     };
-  }, []);
+  }, [refetchDownloads]);
 
   const startDownload = useCallback(
     async (params: StartDownloadParams) => {
@@ -149,24 +212,19 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     }
   }, [refetchDownloads]);
 
-  const pauseActiveDownloads = useCallback(
-    async () => {
-      try {
-        const pausedCount = await api.pauseActiveDownloads();
-        if (pausedCount === 0) return 0;
+  const pauseActiveDownloads = useCallback(async () => {
+    try {
+      const pausedCount = await api.pauseActiveDownloads();
+      if (pausedCount === 0) return 0;
 
-        await refetchDownloads();
-        toast.success(
-          pausedCount === 1 ? 'Paused 1 download' : `Paused ${pausedCount} downloads`,
-        );
-        return pausedCount;
-      } catch (e) {
-        toast.error('Failed to pause active downloads', { description: getErrorMessage(e) });
-        throw e;
-      }
-    },
-    [refetchDownloads],
-  );
+      await refetchDownloads();
+      toast.success(pausedCount === 1 ? 'Paused 1 download' : `Paused ${pausedCount} downloads`);
+      return pausedCount;
+    } catch (e) {
+      toast.error('Failed to pause active downloads', { description: getErrorMessage(e) });
+      throw e;
+    }
+  }, [refetchDownloads]);
 
   const clearCompletedDownloads = useCallback(
     async (deleteFile = false) => {
@@ -235,11 +293,5 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     ],
   );
 
-  return (
-    <DownloadContext.Provider
-      value={contextValue}
-    >
-      {children}
-    </DownloadContext.Provider>
-  );
+  return <DownloadContext.Provider value={contextValue}>{children}</DownloadContext.Provider>;
 }
