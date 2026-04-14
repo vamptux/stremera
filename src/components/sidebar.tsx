@@ -1,19 +1,10 @@
+import { Calendar, Download, Home, type LucideIcon, Search, Settings, User } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
-
-import { cn } from '@/lib/utils';
-import {
-  type LucideIcon,
-  Calendar,
-  Download,
-  Home,
-  Search,
-  Settings,
-  User,
-} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useDownloads } from '@/contexts/download-context';
 import { useAppUpdater } from '@/hooks/use-app-updater';
+import { cn } from '@/lib/utils';
 
 interface SidebarProps {
   className?: string;

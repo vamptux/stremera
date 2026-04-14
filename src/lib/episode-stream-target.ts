@@ -32,13 +32,9 @@ export function buildEpisodeStreamTargetLookupKey(
   mediaType: string,
   target: EpisodeStreamTarget,
 ): string {
-  return [
-    mediaType,
-    target.streamId,
-    target.season,
-    target.episode,
-    target.absoluteEpisode,
-  ].join(':');
+  return [mediaType, target.streamId, target.season, target.episode, target.absoluteEpisode].join(
+    ':',
+  );
 }
 
 export async function resolveEpisodeStreamTarget(

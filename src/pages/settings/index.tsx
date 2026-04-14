@@ -1,20 +1,13 @@
+import { Database, Keyboard, type LucideIcon, RefreshCw, Settings2, Zap } from 'lucide-react';
 import { type ReactNode, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import {
-  Zap,
-  Keyboard,
-  Settings2,
-  Database,
-  RefreshCw,
-  type LucideIcon,
-} from 'lucide-react';
-import { cn } from '@/lib/utils';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { StreamingSources } from './streaming';
+import { cn } from '@/lib/utils';
+import { DataSection } from './data';
 import { PlaybackSettings } from './playback';
 import { ShortcutsSection } from './shortcuts';
+import { StreamingSources } from './streaming';
 import { UpdatesSection } from './updates';
-import { DataSection } from './data';
 
 type SectionId = 'streaming' | 'playback' | 'shortcuts' | 'updates' | 'data';
 
@@ -57,9 +50,7 @@ function resolveSectionId(value: string | null): SectionId {
     return DEFAULT_SECTION;
   }
 
-  return Object.prototype.hasOwnProperty.call(NAV_ITEMS_BY_ID, value)
-    ? (value as SectionId)
-    : DEFAULT_SECTION;
+  return value in NAV_ITEMS_BY_ID ? (value as SectionId) : DEFAULT_SECTION;
 }
 
 export function Settings() {
@@ -87,20 +78,21 @@ export function Settings() {
   );
 
   return (
-    <div className="flex h-[calc(100dvh-4rem)] md:pl-[60px]">
+    <div className='flex h-[calc(100dvh-4rem)] md:pl-[60px]'>
       {/* Sidebar */}
-      <aside className="w-52 shrink-0 border-r border-white/[0.06] flex flex-col overflow-y-auto">
-        <div className="px-5 pt-6 pb-4">
-          <h1 className="text-[15px] font-semibold text-white tracking-tight">Settings</h1>
-          <p className="text-[11px] text-zinc-500 mt-0.5">Preferences & configuration</p>
+      <aside className='w-52 shrink-0 border-r border-white/[0.06] flex flex-col overflow-y-auto'>
+        <div className='px-5 pt-6 pb-4'>
+          <h1 className='text-[15px] font-semibold text-white tracking-tight'>Settings</h1>
+          <p className='text-[11px] text-zinc-500 mt-0.5'>Preferences & configuration</p>
         </div>
 
-        <nav className="flex-1 px-2.5 space-y-0.5">
+        <nav className='flex-1 px-2.5 space-y-0.5'>
           {NAV_ITEMS.map((item) => {
             const isActive = active === item.id;
             return (
               <button
                 key={item.id}
+                type='button'
                 onClick={() => handleSectionChange(item.id)}
                 className={cn(
                   'w-full flex items-center gap-2.5 px-3 py-2 text-left rounded transition-colors duration-100',
@@ -109,21 +101,25 @@ export function Settings() {
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.04]',
                 )}
               >
-                <item.icon className={cn('w-[15px] h-[15px] shrink-0', isActive ? 'text-white' : 'text-zinc-500')} />
-                <span className="text-[13px] font-medium truncate">{item.label}</span>
+                <item.icon
+                  className={cn(
+                    'w-[15px] h-[15px] shrink-0',
+                    isActive ? 'text-white' : 'text-zinc-500',
+                  )}
+                />
+                <span className='text-[13px] font-medium truncate'>{item.label}</span>
               </button>
             );
           })}
         </nav>
-
       </aside>
 
       {/* Content — centered within the remaining space */}
-      <ScrollArea className="flex-1 min-h-0">
-        <div className="flex justify-center px-8 py-6">
-          <div className="w-full max-w-2xl">
+      <ScrollArea className='flex-1 min-h-0'>
+        <div className='flex justify-center px-8 py-6'>
+          <div className='w-full max-w-2xl'>
             <SectionHeader item={NAV_ITEMS_BY_ID[active]} />
-            <div className="mt-5">{SECTION_MAP[active]()}</div>
+            <div className='mt-5'>{SECTION_MAP[active]()}</div>
           </div>
         </div>
       </ScrollArea>
@@ -133,13 +129,13 @@ export function Settings() {
 
 function SectionHeader({ item }: { item: NavItem }) {
   return (
-    <div className="flex items-center gap-3">
-      <div className="w-8 h-8 rounded bg-white/[0.06] flex items-center justify-center">
-        <item.icon className="w-4 h-4 text-zinc-400" />
+    <div className='flex items-center gap-3'>
+      <div className='w-8 h-8 rounded bg-white/[0.06] flex items-center justify-center'>
+        <item.icon className='w-4 h-4 text-zinc-400' />
       </div>
       <div>
-        <h2 className="text-[15px] font-semibold text-white">{item.label}</h2>
-        <p className="text-[11px] text-zinc-500">{item.description}</p>
+        <h2 className='text-[15px] font-semibold text-white'>{item.label}</h2>
+        <p className='text-[11px] text-zinc-500'>{item.description}</p>
       </div>
     </div>
   );

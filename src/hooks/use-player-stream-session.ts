@@ -94,7 +94,6 @@ export function usePlayerStreamSession({
     streamLookupIdRef,
     selectedStreamKeyRef,
     lastStreamUrlRef,
-    isOffline:
-      routeMarkedOffline || (!!activeStreamUrl && !activeStreamUrl.startsWith('http')),
+    isOffline: routeMarkedOffline || (!!activeStreamUrl && !activeStreamUrl.startsWith('http')),
   };
 }

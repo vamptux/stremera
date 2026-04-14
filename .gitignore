@@ -35,10 +35,16 @@ src-tauri/.cargo
 details.txt
 git_diff.txt
 
+# Local environment files
+.env
+.env.*
+!.env.example
+
 # Dev-only tracking files
 implementation_tracker.md
 new_features.md
 build-release.log
+ANIME_REWORK.MD
 
 # npm lockfile — replaced by bun.lock
 package-lock.json

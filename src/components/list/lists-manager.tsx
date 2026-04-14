@@ -1,49 +1,55 @@
-import { useState, useCallback, useMemo } from 'react';
 import {
-  DndContext,
   closestCenter,
+  DndContext,
+  type DragEndEvent,
+  DragOverlay,
+  type DragStartEvent,
   KeyboardSensor,
   PointerSensor,
+  type UniqueIdentifier,
   useSensor,
   useSensors,
-  DragEndEvent,
-  DragStartEvent,
-  DragOverlay,
-  UniqueIdentifier,
 } from '@dnd-kit/core';
 import {
+  arrayMove,
+  rectSortingStrategy,
   SortableContext,
   sortableKeyboardCoordinates,
-  verticalListSortingStrategy,
-  rectSortingStrategy,
   useSortable,
-  arrayMove,
+  verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api, UserList, MediaItem } from '@/lib/api';
-import { toast } from 'sonner';
-import { Button } from '@/components/ui/button';
-import { cn } from '@/lib/utils';
-import { invalidateListQueries } from '@/lib/query-invalidation';
-import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  GripVertical,
   ChevronDown,
   ChevronRight,
-  ListPlus,
-  Pencil,
-  Trash2,
-  Search,
-  X,
   Film,
-  Tv,
+  GripVertical,
   LayoutGrid,
   LayoutList,
+  ListPlus,
+  Pencil,
+  Search,
+  Trash2,
+  Tv,
+  X,
 } from 'lucide-react';
+import { useCallback, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import { CreateListDialog, RenameListDialog } from '@/components/list/list-editor-dialog';
 import { ListIcon } from '@/components/list/list-icons';
+import { Button } from '@/components/ui/button';
+import { api, type MediaItem, type UserList } from '@/lib/api';
+import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
+import { invalidateListQueries } from '@/lib/query-invalidation';
+import { cn } from '@/lib/utils';
+
+const LIST_MANAGER_SKELETON_KEYS = [
+  'list-manager-skeleton-1',
+  'list-manager-skeleton-2',
+  'list-manager-skeleton-3',
+] as const;
 
 // ─── Sortable List Card ────────────────────────────────────────────────────────
 
@@ -86,6 +92,7 @@ function SortableListCard({
       <div className='flex items-center gap-3 px-4 py-3'>
         {/* Drag handle */}
         <button
+          type='button'
           {...attributes}
           {...listeners}
           className='text-zinc-700 hover:text-zinc-400 transition-colors cursor-grab active:cursor-grabbing touch-none shrink-0'
@@ -96,6 +103,7 @@ function SortableListCard({
 
         {/* Expand toggle */}
         <button
+          type='button'
           onClick={() => onToggleExpand(list.id)}
           className='flex items-center gap-3 flex-1 min-w-0 group'
         >
@@ -203,6 +211,7 @@ function SortableItemRow({ item, listId, viewMode }: SortableItemRowProps) {
 
         {/* Remove button */}
         <button
+          type='button'
           onClick={(e) => {
             e.stopPropagation();
             removeItem.mutate();
@@ -212,8 +221,10 @@ function SortableItemRow({ item, listId, viewMode }: SortableItemRowProps) {
           <X className='w-3 h-3' />
         </button>
 
-        <div
-          className='aspect-[2/3] cursor-pointer'
+        <button
+          type='button'
+          aria-label={`Open details for ${item.title}`}
+          className='aspect-[2/3] w-full cursor-pointer'
           onClick={() => navigate(`/details/${detailsRouteType}/${item.id}`)}
         >
           {item.poster ? (
@@ -232,15 +243,13 @@ function SortableItemRow({ item, listId, viewMode }: SortableItemRowProps) {
               )}
             </div>
           )}
-        </div>
+        </button>
         <div className='p-2'>
           <p className='text-[11px] font-medium text-zinc-300 truncate leading-tight'>
             {item.title}
           </p>
           {item.displayYear && (
-            <p className='text-[10px] text-zinc-600 capitalize mt-0.5'>
-              {item.displayYear}
-            </p>
+            <p className='text-[10px] text-zinc-600 capitalize mt-0.5'>{item.displayYear}</p>
           )}
         </div>
       </div>
@@ -266,7 +275,9 @@ function SortableItemRow({ item, listId, viewMode }: SortableItemRowProps) {
       </div>
 
       {/* Poster thumb */}
-      <div
+      <button
+        type='button'
+        aria-label={`Open details for ${item.title}`}
         className='h-10 w-7 rounded overflow-hidden bg-zinc-800 shrink-0 cursor-pointer'
         onClick={() => navigate(`/details/${detailsRouteType}/${item.id}`)}
       >
@@ -286,11 +297,12 @@ function SortableItemRow({ item, listId, viewMode }: SortableItemRowProps) {
             )}
           </div>
         )}
-      </div>
+      </button>
 
       {/* Title info */}
-      <div
-        className='flex-1 min-w-0 cursor-pointer'
+      <button
+        type='button'
+        className='flex-1 min-w-0 cursor-pointer text-left'
         onClick={() => navigate(`/details/${detailsRouteType}/${item.id}`)}
       >
         <p className='text-sm font-medium text-zinc-200 group-hover:text-white transition-colors truncate'>
@@ -301,13 +313,11 @@ function SortableItemRow({ item, listId, viewMode }: SortableItemRowProps) {
           {item.displayYear && (
             <>
               <span className='text-zinc-700 text-[10px]'>·</span>
-              <span className='text-[10px] text-zinc-500'>
-                {item.displayYear}
-              </span>
+              <span className='text-[10px] text-zinc-500'>{item.displayYear}</span>
             </>
           )}
         </div>
-      </div>
+      </button>
 
       {/* Remove */}
       <Button
@@ -344,7 +354,10 @@ function ListItemsView({ list }: { list: UserList }) {
   // reference when actual data changes — memo recomputes are infrequent.
   const orderedItems = useMemo(() => {
     const itemMap = new Map(list.items.map((i) => [i.id, i]));
-    const ordered = orderedIds.filter((id) => itemMap.has(id)).map((id) => itemMap.get(id)!);
+    const ordered = orderedIds.flatMap((id) => {
+      const orderedItem = itemMap.get(id);
+      return orderedItem ? [orderedItem] : [];
+    });
     const orderedSet = new Set(orderedIds);
     const added = list.items.filter((i) => !orderedSet.has(i.id));
     return [...ordered, ...added];
@@ -431,6 +444,7 @@ function ListItemsView({ list }: { list: UserList }) {
           />
           {search && (
             <button
+              type='button'
               onClick={() => setSearch('')}
               className='absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-600 hover:text-zinc-400'
             >
@@ -440,6 +454,7 @@ function ListItemsView({ list }: { list: UserList }) {
         </div>
         <div className='flex items-center bg-zinc-800/60 rounded-lg border border-white/8 p-0.5'>
           <button
+            type='button'
             onClick={() => setViewMode('list')}
             className={cn(
               'h-6 w-6 rounded-md flex items-center justify-center transition-all',
@@ -449,6 +464,7 @@ function ListItemsView({ list }: { list: UserList }) {
             <LayoutList className='w-3.5 h-3.5' />
           </button>
           <button
+            type='button'
             onClick={() => setViewMode('grid')}
             className={cn(
               'h-6 w-6 rounded-md flex items-center justify-center transition-all',
@@ -674,9 +690,9 @@ export function ListsManager() {
       {/* Content */}
       {isLoading ? (
         <div className='space-y-3'>
-          {Array.from({ length: 3 }).map((_, i) => (
+          {LIST_MANAGER_SKELETON_KEYS.map((skeletonKey) => (
             <div
-              key={i}
+              key={skeletonKey}
               className='h-14 rounded-xl bg-zinc-900/40 border border-white/5 animate-pulse'
             />
           ))}

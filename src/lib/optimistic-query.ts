@@ -1,10 +1,6 @@
 import type { QueryClient, QueryKey } from '@tanstack/react-query';
 
-interface RunOptimisticQueryMutationOptions<
-  TData,
-  TVariables,
-  TSaved extends TData = TData,
-> {
+interface RunOptimisticQueryMutationOptions<TData, TVariables, TSaved extends TData = TData> {
   mutate: (variables: TVariables) => Promise<TSaved>;
   optimisticData: TData;
   queryClient: QueryClient;
@@ -12,11 +8,7 @@ interface RunOptimisticQueryMutationOptions<
   variables: TVariables;
 }
 
-export async function runOptimisticQueryMutation<
-  TData,
-  TVariables,
-  TSaved extends TData = TData,
->({
+export async function runOptimisticQueryMutation<TData, TVariables, TSaved extends TData = TData>({
   mutate,
   optimisticData,
   queryClient,

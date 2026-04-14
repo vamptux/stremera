@@ -1,6 +1,7 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.4.10/schema.json",
   "files": {
+    "includes": ["**", "!**/dist", "!**/src-tauri/target", "!**/src-tauri/gen"],
     "ignoreUnknown": true
   },
   "formatter": {
@@ -9,6 +10,13 @@
     "indentWidth": 2,
     "lineWidth": 100
   },
+  "linter": {
+    "rules": {
+      "suspicious": {
+        "noUnknownAtRules": "off"
+      }
+    }
+  },
   "javascript": {
     "formatter": {
       "quoteStyle": "single",
@@ -16,6 +24,11 @@
       "bracketSpacing": true,
       "semicolons": "always",
       "trailingCommas": "all"
+    }
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
     }
   },
   "html": {

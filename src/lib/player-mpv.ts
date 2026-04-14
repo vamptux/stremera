@@ -132,10 +132,7 @@ export function buildPlayerMpvConfig({
       ytdl: 'no',
       'msg-level': 'all=warn',
       ...(isOffline ? { cache: 'no' } : NETWORK_CACHE_OPTIONS),
-      ...buildPlayerLanguageSelectionOptions(
-        preferredAudioLanguage,
-        preferredSubtitleLanguage,
-      ),
+      ...buildPlayerLanguageSelectionOptions(preferredAudioLanguage, preferredSubtitleLanguage),
     },
     observedProperties: PLAYER_MPV_OBSERVED_PROPERTIES,
   };

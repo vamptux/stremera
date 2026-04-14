@@ -1,40 +1,40 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '@/lib/api';
-import { MediaCard, MediaCardSkeleton } from '@/components/media-card';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
-  Library,
-  History,
-  Play,
-  X,
-  LayoutList,
-  Check,
-  Settings2,
-  Search,
-  ArrowUpAZ,
   ArrowDownAZ,
+  ArrowUpAZ,
   CalendarArrowDown,
   CalendarArrowUp,
-  LayoutGrid,
-  List,
+  Check,
   ChevronDown,
+  History,
+  LayoutGrid,
+  LayoutList,
+  Library,
+  List,
+  Play,
+  Search,
+  Settings2,
+  X,
 } from 'lucide-react';
-import { useCallback, useMemo, useState } from 'react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { toast } from 'sonner';
+import { useCallback, useDeferredValue, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import {
-  WatchProgress,
-  MediaItem,
-  WatchStatus,
-  WATCH_STATUS_LABELS,
-  WATCH_STATUS_COLORS,
-} from '@/lib/api';
-import { cn } from '@/lib/utils';
+import { toast } from 'sonner';
 import { ListsManager } from '@/components/list/lists-manager';
-import { useLocalProfile, LocalProfile } from '@/hooks/use-local-profile';
+import { MediaCard, MediaCardSkeleton } from '@/components/media-card';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { Input } from '@/components/ui/input';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { WindowVirtualizedGrid } from '@/components/window-virtualized-grid';
+import { WindowVirtualizedStack } from '@/components/window-virtualized-stack';
+import { type LocalProfile, useLocalProfile } from '@/hooks/use-local-profile';
 import {
   useContinueWatching,
   useLibraryItems,
@@ -42,19 +42,18 @@ import {
   useWatchHistory,
   useWatchStatuses,
 } from '@/hooks/use-media-library';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { invalidatePlaybackHistoryQueries } from '@/lib/query-invalidation';
+import {
+  api,
+  type MediaItem,
+  WATCH_STATUS_COLORS,
+  WATCH_STATUS_LABELS,
+  type WatchProgress,
+  type WatchStatus,
+} from '@/lib/api';
+import { buildHistoryPlaybackPlan, getHistoryPlaybackFallbackNotice } from '@/lib/history-playback';
 import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
-import {
-  buildHistoryPlaybackPlan,
-  getHistoryPlaybackFallbackNotice,
-} from '@/lib/history-playback';
+import { invalidatePlaybackHistoryQueries } from '@/lib/query-invalidation';
+import { cn } from '@/lib/utils';
 
 const ACCENT_PRESETS = [
   { color: '#ffffff', label: 'White' },
@@ -66,6 +65,29 @@ const ACCENT_PRESETS = [
   { color: '#ef4444', label: 'Red' },
   { color: '#a855f7', label: 'Purple' },
 ];
+const PROFILE_MEDIA_GRID_SKELETON_KEYS = [
+  'profile-grid-skeleton-1',
+  'profile-grid-skeleton-2',
+  'profile-grid-skeleton-3',
+  'profile-grid-skeleton-4',
+  'profile-grid-skeleton-5',
+  'profile-grid-skeleton-6',
+  'profile-grid-skeleton-7',
+  'profile-grid-skeleton-8',
+  'profile-grid-skeleton-9',
+  'profile-grid-skeleton-10',
+  'profile-grid-skeleton-11',
+  'profile-grid-skeleton-12',
+] as const;
+const PROFILE_CONTINUE_WATCHING_SKELETON_KEYS = [
+  'continue-watching-skeleton-1',
+  'continue-watching-skeleton-2',
+  'continue-watching-skeleton-3',
+  'continue-watching-skeleton-4',
+  'continue-watching-skeleton-5',
+  'continue-watching-skeleton-6',
+] as const;
+const PROFILE_MEDIA_CARD_TEXT_HEIGHT_PX = 60;
 
 function isWatchStatusValue(value: string): value is WatchStatus {
   return (
@@ -104,10 +126,18 @@ export function Profile() {
     'default' | 'title-asc' | 'title-desc' | 'year-desc' | 'year-asc'
   >('default');
   const [librarySearch, setLibrarySearch] = useState('');
+  const deferredLibrarySearch = useDeferredValue(librarySearch);
+  const normalizedLibrarySearch = useMemo(
+    () => deferredLibrarySearch.trim().toLowerCase(),
+    [deferredLibrarySearch],
+  );
 
-  const handleViewModeChange = useCallback((mode: 'grid' | 'list') => {
-    void updateViewMode(mode);
-  }, [updateViewMode]);
+  const handleViewModeChange = useCallback(
+    (mode: 'grid' | 'list') => {
+      void updateViewMode(mode);
+    },
+    [updateViewMode],
+  );
 
   const filteredLibrary = useMemo(() => {
     let items = !library
@@ -118,9 +148,8 @@ export function Profile() {
     if (libraryTypeFilter !== 'all') {
       items = items.filter((item) => item.type === libraryTypeFilter);
     }
-    if (librarySearch.trim()) {
-      const q = librarySearch.trim().toLowerCase();
-      items = items.filter((item) => item.title.toLowerCase().includes(q));
+    if (normalizedLibrarySearch) {
+      items = items.filter((item) => item.title.toLowerCase().includes(normalizedLibrarySearch));
     }
     switch (librarySort) {
       case 'title-asc':
@@ -141,8 +170,8 @@ export function Profile() {
     library,
     libraryStatusFilter,
     libraryTypeFilter,
-    librarySearch,
     librarySort,
+    normalizedLibrarySearch,
     allWatchStatuses,
   ]);
 
@@ -161,12 +190,16 @@ export function Profile() {
   const listsCount = lists?.length ?? 0;
 
   const [historySearch, setHistorySearch] = useState('');
+  const deferredHistorySearch = useDeferredValue(historySearch);
+  const normalizedHistorySearch = useMemo(
+    () => deferredHistorySearch.trim().toLowerCase(),
+    [deferredHistorySearch],
+  );
   const filteredHistory = useMemo(() => {
     if (!history) return [];
-    if (!historySearch.trim()) return history;
-    const q = historySearch.trim().toLowerCase();
-    return history.filter((item) => item.title.toLowerCase().includes(q));
-  }, [history, historySearch]);
+    if (!normalizedHistorySearch) return history;
+    return history.filter((item) => item.title.toLowerCase().includes(normalizedHistorySearch));
+  }, [history, normalizedHistorySearch]);
 
   const continueWatchingItems = useMemo(() => continueWatching ?? [], [continueWatching]);
 
@@ -183,7 +216,7 @@ export function Profile() {
         />
       </div>
 
-        <div className='container max-w-7xl mx-auto pt-20 pb-12 px-4 sm:px-6 md:pl-24 lg:px-8 lg:pl-28 space-y-8 relative z-10'>
+      <div className='container max-w-7xl mx-auto pt-20 pb-12 px-4 sm:px-6 md:pl-24 lg:px-8 lg:pl-28 space-y-8 relative z-10'>
         {/* Header */}
         <div className='animate-in fade-in slide-in-from-bottom-2 duration-300'>
           {/* Glass header card */}
@@ -221,14 +254,12 @@ export function Profile() {
                       isSaving={isSavingProfilePreferences}
                     />
                   </div>
-                {profile.bio && (
-                  <p className='text-sm text-zinc-500 max-w-[32ch] leading-relaxed'>
-                    {profile.bio}
-                  </p>
-                )}
-                {!profile.bio && (
-                  <p className='text-xs text-zinc-700 italic'>No tagline set</p>
-                )}
+                  {profile.bio && (
+                    <p className='text-sm text-zinc-500 max-w-[32ch] leading-relaxed'>
+                      {profile.bio}
+                    </p>
+                  )}
+                  {!profile.bio && <p className='text-xs text-zinc-700 italic'>No tagline set</p>}
                 </div>
               </div>
 
@@ -432,22 +463,23 @@ export function Profile() {
           >
             {libraryLoading ? (
               <MediaGrid>
-                {Array.from({ length: 12 }).map((_, i) => (
-                  <MediaCardSkeleton key={i} />
+                {PROFILE_MEDIA_GRID_SKELETON_KEYS.map((key) => (
+                  <MediaCardSkeleton key={key} />
                 ))}
               </MediaGrid>
             ) : filteredLibrary.length > 0 ? (
               viewMode === 'grid' ? (
-                <MediaGrid>
-                  {filteredLibrary.map((item) => (
+                <ProfileMediaGrid
+                  items={filteredLibrary}
+                  getItemKey={(item) => item.id}
+                  renderItem={(item) => (
                     <MediaCard
-                      key={item.id}
                       item={item}
                       currentStatusOverride={allWatchStatuses?.[item.id] ?? null}
                       isInLibraryOverride
                     />
-                  ))}
-                </MediaGrid>
+                  )}
+                />
               ) : (
                 <LibraryList items={filteredLibrary} watchStatuses={allWatchStatuses} />
               )
@@ -516,17 +548,17 @@ export function Profile() {
             )}
             {historyLoading ? (
               <MediaGrid>
-                {Array.from({ length: 12 }).map((_, i) => (
-                  <MediaCardSkeleton key={i} />
+                {PROFILE_MEDIA_GRID_SKELETON_KEYS.map((key) => (
+                  <MediaCardSkeleton key={key} />
                 ))}
               </MediaGrid>
             ) : filteredHistory.length > 0 ? (
               viewMode === 'grid' ? (
-                <MediaGrid>
-                  {filteredHistory.map((item) => (
-                    <HistoryItem key={`${item.id}-${item.season}-${item.episode}`} item={item} />
-                  ))}
-                </MediaGrid>
+                <ProfileMediaGrid
+                  items={filteredHistory}
+                  getItemKey={(item) => `${item.id}-${item.season ?? ''}-${item.episode ?? ''}`}
+                  renderItem={(item) => <HistoryItem item={item} />}
+                />
               ) : (
                 <HistoryListView items={filteredHistory} />
               )
@@ -566,21 +598,17 @@ export function Profile() {
             )}
             {continueWatchingLoading ? (
               <MediaGrid>
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <MediaCardSkeleton key={i} />
+                {PROFILE_CONTINUE_WATCHING_SKELETON_KEYS.map((key) => (
+                  <MediaCardSkeleton key={key} />
                 ))}
               </MediaGrid>
             ) : continueWatchingItems.length > 0 ? (
               viewMode === 'grid' ? (
-                <MediaGrid>
-                  {continueWatchingItems.map((item) => (
-                    <HistoryItem
-                      key={`${item.id}-${item.season}-${item.episode}`}
-                      item={item}
-                      showLibraryContext
-                    />
-                  ))}
-                </MediaGrid>
+                <ProfileMediaGrid
+                  items={continueWatchingItems}
+                  getItemKey={(item) => `${item.id}-${item.season ?? ''}-${item.episode ?? ''}`}
+                  renderItem={(item) => <HistoryItem item={item} showLibraryContext />}
+                />
               ) : (
                 <HistoryListView items={continueWatchingItems} />
               )
@@ -605,6 +633,25 @@ function MediaGrid({ children }: { children: React.ReactNode }) {
     <div className='grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'>
       {children}
     </div>
+  );
+}
+
+function ProfileMediaGrid<T>({
+  items,
+  getItemKey,
+  renderItem,
+}: {
+  items: readonly T[];
+  getItemKey: (item: T, index: number) => string;
+  renderItem: (item: T, index: number) => React.ReactNode;
+}) {
+  return (
+    <WindowVirtualizedGrid
+      items={items}
+      getItemKey={getItemKey}
+      renderItem={renderItem}
+      estimateItemHeight={(itemWidth) => itemWidth * 1.5 + PROFILE_MEDIA_CARD_TEXT_HEIGHT_PX}
+    />
   );
 }
 
@@ -655,11 +702,12 @@ function LibraryList({
   watchStatuses?: Record<string, string>;
 }) {
   return (
-    <div className='space-y-1.5'>
-      {items.map((item) => (
-        <LibraryListRow key={item.id} item={item} status={watchStatuses?.[item.id]} />
-      ))}
-    </div>
+    <WindowVirtualizedStack
+      items={items}
+      getItemKey={(item) => item.id}
+      estimateSize={() => 76}
+      renderItem={(item) => <LibraryListRow item={item} status={watchStatuses?.[item.id]} />}
+    />
   );
 }
 
@@ -702,9 +750,7 @@ function LibraryListRow({ item, status }: { item: MediaItem; status?: string }) 
         </p>
         <div className='flex items-center gap-1.5 mt-0.5 flex-wrap'>
           {item.displayYear && (
-            <span className='text-[10px] text-zinc-600'>
-              {item.displayYear}
-            </span>
+            <span className='text-[10px] text-zinc-600'>{item.displayYear}</span>
           )}
           <span
             className={cn(
@@ -737,11 +783,12 @@ function LibraryListRow({ item, status }: { item: MediaItem; status?: string }) 
 
 function HistoryListView({ items }: { items: WatchProgress[] }) {
   return (
-    <div className='space-y-1.5'>
-      {items.map((item) => (
-        <HistoryListRow key={`${item.id}-${item.season ?? ''}-${item.episode ?? ''}`} item={item} />
-      ))}
-    </div>
+    <WindowVirtualizedStack
+      items={items}
+      getItemKey={(item) => `${item.id}-${item.season ?? ''}-${item.episode ?? ''}`}
+      estimateSize={() => 78}
+      renderItem={(item) => <HistoryListRow item={item} />}
+    />
   );
 }
 
@@ -1031,10 +1078,14 @@ function ProfileSettingsPopover({
 
         <div className='px-4 py-4 space-y-4'>
           <div className='space-y-1.5'>
-            <label className='text-[10px] font-bold uppercase tracking-widest text-zinc-600'>
+            <label
+              htmlFor='profile-display-name'
+              className='text-[10px] font-bold uppercase tracking-widest text-zinc-600'
+            >
               Display Name
             </label>
             <Input
+              id='profile-display-name'
               value={draftName}
               onChange={(e) => setDraftName(e.target.value)}
               onKeyDown={(e) => {
@@ -1047,10 +1098,14 @@ function ProfileSettingsPopover({
           </div>
 
           <div className='space-y-1.5'>
-            <label className='text-[10px] font-bold uppercase tracking-widest text-zinc-600'>
+            <label
+              htmlFor='profile-tagline'
+              className='text-[10px] font-bold uppercase tracking-widest text-zinc-600'
+            >
               Tagline
             </label>
             <textarea
+              id='profile-tagline'
               value={draftBio}
               onChange={(e) => setDraftBio(e.target.value)}
               maxLength={80}
@@ -1062,9 +1117,9 @@ function ProfileSettingsPopover({
           </div>
 
           <div className='space-y-2'>
-            <label className='text-[10px] font-bold uppercase tracking-widest text-zinc-600'>
+            <div className='text-[10px] font-bold uppercase tracking-widest text-zinc-600'>
               Accent
-            </label>
+            </div>
             <div className='flex items-center gap-1.5 flex-wrap'>
               {ACCENT_PRESETS.map((p) => (
                 <button

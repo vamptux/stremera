@@ -1,9 +1,9 @@
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { ArrowLeft, Maximize2, Minimize2, Minus, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Maximize2, Minus, Minimize2, X } from 'lucide-react';
-import { getCurrentWindow } from '@tauri-apps/api/window';
-import { cn } from '@/lib/utils';
 import { isTauriDesktopRuntime } from '@/lib/app-updater';
+import { cn } from '@/lib/utils';
 
 /** Routes where a back button should appear in the titlebar. */
 function canGoBack(pathname: string): boolean {
@@ -44,16 +44,18 @@ export function DesktopTitlebar({ className }: DesktopTitlebarProps = {}) {
     };
 
     void syncWindowState();
-    void appWindow.onResized(() => {
-      void syncWindowState();
-    }).then((dispose) => {
-      if (!isActive) {
-        dispose();
-        return;
-      }
+    void appWindow
+      .onResized(() => {
+        void syncWindowState();
+      })
+      .then((dispose) => {
+        if (!isActive) {
+          dispose();
+          return;
+        }
 
-      unlisten = dispose;
-    });
+        unlisten = dispose;
+      });
 
     return () => {
       isActive = false;
@@ -97,10 +99,20 @@ export function DesktopTitlebar({ className }: DesktopTitlebarProps = {}) {
       )}
 
       {/* Drag region fills remaining space */}
-      <div
+      <button
+        type='button'
         data-tauri-drag-region
-        className='flex min-w-0 flex-1 items-center select-none'
+        aria-label='Toggle maximize window'
+        className='flex min-w-0 flex-1 items-center select-none focus:outline-none'
         onDoubleClick={handleToggleMaximize}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') {
+            return;
+          }
+
+          event.preventDefault();
+          handleToggleMaximize();
+        }}
       />
 
       {/* Window controls — flush right */}
@@ -150,7 +162,13 @@ interface TitlebarButtonProps {
   tone?: 'default' | 'danger';
 }
 
-function TitlebarButton({ children, disabled, label, onClick, tone = 'default' }: TitlebarButtonProps) {
+function TitlebarButton({
+  children,
+  disabled,
+  label,
+  onClick,
+  tone = 'default',
+}: TitlebarButtonProps) {
   return (
     <button
       type='button'

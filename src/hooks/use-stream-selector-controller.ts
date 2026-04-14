@@ -1,30 +1,28 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
-
-import {
-  api,
-  getErrorMessage,
-  type StreamSelectorPreferencesState,
-  type TorrentioStream,
-} from '@/lib/api';
 import { useDebounce } from '@/hooks/use-debounce';
 import { useLegacyStorageImport } from '@/hooks/use-legacy-storage-import';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import {
+  api,
+  getErrorMessage,
+  type StreamSelectorPreferencesState,
+  type StreamSelectorStats,
+  type TorrentioStream,
+} from '@/lib/api';
+import {
   clearLegacyStorageFeatureKeys,
-  readLegacyStorageFeature,
   type LegacyStorageReadResult,
+  readLegacyStorageFeature,
 } from '@/lib/legacy-storage';
 import { buildPlayerNavigationTarget } from '@/lib/player-navigation';
 import { buildStreamRankingOptions } from '@/lib/stream-ranking';
 import { resolveStreamCandidate as resolvePlayableStreamCandidate } from '@/lib/stream-resolution';
 import {
-  buildStreamStats,
-  DEFAULT_FILTERS,
-  filterAndSortStreams,
   type BatchFilter,
+  DEFAULT_FILTERS,
   type FilterState,
   type QualityFilter,
   type SortMode,
@@ -40,6 +38,13 @@ const SOURCE_FILTER_VALUES: SourceFilter[] = ['all', 'cached'];
 const SORT_MODE_VALUES: SortMode[] = ['smart', 'quality', 'size', 'seeds'];
 const BATCH_FILTER_VALUES: BatchFilter[] = ['all', 'episodes', 'packs'];
 const STREAM_SELECTOR_PREFERENCE_SAVE_DELAY_MS = 200;
+const EMPTY_STREAM_SELECTOR_STATS: StreamSelectorStats = {
+  resCounts: { '4k': 0, '1080p': 0, '720p': 0, sd: 0 },
+  playableCount: 0,
+  cachedCount: 0,
+  batchCount: 0,
+  episodeLikeCount: 0,
+};
 
 export interface AddonHealthMetric {
   id: string;
@@ -143,6 +148,23 @@ function areFilterStatesEqual(left: FilterState, right: FilterState): boolean {
 
 function buildFilterStateKey(filters: FilterState): string {
   return [filters.quality, filters.source, filters.addon, filters.sort, filters.batch].join('|');
+}
+
+function buildStreamFilterSourceKey(streams: readonly TorrentioStream[]): string {
+  return streams
+    .map((stream) =>
+      [
+        stream.streamKey,
+        stream.cached ? '1' : '0',
+        stream.seeders ?? 'na',
+        stream.size_bytes ?? 'na',
+        stream.source_name?.trim() || 'Unknown',
+        stream.presentation.resolution,
+        stream.presentation.isBatch ? '1' : '0',
+        stream.presentation.isInstantlyPlayable ? '1' : '0',
+      ].join(':'),
+    )
+    .join('|');
 }
 
 function normalizeStoredFilters(candidate: unknown, defaults: FilterState): FilterState {
@@ -336,6 +358,12 @@ function useSelectorPreferencesState({
       });
   });
 
+  const syncFiltersFromPersistedState = useEffectEvent((nextFilters: FilterState) => {
+    setFilters((currentFilters) =>
+      areFilterStatesEqual(currentFilters, nextFilters) ? currentFilters : nextFilters,
+    );
+  });
+
   useLegacyStorageImport({
     clearLegacy: clearLegacyStreamSelectorPreferences,
     enabled: streamSelectorPreferencesQuery.isSuccess,
@@ -383,12 +411,7 @@ function useSelectorPreferencesState({
     hasHydratedFiltersRef.current = true;
     skipNextPreferenceSaveRef.current = true;
     lastRequestedPreferenceKeyRef.current = buildFilterStateKey(normalizedPersistedFilters);
-
-    const timer = window.setTimeout(() => {
-      setFilters(normalizedPersistedFilters);
-    }, 0);
-
-    return () => window.clearTimeout(timer);
+    syncFiltersFromPersistedState(normalizedPersistedFilters);
   }, [
     normalizedPersistedFilters,
     open,
@@ -841,6 +864,22 @@ export function useStreamSelectorController({
     retry: 0,
   });
   const streams = useMemo(() => streamSelectorData?.streams ?? [], [streamSelectorData?.streams]);
+  const streamStats = streamSelectorData?.stats ?? EMPTY_STREAM_SELECTOR_STATS;
+  const streamFilterSourceKey = useMemo(() => buildStreamFilterSourceKey(streams), [streams]);
+  const filteredStreamQuery = useQuery({
+    queryKey: [
+      'streams',
+      'selector-filtered',
+      streamFilterSourceKey,
+      buildFilterStateKey(effectiveFilters),
+    ],
+    queryFn: () => api.filterStreamSelectorStreams(streams, effectiveFilters),
+    enabled: open && streams.length > 0 && streamStats.playableCount > 0,
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: 1000 * 60 * 5,
+    placeholderData: (previousStreams) => previousStreams,
+  });
+  const sortedStreams = filteredStreamQuery.data ?? [];
 
   const isLoading =
     isLoadingAddonConfigs ||
@@ -898,18 +937,6 @@ export function useStreamSelectorController({
     },
     [handleRequestClose],
   );
-
-  const debridStreams = useMemo(
-    () => streams.filter((stream) => stream.presentation.isInstantlyPlayable),
-    [streams],
-  );
-
-  const sortedStreams = useMemo(() => {
-    if (!debridStreams.length) return [];
-    return filterAndSortStreams(debridStreams, effectiveFilters);
-  }, [debridStreams, effectiveFilters]);
-
-  const streamStats = useMemo(() => buildStreamStats(debridStreams), [debridStreams]);
   const showBatchFilter = isSeriesLike && season !== undefined && episode !== undefined;
   const hasSelectedFilter = hasActiveFilter || effectiveAddonFilter !== defaultFilters.addon;
 
@@ -919,7 +946,6 @@ export function useStreamSelectorController({
     addonHealthMetrics,
     batchFilter,
     compactOverview,
-    debridStreams,
     defaultFilters,
     downloadData,
     downloadModalOpen,

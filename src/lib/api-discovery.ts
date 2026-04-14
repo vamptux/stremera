@@ -1,21 +1,22 @@
-import {
-  buildMediaDetailsCacheKey,
-  getTimedCache,
-  normalizeGenreFilters,
-  normalizeSearchQuery,
-  runCachedRequest,
-  setTimedCache,
-  type RequestCache,
-} from '@/lib/api-cache';
 import type {
   AnimeSupplementalMetadata,
   MediaDetails,
   MediaEpisodesPage,
   MediaItem,
+  MediaSchedule,
   NextPlaybackPlan,
   SearchCatalogPage,
   SearchCatalogQuery,
 } from '@/lib/api';
+import {
+  buildMediaDetailsCacheKey,
+  getTimedCache,
+  normalizeGenreFilters,
+  normalizeSearchQuery,
+  type RequestCache,
+  runCachedRequest,
+  setTimedCache,
+} from '@/lib/api-cache';
 import type { SearchHistoryEntry, SearchHistoryEntryInput } from '@/lib/search-history';
 
 type InvokeApi = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
@@ -23,6 +24,7 @@ type InvokeApi = <T>(command: string, args?: Record<string, unknown>) => Promise
 interface DiscoveryApiContext {
   safeInvoke: InvokeApi;
   mediaDetailsCache: RequestCache<MediaDetails>;
+  mediaScheduleCache: RequestCache<MediaSchedule>;
   searchCatalogCache: RequestCache<SearchCatalogPage>;
   searchResultsCache: RequestCache<MediaItem[]>;
 }
@@ -30,6 +32,7 @@ interface DiscoveryApiContext {
 export function createDiscoveryApi({
   safeInvoke,
   mediaDetailsCache,
+  mediaScheduleCache,
   searchCatalogCache,
   searchResultsCache,
 }: DiscoveryApiContext) {
@@ -142,18 +145,60 @@ export function createDiscoveryApi({
     );
   };
 
-  const searchKitsu = (query: string) => {
-    const normalizedQuery = normalizeSearchQuery(query);
-    if (!normalizedQuery) return Promise.resolve([]);
+  const getMediaSchedules = async (items: Array<{ mediaType: string; id: string }>) => {
+    const normalizedItems: Array<{ cacheKey: string; id: string; mediaType: string }> = [];
+    const seenCacheKeys = new Set<string>();
 
-    const cacheKey = `kitsu|${normalizedQuery.toLowerCase()}`;
-    return runCachedRequest(searchResultsCache, cacheKey, () =>
-      querySearchCatalogPage({
-        query: normalizedQuery,
-        mediaType: 'anime',
-        provider: 'kitsu',
-      }).then((page) => page.items),
-    );
+    for (const item of items) {
+      const normalizedType = item.mediaType.trim();
+      const normalizedId = item.id.trim();
+
+      if (!normalizedType || !normalizedId) {
+        continue;
+      }
+
+      const cacheKey = buildMediaDetailsCacheKey(normalizedType, normalizedId);
+      if (seenCacheKeys.has(cacheKey)) {
+        continue;
+      }
+
+      seenCacheKeys.add(cacheKey);
+      normalizedItems.push({ cacheKey, id: normalizedId, mediaType: normalizedType });
+    }
+
+    if (normalizedItems.length === 0) {
+      return [];
+    }
+
+    const schedulesByCacheKey = new Map<string, MediaSchedule>();
+    const missingItems: Array<{ cacheKey: string; id: string; mediaType: string }> = [];
+
+    for (const item of normalizedItems) {
+      const cachedSchedule = getTimedCache(mediaScheduleCache.values, item.cacheKey);
+      if (cachedSchedule) {
+        schedulesByCacheKey.set(item.cacheKey, cachedSchedule);
+        continue;
+      }
+
+      missingItems.push(item);
+    }
+
+    if (missingItems.length > 0) {
+      const fetchedSchedules = await safeInvoke<MediaSchedule[]>('get_media_schedules', {
+        items: missingItems.map(({ id, mediaType }) => ({ id, mediaType })),
+      });
+
+      for (const schedule of fetchedSchedules) {
+        const cacheKey = buildMediaDetailsCacheKey(schedule.type, schedule.id);
+        setTimedCache(mediaScheduleCache.values, cacheKey, schedule, mediaScheduleCache.ttlMs);
+        schedulesByCacheKey.set(cacheKey, schedule);
+      }
+    }
+
+    return normalizedItems.flatMap((item) => {
+      const schedule = schedulesByCacheKey.get(item.cacheKey);
+      return schedule ? [schedule] : [];
+    });
   };
 
   return {
@@ -161,8 +206,7 @@ export function createDiscoveryApi({
       safeInvoke<MediaItem[]>('get_trending_movies', { genre }),
     getTrendingSeries: (genre?: string) =>
       safeInvoke<MediaItem[]>('get_trending_series', { genre }),
-    getTrendingAnime: (genre?: string) =>
-      safeInvoke<MediaItem[]>('get_trending_anime', { genre }),
+    getTrendingAnime: (genre?: string) => safeInvoke<MediaItem[]>('get_trending_anime', { genre }),
     getSearchHistory: () => safeInvoke<SearchHistoryEntry[]>('get_search_history'),
     importSearchHistoryEntries: (entries: SearchHistoryEntry[]) =>
       safeInvoke<SearchHistoryEntry[]>('import_search_history_entries', { entries }),
@@ -174,12 +218,14 @@ export function createDiscoveryApi({
     querySearchCatalogPage,
     searchMedia,
     getMediaDetails,
+    getMediaSchedules,
     getMediaEpisodes: (
       type: string,
       id: string,
       season?: number,
       page?: number,
       pageSize?: number,
+      query?: string,
     ) =>
       safeInvoke<MediaEpisodesPage>('get_media_episodes', {
         mediaType: type,
@@ -187,6 +233,7 @@ export function createDiscoveryApi({
         season,
         page,
         page_size: pageSize,
+        query,
       }),
     getKitsuAnimeMetadata: (id: string) =>
       safeInvoke<AnimeSupplementalMetadata>('get_kitsu_anime_metadata', {
@@ -206,6 +253,5 @@ export function createDiscoveryApi({
         current_episode: currentEpisode,
         current_stream_lookup_id: currentStreamLookupId,
       }),
-    searchKitsu,
   };
 }

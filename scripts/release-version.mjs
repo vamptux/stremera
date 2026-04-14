@@ -55,7 +55,7 @@ function readVersions() {
 function validateVersion(nextVersion) {
   if (!versionPattern.test(nextVersion)) {
     fail(
-      `Invalid version \"${nextVersion}\". Use semantic versions like 0.4.0, 0.4.0-beta.1, or 1.0.0-rc.1.`,
+      `Invalid version "${nextVersion}". Use semantic versions like 0.4.0, 0.4.0-beta.1, or 1.0.0-rc.1.`,
     );
   }
 }

@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
-import { MediaCard } from './media-card';
-import { HorizontalMediaRail } from './horizontal-media-rail';
-import { type MediaItem } from '@/lib/api';
+import type { MediaItem } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { HorizontalMediaRail } from './horizontal-media-rail';
+import { MediaCard } from './media-card';
 
 interface GenreFilterConfig {
   options: readonly string[];
@@ -19,8 +19,19 @@ interface MediaRowProps {
   genreFilter?: GenreFilterConfig;
 }
 
-export function MediaRow({ title, queryKey, queryFn, className, style, genreFilter }: MediaRowProps) {
-  const { data = [], isLoading, error } = useQuery({
+export function MediaRow({
+  title,
+  queryKey,
+  queryFn,
+  className,
+  style,
+  genreFilter,
+}: MediaRowProps) {
+  const {
+    data = [],
+    isLoading,
+    error,
+  } = useQuery({
     queryKey,
     queryFn,
     staleTime: 1000 * 60 * 10,

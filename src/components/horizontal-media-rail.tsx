@@ -1,17 +1,18 @@
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import {
   type CSSProperties,
   type Key,
   type ReactNode,
   useCallback,
   useEffect,
+  useEffectEvent,
+  useMemo,
   useRef,
   useState,
 } from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
-
-import { MediaCardSkeleton } from './media-card';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { MediaCardSkeleton } from './media-card';
 
 export const HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS =
   'px-6 pl-[72px] md:px-12 md:pl-24 lg:px-14 lg:pl-28';
@@ -72,6 +73,10 @@ export function HorizontalMediaRail<T>({
 }: HorizontalMediaRailProps<T>) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [scrollState, setScrollState] = useState(INITIAL_RAIL_SCROLL_STATE);
+  const skeletonKeys = useMemo(
+    () => Array.from({ length: skeletonCount }, (_, index) => `rail-skeleton-${index + 1}`),
+    [skeletonCount],
+  );
 
   const syncScrollState = useCallback(() => {
     const scrollContainer = scrollContainerRef.current;
@@ -144,7 +149,23 @@ export function HorizontalMediaRail<T>({
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [isLoading, items, syncScrollState]);
+  }, [syncScrollState]);
+
+  const syncScrollStateAfterContentChange = useEffectEvent(
+    (_isLoading: boolean, _itemCount: number) => {
+      syncScrollState();
+    },
+  );
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      syncScrollStateAfterContentChange(isLoading, items.length);
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [isLoading, items.length]);
 
   const scroll = (direction: 'left' | 'right') => {
     if (!scrollContainerRef.current) {
@@ -202,8 +223,8 @@ export function HorizontalMediaRail<T>({
           style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
         >
           {isLoading
-            ? Array.from({ length: skeletonCount }).map((_, index) => (
-                <div key={`skeleton-${index}`} className={itemClassName}>
+            ? skeletonKeys.map((skeletonKey, index) => (
+                <div key={skeletonKey} className={itemClassName}>
                   {renderSkeleton?.(index) ?? <MediaCardSkeleton />}
                 </div>
               ))

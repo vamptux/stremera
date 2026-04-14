@@ -1,12 +1,12 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import { useEffect, useMemo, useRef, type MutableRefObject } from 'react';
+import { type MutableRefObject, useEffect, useMemo, useRef } from 'react';
 
 import { api, type MediaItem, type SearchCatalogPage } from '@/lib/api';
-import {
-  type SearchDiscoverFeed,
-  type SearchMediaType,
-  type SearchProviderId,
-  type SearchSortOption,
+import type {
+  SearchDiscoverFeed,
+  SearchMediaType,
+  SearchProviderId,
+  SearchSortOption,
 } from '@/lib/search-page-state';
 
 export type {

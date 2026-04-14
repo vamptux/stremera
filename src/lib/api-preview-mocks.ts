@@ -3,6 +3,7 @@ import {
   canonicalizeSearchHistoryEntries,
   type SearchHistoryEntry,
 } from '@/lib/search-history';
+import { type FilterState, filterAndSortStreams } from '@/lib/stream-selector-utils';
 
 type PreviewInvokeArgs = Record<string, unknown> | undefined;
 
@@ -33,9 +34,19 @@ const EMPTY_MEDIA_EPISODES_PAGE = {
   seasons: [],
   total: 0,
   totalInSeason: 0,
+  filteredTotal: 0,
+  resolvedSeason: undefined,
   page: 1,
   pageSize: 50,
   hasMore: false,
+};
+
+const EMPTY_MEDIA_SCHEDULE = {
+  id: 'mock-id',
+  title: 'Browser Preview',
+  type: 'series',
+  releaseDate: undefined,
+  episodes: [],
 };
 
 const EMPTY_ANIME_METADATA = {
@@ -52,6 +63,18 @@ const EMPTY_SEARCH_CATALOG_PAGE = {
 
 const EMPTY_STREAM_SELECTOR_DATA = {
   streams: [],
+  stats: {
+    resCounts: {
+      '4k': 0,
+      '1080p': 0,
+      '720p': 0,
+      sd: 0,
+    },
+    playableCount: 0,
+    cachedCount: 0,
+    batchCount: 0,
+    episodeLikeCount: 0,
+  },
   sourceSummaries: [],
   fatalErrorMessage: null,
 };
@@ -121,12 +144,14 @@ export async function handlePreviewInvoke<T>(
     case 'get_app_ui_preferences':
       return previewAppUiPreferences as T;
     case 'save_app_ui_preferences': {
-      const patch =
-        typeof args?.patch === 'object' && args.patch !== null ? args.patch : {};
+      const patch = typeof args?.patch === 'object' && args.patch !== null ? args.patch : {};
       previewAppUiPreferences = {
         playerVolume:
           typeof (patch as { playerVolume?: unknown }).playerVolume === 'number'
-            ? Math.max(0, Math.min(100, Math.round((patch as { playerVolume: number }).playerVolume)))
+            ? Math.max(
+                0,
+                Math.min(100, Math.round((patch as { playerVolume: number }).playerVolume)),
+              )
             : previewAppUiPreferences.playerVolume,
         playerSpeed:
           typeof (patch as { playerSpeed?: unknown }).playerSpeed === 'number' &&
@@ -204,11 +229,13 @@ export async function handlePreviewInvoke<T>(
       previewStreamSelectorPreferences = {
         quality:
           typeof (preferences as { quality?: unknown }).quality === 'string'
-            ? ((preferences as { quality: string }).quality as typeof previewStreamSelectorPreferences.quality)
+            ? ((preferences as { quality: string })
+                .quality as typeof previewStreamSelectorPreferences.quality)
             : previewStreamSelectorPreferences.quality,
         source:
           typeof (preferences as { source?: unknown }).source === 'string'
-            ? ((preferences as { source: string }).source as typeof previewStreamSelectorPreferences.source)
+            ? ((preferences as { source: string })
+                .source as typeof previewStreamSelectorPreferences.source)
             : previewStreamSelectorPreferences.source,
         addon:
           typeof (preferences as { addon?: unknown }).addon === 'string' &&
@@ -217,11 +244,13 @@ export async function handlePreviewInvoke<T>(
             : 'all',
         sort:
           typeof (preferences as { sort?: unknown }).sort === 'string'
-            ? ((preferences as { sort: string }).sort as typeof previewStreamSelectorPreferences.sort)
+            ? ((preferences as { sort: string })
+                .sort as typeof previewStreamSelectorPreferences.sort)
             : previewStreamSelectorPreferences.sort,
         batch:
           typeof (preferences as { batch?: unknown }).batch === 'string'
-            ? ((preferences as { batch: string }).batch as typeof previewStreamSelectorPreferences.batch)
+            ? ((preferences as { batch: string })
+                .batch as typeof previewStreamSelectorPreferences.batch)
             : previewStreamSelectorPreferences.batch,
       };
       return previewStreamSelectorPreferences as T;
@@ -241,6 +270,15 @@ export async function handlePreviewInvoke<T>(
       return [] as T;
     case 'get_stream_selector_data':
       return EMPTY_STREAM_SELECTOR_DATA as T;
+    case 'filter_stream_selector_streams': {
+      const streams = Array.isArray(args?.streams) ? args.streams : [];
+      const filters =
+        typeof args?.filters === 'object' && args.filters !== null
+          ? (args.filters as FilterState)
+          : (previewStreamSelectorPreferences as FilterState);
+
+      return filterAndSortStreams(streams as never[], filters) as T;
+    }
     case 'get_media_details':
       return {
         id: readStringArg(args, 'id', 'mock-id'),
@@ -251,20 +289,41 @@ export async function handlePreviewInvoke<T>(
         releaseDate: '2026-01-01',
         episodes: [],
       } as T;
+    case 'get_media_schedules': {
+      const items = Array.isArray(args?.items) ? args.items : [];
+
+      return items.map((item, index) => {
+        const scheduleRequest =
+          typeof item === 'object' && item !== null ? (item as Record<string, unknown>) : {};
+        const mediaType =
+          typeof scheduleRequest.mediaType === 'string' && scheduleRequest.mediaType.trim()
+            ? scheduleRequest.mediaType.trim()
+            : EMPTY_MEDIA_SCHEDULE.type;
+        const id =
+          typeof scheduleRequest.id === 'string' && scheduleRequest.id.trim()
+            ? scheduleRequest.id.trim()
+            : `${EMPTY_MEDIA_SCHEDULE.id}-${index + 1}`;
+
+        return {
+          ...EMPTY_MEDIA_SCHEDULE,
+          id,
+          title: `Browser Preview ${index + 1}`,
+          type: mediaType,
+        };
+      }) as T;
+    }
     case 'get_media_episodes':
       return {
         ...EMPTY_MEDIA_EPISODES_PAGE,
+        resolvedSeason:
+          typeof args?.season === 'number' && Number.isFinite(args.season) ? args.season : 1,
         page: typeof args?.page === 'number' ? args.page : EMPTY_MEDIA_EPISODES_PAGE.page,
         pageSize:
-          typeof args?.page_size === 'number'
-            ? args.page_size
-            : EMPTY_MEDIA_EPISODES_PAGE.pageSize,
+          typeof args?.page_size === 'number' ? args.page_size : EMPTY_MEDIA_EPISODES_PAGE.pageSize,
       } as T;
     case 'get_playback_language_preferences':
     case 'get_effective_playback_language_preferences':
       return {} as T;
-    case 'infer_track_language_preference':
-      return null as T;
     case 'resolve_preferred_track_selection':
       return {
         normalizedPreferredLanguage: undefined,
@@ -281,26 +340,34 @@ export async function handlePreviewInvoke<T>(
     case 'recover_playback_stream':
       return null as T;
     case 'build_history_playback_plan': {
-      const item = typeof args?.item === 'object' && args?.item !== null
-        ? (args.item as Record<string, unknown>)
-        : null;
+      const item =
+        typeof args?.item === 'object' && args?.item !== null
+          ? (args.item as Record<string, unknown>)
+          : null;
       const mediaId = typeof item?.id === 'string' && item.id.trim() ? item.id : 'mock-id';
       const itemType = typeof item?.type_ === 'string' ? item.type_.trim().toLowerCase() : 'movie';
-      const mediaType = mediaId.startsWith('kitsu:') ? 'anime' : itemType === 'movie' ? 'movie' : 'series';
-      const absoluteSeason = typeof item?.absolute_season === 'number'
-        ? item.absolute_season
-        : typeof item?.season === 'number'
-          ? item.season
-          : undefined;
-      const absoluteEpisode = typeof item?.absolute_episode === 'number'
-        ? item.absolute_episode
-        : typeof item?.episode === 'number'
-          ? item.episode
-          : undefined;
+      const mediaType = mediaId.startsWith('kitsu:')
+        ? 'anime'
+        : itemType === 'movie'
+          ? 'movie'
+          : 'series';
+      const absoluteSeason =
+        typeof item?.absolute_season === 'number'
+          ? item.absolute_season
+          : typeof item?.season === 'number'
+            ? item.season
+            : undefined;
+      const absoluteEpisode =
+        typeof item?.absolute_episode === 'number'
+          ? item.absolute_episode
+          : typeof item?.episode === 'number'
+            ? item.episode
+            : undefined;
       const from = readStringArg(args, 'from', '/');
-      const savedStreamUrl = typeof item?.last_stream_url === 'string' && item.last_stream_url.trim()
-        ? item.last_stream_url
-        : undefined;
+      const savedStreamUrl =
+        typeof item?.last_stream_url === 'string' && item.last_stream_url.trim()
+          ? item.last_stream_url
+          : undefined;
 
       if (savedStreamUrl) {
         const target =
@@ -317,11 +384,10 @@ export async function handlePreviewInvoke<T>(
             title: typeof item?.title === 'string' ? item.title : undefined,
             poster: typeof item?.poster === 'string' ? item.poster : undefined,
             backdrop: typeof item?.backdrop === 'string' ? item.backdrop : undefined,
-            format: typeof item?.last_stream_format === 'string' ? item.last_stream_format : undefined,
-            streamSourceName:
-              typeof item?.source_name === 'string' ? item.source_name : undefined,
-            streamFamily:
-              typeof item?.stream_family === 'string' ? item.stream_family : undefined,
+            format:
+              typeof item?.last_stream_format === 'string' ? item.last_stream_format : undefined,
+            streamSourceName: typeof item?.source_name === 'string' ? item.source_name : undefined,
+            streamFamily: typeof item?.stream_family === 'string' ? item.stream_family : undefined,
             selectedStreamKey:
               typeof item?.last_stream_key === 'string' ? item.last_stream_key : undefined,
             startTime:
@@ -358,7 +424,9 @@ export async function handlePreviewInvoke<T>(
       return [] as T;
     case 'get_data_stats':
       return EMPTY_DATA_STATS as T;
-    case 'save_playback_language_preference_outcome':
+    case 'save_selected_playback_language_preference':
+      return {} as T;
+    case 'save_playback_language_preference_outcome_from_tracks':
       return undefined as T;
     case 'pause_active_downloads':
     case 'clear_completed_downloads':

@@ -34,6 +34,8 @@ pub struct KitsuEpisodePage {
     pub season_years: HashMap<u32, String>,
     pub total: usize,
     pub total_in_season: usize,
+    pub filtered_total: usize,
+    pub resolved_season: Option<u32>,
     pub page: u32,
     pub page_size: u32,
     pub has_more: bool,
@@ -561,13 +563,31 @@ impl Kitsu {
     }
 
     fn default_episode_page_season(seasons: &[u32], requested_season: Option<u32>) -> Option<u32> {
-        requested_season.or_else(|| {
-            seasons
-                .iter()
-                .copied()
-                .find(|season_number| *season_number == 1)
-                .or_else(|| seasons.first().copied())
-        })
+        requested_season
+            .filter(|requested| seasons.contains(requested))
+            .or_else(|| {
+                seasons
+                    .iter()
+                    .copied()
+                    .find(|season_number| *season_number == 1)
+                    .or_else(|| seasons.first().copied())
+            })
+    }
+
+    fn episode_matches_query(episode: &Episode, normalized_query: &str) -> bool {
+        if normalized_query.is_empty() {
+            return true;
+        }
+
+        episode.episode.to_string().contains(normalized_query)
+            || episode
+                .title
+                .as_deref()
+                .is_some_and(|title| title.to_lowercase().contains(normalized_query))
+            || episode
+                .overview
+                .as_deref()
+                .is_some_and(|overview| overview.to_lowercase().contains(normalized_query))
     }
 
     fn build_episode_page(
@@ -575,6 +595,7 @@ impl Kitsu {
         season: Option<u32>,
         page: u32,
         page_size: u32,
+        query: Option<&str>,
     ) -> KitsuEpisodePage {
         let mut seasons = episodes_all
             .iter()
@@ -598,10 +619,19 @@ impl Kitsu {
         filtered.sort_by_key(|ep| ep.episode);
 
         let total_in_season = filtered.len();
+        let normalized_query = query
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .map(str::to_lowercase);
+        if let Some(normalized_query) = normalized_query.as_deref() {
+            filtered.retain(|episode| Self::episode_matches_query(episode, normalized_query));
+        }
+
+        let filtered_total = filtered.len();
         let safe_page_size = page_size.clamp(1, 200) as usize;
         let start = (page as usize).saturating_mul(safe_page_size);
-        let end = (start + safe_page_size).min(total_in_season);
-        let episodes = if start < total_in_season {
+        let end = (start + safe_page_size).min(filtered_total);
+        let episodes = if start < filtered_total {
             filtered[start..end].to_vec()
         } else {
             Vec::new()
@@ -613,9 +643,11 @@ impl Kitsu {
             season_years,
             total,
             total_in_season,
+            filtered_total,
+            resolved_season,
             page,
             page_size: safe_page_size as u32,
-            has_more: end < total_in_season,
+            has_more: end < filtered_total,
         }
     }
 
@@ -640,6 +672,7 @@ impl Kitsu {
         season: Option<u32>,
         page: u32,
         page_size: u32,
+        query: Option<&str>,
     ) -> Result<KitsuEpisodePage, String> {
         let meta = self.fetch_meta_detail(id).await?;
         let episodes_all = Self::map_videos_to_episodes(meta.videos.unwrap_or_default());
@@ -649,6 +682,7 @@ impl Kitsu {
             season,
             page,
             page_size,
+            query,
         ))
     }
 
@@ -989,11 +1023,14 @@ mod tests {
             None,
             0,
             50,
+            None,
         );
 
         assert_eq!(page.seasons, vec![1, 2]);
         assert_eq!(page.total, 2);
         assert_eq!(page.total_in_season, 1);
+        assert_eq!(page.filtered_total, 1);
+        assert_eq!(page.resolved_season, Some(1));
         assert_eq!(page.episodes.len(), 1);
         assert_eq!(page.episodes[0].season, 1);
         assert_eq!(page.season_years.get(&1).map(String::as_str), Some("2024"));
@@ -1010,13 +1047,56 @@ mod tests {
             Some(2),
             0,
             50,
+            None,
         );
 
         assert_eq!(page.total, 3);
         assert_eq!(page.total_in_season, 2);
+        assert_eq!(page.filtered_total, 2);
+        assert_eq!(page.resolved_season, Some(2));
         assert_eq!(page.episodes.len(), 2);
         assert_eq!(page.episodes[0].episode, 1);
         assert_eq!(page.episodes[1].episode, 2);
+        assert!(!page.has_more);
+    }
+
+    #[test]
+    fn build_episode_page_falls_back_when_requested_season_is_missing() {
+        let page = Kitsu::build_episode_page(
+            vec![
+                episode("ep-2-1", 2, 1, Some("2025-02-01")),
+                episode("ep-1-1", 1, 1, Some("2024-01-01")),
+            ],
+            Some(9),
+            0,
+            50,
+            None,
+        );
+
+        assert_eq!(page.resolved_season, Some(1));
+        assert_eq!(page.total_in_season, 1);
+        assert_eq!(page.episodes[0].season, 1);
+    }
+
+    #[test]
+    fn build_episode_page_filters_by_query_before_pagination() {
+        let mut first = episode("ep-1-1", 1, 1, Some("2024-01-01"));
+        first.title = Some("Pilot".to_string());
+        let mut second = episode("ep-1-2", 1, 2, Some("2024-01-08"));
+        second.overview = Some("The hero meets a dragon".to_string());
+
+        let page = Kitsu::build_episode_page(
+            vec![first, second],
+            Some(1),
+            0,
+            4,
+            Some("dragon"),
+        );
+
+        assert_eq!(page.total_in_season, 2);
+        assert_eq!(page.filtered_total, 1);
+        assert_eq!(page.episodes.len(), 1);
+        assert_eq!(page.episodes[0].episode, 2);
         assert!(!page.has_more);
     }
 

@@ -10,12 +10,77 @@ use super::{
     playback_state::PlaybackStateService,
     PlaybackLanguagePreferences, SETTINGS_STORE_FILE,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{command, AppHandle, State};
 use tauri_plugin_store::StoreExt;
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaybackLanguagePreferenceKind {
+    Audio,
+    Sub,
+}
+
 pub(crate) fn sanitize_language_pref(value: Option<String>, allow_off: bool) -> Option<String> {
     normalize_backend_language_token(value.as_deref(), allow_off)
+}
+
+fn read_playback_language_preferences_from_store<R: tauri::Runtime>(
+    store: &tauri_plugin_store::Store<R>,
+) -> PlaybackLanguagePreferences {
+    PlaybackLanguagePreferences {
+        preferred_audio_language: sanitize_language_pref(
+            get_trimmed_store_string(store, "preferred_audio_language"),
+            false,
+        ),
+        preferred_subtitle_language: sanitize_language_pref(
+            get_trimmed_store_string(store, "preferred_subtitle_language"),
+            true,
+        ),
+    }
+}
+
+fn persist_playback_language_preferences<R: tauri::Runtime>(
+    store: &tauri_plugin_store::Store<R>,
+    preferences: &PlaybackLanguagePreferences,
+) -> Result<(), String> {
+    if let Some(value) = preferences.preferred_audio_language.as_ref() {
+        store.set("preferred_audio_language", json!(value));
+    } else {
+        store.delete("preferred_audio_language");
+    }
+
+    if let Some(value) = preferences.preferred_subtitle_language.as_ref() {
+        store.set("preferred_subtitle_language", json!(value));
+    } else {
+        store.delete("preferred_subtitle_language");
+    }
+
+    store.save().map_err(|e| e.to_string())
+}
+
+fn infer_track_preferred_language_candidate(track: Option<&TrackLanguageCandidate>) -> Option<String> {
+    track.and_then(|candidate| {
+        infer_track_preferred_language(candidate.lang.as_deref(), candidate.title.as_deref())
+    })
+}
+
+fn infer_selected_playback_language_preference(
+    preference_kind: PlaybackLanguagePreferenceKind,
+    track: Option<&TrackLanguageCandidate>,
+    subtitles_off: bool,
+) -> Option<String> {
+    match preference_kind {
+        PlaybackLanguagePreferenceKind::Audio => infer_track_preferred_language_candidate(track),
+        PlaybackLanguagePreferenceKind::Sub => {
+            if subtitles_off {
+                Some("off".to_string())
+            } else {
+                infer_track_preferred_language_candidate(track)
+            }
+        }
+    }
 }
 
 #[command]
@@ -25,26 +90,13 @@ pub async fn save_playback_language_preferences(
     preferred_subtitle_language: Option<String>,
 ) -> Result<PlaybackLanguagePreferences, String> {
     let store = app.store(SETTINGS_STORE_FILE).map_err(|e| e.to_string())?;
-    let audio = sanitize_language_pref(preferred_audio_language, false);
-    let subtitle = sanitize_language_pref(preferred_subtitle_language, true);
+    let preferences = PlaybackLanguagePreferences {
+        preferred_audio_language: sanitize_language_pref(preferred_audio_language, false),
+        preferred_subtitle_language: sanitize_language_pref(preferred_subtitle_language, true),
+    };
 
-    if let Some(value) = audio.as_ref() {
-        store.set("preferred_audio_language", json!(value));
-    } else {
-        store.delete("preferred_audio_language");
-    }
-
-    if let Some(value) = subtitle.as_ref() {
-        store.set("preferred_subtitle_language", json!(value));
-    } else {
-        store.delete("preferred_subtitle_language");
-    }
-
-    store.save().map_err(|e| e.to_string())?;
-    Ok(PlaybackLanguagePreferences {
-        preferred_audio_language: audio,
-        preferred_subtitle_language: subtitle,
-    })
+    persist_playback_language_preferences(&store, &preferences)?;
+    Ok(preferences)
 }
 
 #[command]
@@ -52,19 +104,7 @@ pub async fn get_playback_language_preferences(
     app: AppHandle,
 ) -> Result<PlaybackLanguagePreferences, String> {
     let store = app.store(SETTINGS_STORE_FILE).map_err(|e| e.to_string())?;
-    let preferred_audio_language = sanitize_language_pref(
-        get_trimmed_store_string(&store, "preferred_audio_language"),
-        false,
-    );
-    let preferred_subtitle_language = sanitize_language_pref(
-        get_trimmed_store_string(&store, "preferred_subtitle_language"),
-        true,
-    );
-
-    Ok(PlaybackLanguagePreferences {
-        preferred_audio_language,
-        preferred_subtitle_language,
-    })
+    Ok(read_playback_language_preferences_from_store(&store))
 }
 
 #[command]
@@ -75,6 +115,15 @@ pub async fn get_effective_playback_language_preferences(
     media_type: Option<String>,
 ) -> Result<PlaybackLanguagePreferences, String> {
     let defaults = get_playback_language_preferences(app.clone()).await?;
+    let media_id = media_id.as_deref().and_then(normalize_non_empty);
+    let media_type = match media_type.as_deref() {
+        Some(value) => Some(
+            normalize_stream_media_type(value, media_id.as_deref()).ok_or_else(|| {
+                "Invalid media type for playback language preferences.".to_string()
+            })?,
+        ),
+        None => None,
+    };
 
     playback_state.get_effective_playback_language_preferences(
         &app,
@@ -82,16 +131,6 @@ pub async fn get_effective_playback_language_preferences(
         media_type.as_deref(),
         defaults,
     )
-}
-
-#[command]
-pub async fn infer_track_language_preference(
-    track: TrackLanguageCandidate,
-) -> Result<Option<String>, String> {
-    Ok(infer_track_preferred_language(
-        track.lang.as_deref(),
-        track.title.as_deref(),
-    ))
 }
 
 #[command]
@@ -108,32 +147,79 @@ pub async fn resolve_preferred_track_selection(
 }
 
 #[command]
-pub async fn save_playback_language_preference_outcome(
+pub async fn save_selected_playback_language_preference(
+    app: AppHandle,
+    preference_kind: PlaybackLanguagePreferenceKind,
+    track: Option<TrackLanguageCandidate>,
+    subtitles_off: Option<bool>,
+) -> Result<PlaybackLanguagePreferences, String> {
+    let store = app.store(SETTINGS_STORE_FILE).map_err(|e| e.to_string())?;
+    let mut preferences = read_playback_language_preferences_from_store(&store);
+
+    let Some(selected_language) = infer_selected_playback_language_preference(
+        preference_kind,
+        track.as_ref(),
+        subtitles_off.unwrap_or(false),
+    ) else {
+        return Ok(preferences);
+    };
+
+    match preference_kind {
+        PlaybackLanguagePreferenceKind::Audio => {
+            preferences.preferred_audio_language = Some(selected_language);
+        }
+        PlaybackLanguagePreferenceKind::Sub => {
+            preferences.preferred_subtitle_language = Some(selected_language);
+        }
+    }
+
+    persist_playback_language_preferences(&store, &preferences)?;
+    Ok(preferences)
+}
+
+#[command]
+pub async fn save_playback_language_preference_outcome_from_tracks(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
     media_id: String,
     media_type: String,
-    preferred_audio_language: Option<String>,
-    preferred_subtitle_language: Option<String>,
+    audio_track: Option<TrackLanguageCandidate>,
+    subtitle_track: Option<TrackLanguageCandidate>,
+    subtitles_off: Option<bool>,
 ) -> Result<(), String> {
     let media_id = normalize_non_empty(&media_id)
         .ok_or_else(|| "Media ID is required for playback preference outcomes.".to_string())?;
-    let media_type = normalize_stream_media_type(&media_type)
+    let media_type = normalize_stream_media_type(&media_type, Some(&media_id))
         .ok_or_else(|| "Invalid media type for playback preference outcomes.".to_string())?;
+
+    let preferred_audio_language = infer_track_preferred_language_candidate(audio_track.as_ref());
+    let preferred_subtitle_language = infer_selected_playback_language_preference(
+        PlaybackLanguagePreferenceKind::Sub,
+        subtitle_track.as_ref(),
+        subtitles_off.unwrap_or(false),
+    );
+
+    if preferred_audio_language.is_none() && preferred_subtitle_language.is_none() {
+        return Ok(());
+    }
 
     playback_state.record_playback_language_preference_outcome(
         &app,
         &media_id,
         &media_type,
-        sanitize_language_pref(preferred_audio_language, false),
-        sanitize_language_pref(preferred_subtitle_language, true),
+        preferred_audio_language,
+        preferred_subtitle_language,
         now_unix_millis(),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_language_pref;
+    use super::{
+        infer_selected_playback_language_preference, sanitize_language_pref,
+        PlaybackLanguagePreferenceKind,
+    };
+    use crate::commands::language::TrackLanguageCandidate;
 
     #[test]
     fn sanitize_language_pref_canonicalizes_known_aliases() {
@@ -166,6 +252,41 @@ mod tests {
         assert_eq!(
             sanitize_language_pref(Some("commentary".to_string()), true),
             None
+        );
+    }
+
+    #[test]
+    fn infer_selected_playback_language_preference_keeps_subtitles_off() {
+        assert_eq!(
+            infer_selected_playback_language_preference(
+                PlaybackLanguagePreferenceKind::Sub,
+                None,
+                true,
+            )
+            .as_deref(),
+            Some("off")
+        );
+    }
+
+    #[test]
+    fn infer_selected_playback_language_preference_reads_track_metadata() {
+        let track = TrackLanguageCandidate {
+            id: 1,
+            lang: Some("eng".to_string()),
+            title: Some("English Commentary".to_string()),
+            default_track: false,
+            forced: false,
+            hearing_impaired: false,
+        };
+
+        assert_eq!(
+            infer_selected_playback_language_preference(
+                PlaybackLanguagePreferenceKind::Audio,
+                Some(&track),
+                false,
+            )
+            .as_deref(),
+            Some("en")
         );
     }
 }

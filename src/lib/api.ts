@@ -1,17 +1,19 @@
-import type { PlaybackStreamOutcomeReport } from '@/lib/playback-stream-health';
-import { safeInvoke } from '@/lib/api-core';
 import {
   BEST_STREAM_CACHE_TTL_MS,
+  createRequestCache,
   MEDIA_DETAILS_CACHE_TTL_MS,
+  MEDIA_SCHEDULE_CACHE_TTL_MS,
   RESOLVE_STREAM_CACHE_TTL_MS,
   SEARCH_CACHE_TTL_MS,
   STREAMS_CACHE_TTL_MS,
-  createRequestCache,
 } from '@/lib/api-cache';
-import type { StreamRankingOptions } from '@/lib/stream-ranking';
+import { safeInvoke } from '@/lib/api-core';
 import { createDiscoveryApi } from '@/lib/api-discovery';
 import { createPlaybackApi } from '@/lib/api-playback';
 import { createStoreApi } from '@/lib/api-store';
+import type { PlaybackStreamOutcomeReport } from '@/lib/playback-stream-health';
+import type { StreamRankingOptions } from '@/lib/stream-ranking';
+
 export { getErrorMessage } from '@/lib/api-core';
 
 export interface MediaItem {
@@ -80,9 +82,29 @@ export interface MediaEpisodesPage {
   seasonYears?: Record<string, string>;
   total: number;
   totalInSeason: number;
+  filteredTotal: number;
+  resolvedSeason?: number;
   page: number;
   pageSize: number;
   hasMore: boolean;
+}
+
+export interface MediaScheduleEpisode {
+  id: string;
+  title?: string;
+  season: number;
+  episode: number;
+  releaseDate: string;
+  thumbnail?: string;
+}
+
+export interface MediaSchedule {
+  id: string;
+  title: string;
+  poster?: string;
+  type: 'movie' | 'series' | 'anime';
+  releaseDate?: string;
+  episodes: MediaScheduleEpisode[];
 }
 
 export interface UserList {
@@ -169,8 +191,17 @@ export interface StreamSourceSummary {
   errorMessage?: string;
 }
 
+export interface StreamSelectorStats {
+  resCounts: Record<TorrentioStreamResolution, number>;
+  playableCount: number;
+  cachedCount: number;
+  batchCount: number;
+  episodeLikeCount: number;
+}
+
 export interface StreamSelectorData {
   streams: TorrentioStream[];
+  stats?: StreamSelectorStats;
   sourceSummaries: StreamSourceSummary[];
   fatalErrorMessage?: string | null;
 }
@@ -294,17 +325,13 @@ const apiCaches = {
   streams: createRequestCache<TorrentioStream[]>(STREAMS_CACHE_TTL_MS),
   streamSelector: createRequestCache<StreamSelectorData>(STREAMS_CACHE_TTL_MS),
   mediaDetails: createRequestCache<MediaDetails>(MEDIA_DETAILS_CACHE_TTL_MS),
+  mediaSchedule: createRequestCache<MediaSchedule>(MEDIA_SCHEDULE_CACHE_TTL_MS),
   searchCatalog: createRequestCache<SearchCatalogPage>(SEARCH_CACHE_TTL_MS),
   searchResults: createRequestCache<MediaItem[]>(SEARCH_CACHE_TTL_MS),
 };
 
-function normalizeStreamMediaType(type: string, id: string): string {
-  const normalizedType = type.trim().toLowerCase();
-  if (normalizedType === 'movie' || normalizedType === 'anime') return normalizedType;
-  if (normalizedType === 'series' && id.trim().toLowerCase().startsWith('kitsu:')) {
-    return 'anime';
-  }
-  return normalizedType;
+function normalizeStreamMediaType(type: string): string {
+  return type.trim().toLowerCase();
 }
 
 export interface PlaybackLanguagePreferences {
@@ -426,6 +453,7 @@ export const api = {
   ...createDiscoveryApi({
     safeInvoke,
     mediaDetailsCache: apiCaches.mediaDetails,
+    mediaScheduleCache: apiCaches.mediaSchedule,
     searchCatalogCache: apiCaches.searchCatalog,
     searchResultsCache: apiCaches.searchResults,
   }),

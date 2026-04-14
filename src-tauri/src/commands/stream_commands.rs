@@ -1,5 +1,9 @@
 use super::{
-    config_store::get_effective_playback_rd_token,
+    config_store::{
+        get_effective_playback_rd_token, sanitize_stream_selector_preferences,
+        StreamSelectorBatch, StreamSelectorPreferences, StreamSelectorQuality,
+        StreamSelectorSort, StreamSelectorSource,
+    },
     episode_navigation::PreparedPlaybackStream,
     history_helpers::{build_history_key, normalize_watch_progress_type},
     normalize_non_empty, normalize_stream_media_type, now_unix_millis,
@@ -20,12 +24,117 @@ use super::{
     BEST_STREAM_MAX_CANDIDATES, SETTINGS_STORE_FILE,
 };
 use crate::providers::{
-    addons::{AddonTransport, TorrentioStream},
+    addons::{
+        AddonTransport, BehaviorHints, StreamPresentation, StreamResolution, TorrentioStream,
+    },
     realdebrid::RealDebrid,
 };
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tauri::{command, AppHandle, State};
 use tauri_plugin_store::StoreExt;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StreamSelectorCommandStream {
+    name: Option<String>,
+    #[serde(alias = "description")]
+    title: Option<String>,
+    #[serde(rename = "infoHash", alias = "info_hash")]
+    info_hash: Option<String>,
+    url: Option<String>,
+    #[serde(rename = "fileIdx", alias = "file_idx")]
+    file_idx: Option<u32>,
+    #[serde(rename = "behaviorHints", alias = "behavior_hints")]
+    behavior_hints: Option<BehaviorHints>,
+    #[serde(default)]
+    cached: bool,
+    #[serde(default)]
+    seeders: Option<u32>,
+    #[serde(default)]
+    size_bytes: Option<u64>,
+    #[serde(default)]
+    source_name: Option<String>,
+    #[serde(default)]
+    stream_family: Option<String>,
+    #[serde(rename = "streamKey", default)]
+    stream_key: String,
+    #[serde(default)]
+    recommendation_reasons: Vec<String>,
+    #[serde(default)]
+    presentation: StreamPresentation,
+}
+
+fn stream_selector_resolution_rank(resolution: StreamResolution) -> u8 {
+    match resolution {
+        StreamResolution::P2160 => 4,
+        StreamResolution::P1080 => 3,
+        StreamResolution::P720 => 2,
+        StreamResolution::Sd => 1,
+    }
+}
+
+fn filter_stream_selector_streams_inner(
+    streams: Vec<StreamSelectorCommandStream>,
+    filters: &StreamSelectorPreferences,
+) -> Vec<StreamSelectorCommandStream> {
+    let mut filtered = streams
+        .into_iter()
+        .filter(|stream| stream.presentation.is_instantly_playable)
+        .filter(|stream| match filters.quality {
+            StreamSelectorQuality::All => true,
+            StreamSelectorQuality::P2160 => stream.presentation.resolution == StreamResolution::P2160,
+            StreamSelectorQuality::P1080 => stream.presentation.resolution == StreamResolution::P1080,
+            StreamSelectorQuality::P720 => stream.presentation.resolution == StreamResolution::P720,
+            StreamSelectorQuality::Sd => stream.presentation.resolution == StreamResolution::Sd,
+        })
+        .filter(|stream| match filters.source {
+            StreamSelectorSource::All => true,
+            StreamSelectorSource::Cached => stream.cached,
+        })
+        .filter(|stream| match filters.batch {
+            StreamSelectorBatch::All => true,
+            StreamSelectorBatch::Episodes => !stream.presentation.is_batch,
+            StreamSelectorBatch::Packs => stream.presentation.is_batch,
+        })
+        .filter(|stream| {
+            if filters.addon.eq_ignore_ascii_case("all") {
+                return true;
+            }
+
+            stream
+                .source_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("Unknown")
+                == filters.addon
+        })
+        .collect::<Vec<_>>();
+
+    match filters.sort {
+        StreamSelectorSort::Smart => {}
+        StreamSelectorSort::Quality => {
+            filtered.sort_by(|left, right| {
+                stream_selector_resolution_rank(right.presentation.resolution)
+                    .cmp(&stream_selector_resolution_rank(left.presentation.resolution))
+                    .then_with(|| right.size_bytes.unwrap_or(0).cmp(&left.size_bytes.unwrap_or(0)))
+            });
+        }
+        StreamSelectorSort::Size => {
+            filtered.sort_by(|left, right| {
+                right.size_bytes.unwrap_or(0).cmp(&left.size_bytes.unwrap_or(0))
+            });
+        }
+        StreamSelectorSort::Seeds => {
+            filtered.sort_by(|left, right| {
+                i64::from(right.seeders.unwrap_or(0))
+                    .cmp(&i64::from(left.seeders.unwrap_or(0)))
+            });
+        }
+    }
+
+    filtered
+}
 
 #[derive(Clone)]
 struct StreamResolveCandidateTask {
@@ -281,9 +390,9 @@ pub async fn get_streams(
     ranking_season: Option<u32>,
     ranking_episode: Option<u32>,
 ) -> Result<Vec<TorrentioStream>, String> {
-    let media_type = normalize_stream_media_type(&media_type)
-        .ok_or_else(|| "Invalid media type for stream lookup.".to_string())?;
     let id = normalize_non_empty(&id).ok_or_else(|| "Media ID is required.".to_string())?;
+    let media_type = normalize_stream_media_type(&media_type, Some(&id))
+        .ok_or_else(|| "Invalid media type for stream lookup.".to_string())?;
     let ranking = resolve_stream_ranking_scope(
         &media_type,
         &id,
@@ -331,9 +440,9 @@ pub async fn get_stream_selector_data(
     ranking_season: Option<u32>,
     ranking_episode: Option<u32>,
 ) -> Result<StreamSelectorData, String> {
-    let media_type = normalize_stream_media_type(&media_type)
-        .ok_or_else(|| "Invalid media type for stream lookup.".to_string())?;
     let id = normalize_non_empty(&id).ok_or_else(|| "Media ID is required.".to_string())?;
+    let media_type = normalize_stream_media_type(&media_type, Some(&id))
+        .ok_or_else(|| "Invalid media type for stream lookup.".to_string())?;
 
     let ranking = resolve_stream_ranking_scope(
         &media_type,
@@ -362,6 +471,15 @@ pub async fn get_stream_selector_data(
         &ranking,
     )
     .await
+}
+
+#[command]
+pub fn filter_stream_selector_streams(
+    streams: Vec<StreamSelectorCommandStream>,
+    filters: StreamSelectorPreferences,
+) -> Vec<StreamSelectorCommandStream> {
+    let filters = sanitize_stream_selector_preferences(filters);
+    filter_stream_selector_streams_inner(streams, &filters)
 }
 
 #[command]
@@ -404,6 +522,158 @@ pub async fn resolve_stream(
     .await
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{
+        filter_stream_selector_streams_inner, StreamSelectorCommandStream,
+    };
+    use crate::commands::config_store::{
+        StreamSelectorBatch, StreamSelectorPreferences, StreamSelectorQuality,
+        StreamSelectorSort, StreamSelectorSource,
+    };
+    use crate::providers::addons::{StreamPresentation, StreamResolution};
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_stream(
+        stream_key: &str,
+        source_name: &str,
+        resolution: StreamResolution,
+        size_bytes: Option<u64>,
+        seeders: Option<u32>,
+        cached: bool,
+        is_batch: bool,
+        is_instantly_playable: bool,
+    ) -> StreamSelectorCommandStream {
+        StreamSelectorCommandStream {
+            name: None,
+            title: None,
+            info_hash: None,
+            url: None,
+            file_idx: None,
+            behavior_hints: None,
+            cached,
+            seeders,
+            size_bytes,
+            source_name: Some(source_name.to_string()),
+            stream_family: None,
+            stream_key: stream_key.to_string(),
+            recommendation_reasons: Vec::new(),
+            presentation: StreamPresentation {
+                resolution,
+                is_batch,
+                is_instantly_playable,
+                ..StreamPresentation::default()
+            },
+        }
+    }
+
+    #[test]
+    fn filter_stream_selector_streams_keeps_smart_order_for_playable_matches() {
+        let streams = vec![
+            build_stream(
+                "first",
+                "Source A",
+                StreamResolution::P1080,
+                Some(2_000),
+                Some(10),
+                true,
+                false,
+                true,
+            ),
+            build_stream(
+                "second",
+                "Source B",
+                StreamResolution::P2160,
+                Some(4_000),
+                Some(20),
+                true,
+                false,
+                false,
+            ),
+            build_stream(
+                "third",
+                "Source C",
+                StreamResolution::P720,
+                Some(1_000),
+                Some(5),
+                false,
+                true,
+                true,
+            ),
+        ];
+
+        let filtered = filter_stream_selector_streams_inner(
+            streams,
+            &StreamSelectorPreferences {
+                quality: StreamSelectorQuality::All,
+                source: StreamSelectorSource::All,
+                addon: "all".to_string(),
+                sort: StreamSelectorSort::Smart,
+                batch: StreamSelectorBatch::All,
+            },
+        );
+
+        let stream_keys = filtered
+            .into_iter()
+            .map(|stream| stream.stream_key)
+            .collect::<Vec<_>>();
+        assert_eq!(stream_keys, vec!["first".to_string(), "third".to_string()]);
+    }
+
+    #[test]
+    fn filter_stream_selector_streams_applies_filters_and_quality_sort() {
+        let streams = vec![
+            build_stream(
+                "a-1080",
+                "Source A",
+                StreamResolution::P1080,
+                Some(2_000),
+                Some(10),
+                true,
+                false,
+                true,
+            ),
+            build_stream(
+                "a-4k",
+                "Source A",
+                StreamResolution::P2160,
+                Some(3_000),
+                Some(8),
+                true,
+                false,
+                true,
+            ),
+            build_stream(
+                "b-pack",
+                "Source B",
+                StreamResolution::P2160,
+                Some(9_000),
+                Some(3),
+                true,
+                true,
+                true,
+            ),
+        ];
+
+        let filtered = filter_stream_selector_streams_inner(
+            streams,
+            &StreamSelectorPreferences {
+                quality: StreamSelectorQuality::All,
+                source: StreamSelectorSource::Cached,
+                addon: "Source A".to_string(),
+                sort: StreamSelectorSort::Quality,
+                batch: StreamSelectorBatch::Episodes,
+            },
+        );
+
+        let stream_keys = filtered
+            .into_iter()
+            .map(|stream| stream.stream_key)
+            .collect::<Vec<_>>();
+        assert_eq!(stream_keys, vec!["a-4k".to_string(), "a-1080".to_string()]);
+    }
+}
+
 #[command]
 #[allow(clippy::too_many_arguments)]
 pub async fn resolve_best_stream(
@@ -422,9 +692,9 @@ pub async fn resolve_best_stream(
     ranking_season: Option<u32>,
     ranking_episode: Option<u32>,
 ) -> Result<BestResolvedStream, String> {
-    let media_type = normalize_stream_media_type(&media_type)
-        .ok_or_else(|| "Invalid media type for stream lookup.".to_string())?;
     let id = normalize_non_empty(&id).ok_or_else(|| "Media ID is required.".to_string())?;
+    let media_type = normalize_stream_media_type(&media_type, Some(&id))
+        .ok_or_else(|| "Invalid media type for stream lookup.".to_string())?;
     let ranking = resolve_stream_ranking_scope(
         &media_type,
         &id,
@@ -501,12 +771,12 @@ pub async fn recover_playback_stream(
     ranking_season: Option<u32>,
     ranking_episode: Option<u32>,
 ) -> Result<Option<BestResolvedStream>, String> {
-    let normalized_media_type = normalize_stream_media_type(&media_type)
+    let normalized_id = normalize_non_empty(&id)
+        .ok_or_else(|| "Media ID is required for stream recovery.".to_string())?;
+    let normalized_media_type = normalize_stream_media_type(&media_type, Some(&normalized_id))
         .ok_or_else(|| "Invalid media type for stream recovery.".to_string())?;
     let normalized_history_type = normalize_watch_progress_type(&media_type)
         .ok_or_else(|| "Invalid media type for stream recovery.".to_string())?;
-    let normalized_id = normalize_non_empty(&id)
-        .ok_or_else(|| "Media ID is required for stream recovery.".to_string())?;
     let normalized_outcome = PlaybackStreamOutcomeKind::parse(&outcome)
         .ok_or_else(|| "Invalid playback stream outcome.".to_string())?;
     let ranking = resolve_stream_ranking_scope(

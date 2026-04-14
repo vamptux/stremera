@@ -1,8 +1,3 @@
-import {
-  clearProviderDataCaches,
-  clearStreamingCaches,
-  type ApiCacheGroups,
-} from '@/lib/api-cache';
 import type {
   AddonConfig,
   AddonManifest,
@@ -21,6 +16,11 @@ import type {
   UserList,
   WatchStatus,
 } from '@/lib/api';
+import {
+  type ApiCacheGroups,
+  clearProviderDataCaches,
+  clearStreamingCaches,
+} from '@/lib/api-cache';
 
 type InvokeApi = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -39,8 +39,7 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
       clearProviderDataCaches(caches);
       return saved;
     },
-    fetchAddonManifest: (url: string) =>
-      safeInvoke<AddonManifest>('fetch_addon_manifest', { url }),
+    fetchAddonManifest: (url: string) => safeInvoke<AddonManifest>('fetch_addon_manifest', { url }),
     getAppUiPreferences: () => safeInvoke<AppUiPreferences>('get_app_ui_preferences'),
     saveAppUiPreferences: (patch: AppUiPreferencesPatch) =>
       safeInvoke<AppUiPreferences>('save_app_ui_preferences', {
@@ -94,14 +93,12 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
     reorderListItems: (listId: string, itemIds: string[]) =>
       safeInvoke<void>('reorder_list_items', { listId, itemIds }),
     reorderLists: (listIds: string[]) => safeInvoke<void>('reorder_lists', { listIds }),
-    checkItemInLists: (itemId: string) =>
-      safeInvoke<string[]>('check_item_in_lists', { itemId }),
+    checkItemInLists: (itemId: string) => safeInvoke<string[]>('check_item_in_lists', { itemId }),
     setWatchStatus: (itemId: string, status: WatchStatus | null) =>
       safeInvoke<void>('set_watch_status', { itemId, status }),
     getWatchStatus: (itemId: string) =>
       safeInvoke<WatchStatus | null>('get_watch_status', { itemId }),
-    getAllWatchStatuses: () =>
-      safeInvoke<Record<string, WatchStatus>>('get_all_watch_statuses'),
+    getAllWatchStatuses: () => safeInvoke<Record<string, WatchStatus>>('get_all_watch_statuses'),
     startDownload: (params: StartDownloadParams) =>
       safeInvoke<string>('start_download', params as unknown as Record<string, unknown>),
     pauseDownload: (id: string) => safeInvoke<void>('pause_download', { id }),
@@ -115,8 +112,7 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
     clearCompletedDownloads: (deleteFile = false) =>
       safeInvoke<number>('clear_completed_downloads', { deleteFile }),
     getDownloads: () => safeInvoke<DownloadItem[]>('get_downloads'),
-    setDownloadBandwidth: (limit?: number) =>
-      safeInvoke<void>('set_download_bandwidth', { limit }),
+    setDownloadBandwidth: (limit?: number) => safeInvoke<void>('set_download_bandwidth', { limit }),
     getDefaultDownloadPath: () => safeInvoke<string>('get_default_download_path'),
     openFolder: (path: string) => safeInvoke<void>('open_folder', { path }),
     getDataStats: () => safeInvoke<DataStats>('get_data_stats'),

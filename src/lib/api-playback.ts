@@ -1,32 +1,33 @@
-import {
-  buildResolveStreamKey,
-  buildStreamCacheKey,
-  clearStreamingCaches,
-  runCachedRequest,
-  type ApiCacheGroups,
-  type RequestCache,
-} from '@/lib/api-cache';
 import type {
   BestResolvedStream,
   HistoryPlaybackPlan,
   PlaybackLanguagePreferences,
   RecoverPlaybackStreamOptions,
-  ResolvedStream,
   ResolveBestStreamOptions,
+  ResolvedStream,
   SearchCatalogPage,
   SkipSegment,
   StreamSelectorData,
+  StreamSelectorPreferences,
+  TorrentioStream,
   TrackLanguageCandidate,
   TrackLanguageSelectionResolution,
-  TorrentioStream,
   WatchProgress,
 } from '@/lib/api';
+import {
+  type ApiCacheGroups,
+  buildResolveStreamKey,
+  buildStreamCacheKey,
+  clearStreamingCaches,
+  type RequestCache,
+  runCachedRequest,
+} from '@/lib/api-cache';
+import type { PlaybackStreamOutcomeReport } from '@/lib/playback-stream-health';
 import {
   buildStreamRankingCacheKey,
   buildStreamRankingInvokePayload,
   type StreamRankingOptions,
 } from '@/lib/stream-ranking';
-import type { PlaybackStreamOutcomeReport } from '@/lib/playback-stream-health';
 
 type InvokeApi = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -41,7 +42,7 @@ interface PlaybackApiCaches extends ApiCacheGroups {
 interface PlaybackApiContext {
   safeInvoke: InvokeApi;
   caches: PlaybackApiCaches;
-  normalizeStreamMediaType: (type: string, id: string) => string;
+  normalizeStreamMediaType: (type: string) => string;
 }
 
 export function createPlaybackApi({
@@ -58,7 +59,7 @@ export function createPlaybackApi({
       absoluteEpisode?: number,
       options?: StreamRankingOptions,
     ) => {
-      const normalizedType = normalizeStreamMediaType(type, id);
+      const normalizedType = normalizeStreamMediaType(type);
       const cacheKey = `${buildStreamCacheKey(normalizedType, id, season, episode, absoluteEpisode)}|${buildStreamRankingCacheKey(options)}`;
       return runCachedRequest(caches.streams, cacheKey, () =>
         safeInvoke<TorrentioStream[]>('get_streams', {
@@ -79,7 +80,7 @@ export function createPlaybackApi({
       absoluteEpisode?: number,
       options?: StreamRankingOptions,
     ) => {
-      const normalizedType = normalizeStreamMediaType(type, id);
+      const normalizedType = normalizeStreamMediaType(type);
       const cacheKey = `${buildStreamCacheKey(normalizedType, id, season, episode, absoluteEpisode)}|${buildStreamRankingCacheKey(options)}`;
       return runCachedRequest(caches.streamSelector, cacheKey, () =>
         safeInvoke<StreamSelectorData>('get_stream_selector_data', {
@@ -92,6 +93,11 @@ export function createPlaybackApi({
         }),
       );
     },
+    filterStreamSelectorStreams: (streams: TorrentioStream[], filters: StreamSelectorPreferences) =>
+      safeInvoke<TorrentioStream[]>('filter_stream_selector_streams', {
+        streams,
+        filters,
+      }),
     resolveStream: (
       magnet: string,
       infoHash?: string,
@@ -120,7 +126,7 @@ export function createPlaybackApi({
       absoluteEpisode?: number,
       options?: ResolveBestStreamOptions,
     ) => {
-      const normalizedType = normalizeStreamMediaType(type, id);
+      const normalizedType = normalizeStreamMediaType(type);
       const cacheKey = `${buildStreamCacheKey(normalizedType, id, season, episode, absoluteEpisode)}|${buildStreamRankingCacheKey(options)}`;
       const bypassCache = !!options?.bypassCache;
       const inFlightKey = bypassCache ? `${cacheKey}|bypass` : cacheKey;
@@ -157,7 +163,7 @@ export function createPlaybackApi({
       preparedBackupStream,
       ...rankingOptions
     }: RecoverPlaybackStreamOptions) => {
-      const normalizedType = normalizeStreamMediaType(mediaType, mediaId);
+      const normalizedType = normalizeStreamMediaType(mediaType);
 
       return safeInvoke<BestResolvedStream | null>('recover_playback_stream', {
         mediaType: normalizedType,
@@ -195,8 +201,6 @@ export function createPlaybackApi({
         media_id: mediaId,
         media_type: mediaType,
       }),
-    inferTrackLanguagePreference: (track: TrackLanguageCandidate) =>
-      safeInvoke<string | null>('infer_track_language_preference', { track }),
     resolvePreferredTrackSelection: (
       tracks: TrackLanguageCandidate[],
       preferredLanguage?: string,
@@ -207,17 +211,29 @@ export function createPlaybackApi({
         preferred_language: preferredLanguage,
         selected_track_id: selectedTrackId,
       }),
-    savePlaybackLanguagePreferenceOutcome: (
+    saveSelectedPlaybackLanguagePreference: (
+      preferenceKind: 'audio' | 'sub',
+      track?: TrackLanguageCandidate,
+      subtitlesOff?: boolean,
+    ) =>
+      safeInvoke<PlaybackLanguagePreferences>('save_selected_playback_language_preference', {
+        preference_kind: preferenceKind,
+        track,
+        subtitles_off: subtitlesOff,
+      }),
+    savePlaybackLanguagePreferenceOutcomeFromTracks: (
       mediaId: string,
       mediaType: string,
-      preferredAudioLanguage?: string,
-      preferredSubtitleLanguage?: string,
+      audioTrack?: TrackLanguageCandidate,
+      subtitleTrack?: TrackLanguageCandidate,
+      subtitlesOff?: boolean,
     ) =>
-      safeInvoke<void>('save_playback_language_preference_outcome', {
+      safeInvoke<void>('save_playback_language_preference_outcome_from_tracks', {
         media_id: mediaId,
         media_type: mediaType,
-        preferred_audio_language: preferredAudioLanguage,
-        preferred_subtitle_language: preferredSubtitleLanguage,
+        audio_track: audioTrack,
+        subtitle_track: subtitleTrack,
+        subtitles_off: subtitlesOff,
       }),
     reportPlaybackStreamOutcome: (report: PlaybackStreamOutcomeReport) =>
       safeInvoke<void>(

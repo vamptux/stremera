@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { type RefObject, useEffect, useRef, useState } from 'react';
 import { setVideoMarginRatio, type VideoMarginRatio } from 'tauri-plugin-libmpv-api';
 
 const PLAYER_SIDEBAR_WIDTH_PX = 60;
@@ -93,7 +93,12 @@ export function usePlayerSurfaceLayout({
 }: UsePlayerSurfaceLayoutArgs) {
   const [layoutVersion, setLayoutVersion] = useState(0);
   const lastAppliedMarginFingerprintRef = useRef<string | null>(null);
+  const playerContainerElement = playerContainerRef.current;
+  const topChromeElement = topChromeRef.current;
+  const bottomChromeElement = bottomChromeRef.current;
+  const episodesPanelElement = showEpisodes ? episodesPanelFrameRef.current : null;
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: These stream/surface flags intentionally reset the applied margin fingerprint without depending on render-state reads inside the effect body.
   useEffect(() => {
     lastAppliedMarginFingerprintRef.current = null;
   }, [activeStreamUrl, mpvSurfaceReady]);
@@ -102,10 +107,10 @@ export function usePlayerSurfaceLayout({
     if (typeof ResizeObserver === 'undefined') return;
 
     const observedElements = [
-      playerContainerRef.current,
-      topChromeRef.current,
-      bottomChromeRef.current,
-      episodesPanelFrameRef.current,
+      playerContainerElement,
+      topChromeElement,
+      bottomChromeElement,
+      episodesPanelElement,
     ].filter(Boolean) as HTMLDivElement[];
 
     if (observedElements.length === 0) return;
@@ -122,7 +127,9 @@ export function usePlayerSurfaceLayout({
       });
     });
 
-    observedElements.forEach((element) => observer.observe(element));
+    observedElements.forEach((element) => {
+      observer.observe(element);
+    });
 
     return () => {
       observer.disconnect();
@@ -130,8 +137,9 @@ export function usePlayerSurfaceLayout({
         window.cancelAnimationFrame(animationFrameId);
       }
     };
-  }, [bottomChromeRef, episodesPanelFrameRef, playerContainerRef, showEpisodes, topChromeRef]);
+  }, [bottomChromeElement, episodesPanelElement, playerContainerElement, topChromeElement]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: layoutVersion and refreshToken are explicit recompute triggers for margin application even though the effect reads them only as rerun signals.
   useEffect(() => {
     if (!mpvSurfaceReady || !activeStreamUrl) return;
 
@@ -161,8 +169,7 @@ export function usePlayerSurfaceLayout({
         return;
       }
 
-      const shouldReserveOverlayChrome =
-        isLoading || isResolving || hasError;
+      const shouldReserveOverlayChrome = isLoading || isResolving || hasError;
       const shouldCollapseVideoSurface =
         showStreamSelector || showDownloadModal || showErrorOverlay;
       const topChromeRect = topChromeRef.current?.getBoundingClientRect();

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, type MutableRefObject } from 'react';
+import { type MutableRefObject, useCallback, useEffect, useEffectEvent, useRef } from 'react';
 import { api, type WatchProgress } from '@/lib/api';
 
 const MIN_PERSISTABLE_PROGRESS_SECS = 5;
@@ -228,8 +228,14 @@ export function usePlaybackProgressPersistence({
     }
   }, [flushProgress, isPlaying]);
 
-  useEffect(() => {
+  const resetNearCompletionState = useEffectEvent((_streamSessionKey: string) => {
     nearCompletionSavedRef.current = false;
+  });
+
+  useEffect(() => {
+    resetNearCompletionState(
+      [activeStreamUrl ?? '', mediaId ?? '', absoluteSeason ?? '', absoluteEpisode ?? ''].join('|'),
+    );
   }, [activeStreamUrl, mediaId, absoluteSeason, absoluteEpisode]);
 
   useEffect(() => {

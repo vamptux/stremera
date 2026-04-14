@@ -1,5 +1,15 @@
-import { useState, type ReactNode } from 'react';
-import { getErrorMessage } from '@/lib/api';
+import {
+  AlertTriangle,
+  Captions,
+  Check,
+  ChevronDown,
+  Eye,
+  EyeOff,
+  Loader2,
+  Music2,
+} from 'lucide-react';
+import { type ReactNode, useState } from 'react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -7,21 +17,11 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import {
-  Loader2,
-  Captions,
-  Music2,
-  Check,
-  ChevronDown,
-  AlertTriangle,
-  Eye,
-  EyeOff,
-} from 'lucide-react';
-import { cn } from '@/lib/utils';
-import { toast } from 'sonner';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import { usePlaybackLanguagePreferences } from '@/hooks/use-playback-language-preferences';
+import { getErrorMessage } from '@/lib/api';
 import { normalizeLanguageToken } from '@/lib/player-track-utils';
+import { cn } from '@/lib/utils';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -61,33 +61,48 @@ interface LanguageSelectorProps {
 
 function LanguageSelector({ label, icon, value, kind, onChange }: LanguageSelectorProps) {
   const normalized = normalizePreference(value);
+  const selectorLabelId = `${kind}-language-selector-label`;
 
   return (
-    <div className="space-y-1.5">
-      <label className="text-[11px] font-semibold text-zinc-400 uppercase tracking-widest inline-flex items-center gap-1.5">
+    <div className='space-y-1.5'>
+      <div
+        id={selectorLabelId}
+        className='text-[11px] font-semibold text-zinc-400 uppercase tracking-widest inline-flex items-center gap-1.5'
+      >
         {icon} {label}
-      </label>
+      </div>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
-            variant="outline"
-            className="w-full justify-between bg-white/[0.03] border-white/[0.07] hover:bg-white/[0.06] hover:border-white/15 text-[13px] font-normal h-8 rounded transition-colors"
+            variant='outline'
+            aria-labelledby={selectorLabelId}
+            className='w-full justify-between bg-white/[0.03] border-white/[0.07] hover:bg-white/[0.06] hover:border-white/15 text-[13px] font-normal h-8 rounded transition-colors'
           >
-            <span className="truncate">{formatLanguageLabel(value, kind)}</span>
-            <ChevronDown className="h-3.5 w-3.5 opacity-50 shrink-0 ml-2" />
+            <span className='truncate'>{formatLanguageLabel(value, kind)}</span>
+            <ChevronDown className='h-3.5 w-3.5 opacity-50 shrink-0 ml-2' />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent
-          align="start"
-          className="w-[var(--radix-dropdown-menu-trigger-width)] bg-zinc-950/95 border-white/10 backdrop-blur-md rounded p-1"
+          align='start'
+          className='w-[var(--radix-dropdown-menu-trigger-width)] bg-zinc-950/95 border-white/10 backdrop-blur-md rounded p-1'
         >
-          <DropdownMenuItem onClick={() => onChange('')} className="gap-2.5 py-1.5 text-[13px] rounded cursor-pointer">
-            {!normalized ? <Check className="h-3.5 w-3.5 opacity-70" /> : <div className="w-3.5" />}
+          <DropdownMenuItem
+            onClick={() => onChange('')}
+            className='gap-2.5 py-1.5 text-[13px] rounded cursor-pointer'
+          >
+            {!normalized ? <Check className='h-3.5 w-3.5 opacity-70' /> : <div className='w-3.5' />}
             Auto
           </DropdownMenuItem>
           {kind === 'subtitle' && (
-            <DropdownMenuItem onClick={() => onChange('off')} className="gap-2.5 py-1.5 text-[13px] rounded cursor-pointer">
-              {normalized === 'off' ? <Check className="h-3.5 w-3.5 opacity-70" /> : <div className="w-3.5" />}
+            <DropdownMenuItem
+              onClick={() => onChange('off')}
+              className='gap-2.5 py-1.5 text-[13px] rounded cursor-pointer'
+            >
+              {normalized === 'off' ? (
+                <Check className='h-3.5 w-3.5 opacity-70' />
+              ) : (
+                <div className='w-3.5' />
+              )}
               Off
             </DropdownMenuItem>
           )}
@@ -95,9 +110,13 @@ function LanguageSelector({ label, icon, value, kind, onChange }: LanguageSelect
             <DropdownMenuItem
               key={option.value}
               onClick={() => onChange(option.value)}
-              className="gap-2.5 py-1.5 text-[13px] rounded cursor-pointer"
+              className='gap-2.5 py-1.5 text-[13px] rounded cursor-pointer'
             >
-              {normalized === option.value ? <Check className="h-3.5 w-3.5 opacity-70" /> : <div className="w-3.5" />}
+              {normalized === option.value ? (
+                <Check className='h-3.5 w-3.5 opacity-70' />
+              ) : (
+                <div className='w-3.5' />
+              )}
               {option.label} ({option.value})
             </DropdownMenuItem>
           ))}
@@ -148,58 +167,61 @@ function PlaybackLanguageConfig() {
   };
 
   return (
-    <div className="rounded border border-white/[0.07] bg-white/[0.02] overflow-hidden">
-      <div className="px-4 py-3 border-b border-white/[0.05]">
-        <h3 className="text-[13px] font-semibold text-white flex items-center gap-2">
-          <Captions className="w-3.5 h-3.5 text-zinc-500" />
+    <div className='rounded border border-white/[0.07] bg-white/[0.02] overflow-hidden'>
+      <div className='px-4 py-3 border-b border-white/[0.05]'>
+        <h3 className='text-[13px] font-semibold text-white flex items-center gap-2'>
+          <Captions className='w-3.5 h-3.5 text-zinc-500' />
           Audio & Subtitles
         </h3>
-        <p className="text-[11px] text-zinc-500 mt-0.5">
-          Preferred language codes — player auto-selects matching tracks. Use <span className="text-zinc-400 font-medium">off</span> to disable subtitles.
+        <p className='text-[11px] text-zinc-500 mt-0.5'>
+          Preferred language codes — player auto-selects matching tracks. Use{' '}
+          <span className='text-zinc-400 font-medium'>off</span> to disable subtitles.
         </p>
       </div>
 
-      <div className="px-4 py-4 space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <div className='px-4 py-4 space-y-4'>
+        <div className='grid grid-cols-1 sm:grid-cols-2 gap-3'>
           <LanguageSelector
-            label="Audio Language"
-            icon={<Music2 className="w-3 h-3" />}
+            label='Audio Language'
+            icon={<Music2 className='w-3 h-3' />}
             value={audioValue}
-            kind="audio"
+            kind='audio'
             onChange={setAudioLang}
           />
           <LanguageSelector
-            label="Subtitle Language"
-            icon={<Captions className="w-3 h-3" />}
+            label='Subtitle Language'
+            icon={<Captions className='w-3 h-3' />}
             value={subtitleValue}
-            kind="subtitle"
+            kind='subtitle'
             onChange={setSubtitleLang}
           />
         </div>
 
-        <div className="flex items-center justify-between pt-3 border-t border-white/[0.05]">
-          <div className="text-[12px] text-zinc-500">
+        <div className='flex items-center justify-between pt-3 border-t border-white/[0.05]'>
+          <div className='text-[12px] text-zinc-500'>
             {isDirty && (
-              <span className="text-amber-400 font-medium flex items-center gap-1.5">
-                <AlertTriangle className="h-3 w-3" /> Unsaved changes
+              <span className='text-amber-400 font-medium flex items-center gap-1.5'>
+                <AlertTriangle className='h-3 w-3' /> Unsaved changes
               </span>
             )}
           </div>
-          <div className="flex gap-2">
+          <div className='flex gap-2'>
             <Button
-              size="sm"
-              variant="outline"
-              onClick={() => { setAudioLang(undefined); setSubtitleLang(undefined); }}
+              size='sm'
+              variant='outline'
+              onClick={() => {
+                setAudioLang(undefined);
+                setSubtitleLang(undefined);
+              }}
               disabled={
-                isLoadingGlobalPlaybackLanguagePreferences ||
-                isSavingPlaybackLanguagePreferences
+                isLoadingGlobalPlaybackLanguagePreferences || isSavingPlaybackLanguagePreferences
               }
-              className="h-7 px-3 text-[12px] font-semibold rounded bg-transparent border-white/[0.08] hover:bg-white/[0.06]"
+              className='h-7 px-3 text-[12px] font-semibold rounded bg-transparent border-white/[0.08] hover:bg-white/[0.06]'
             >
               Revert
             </Button>
             <Button
-              size="sm"
+              size='sm'
               onClick={() => {
                 void handleSave();
               }}
@@ -208,11 +230,9 @@ function PlaybackLanguageConfig() {
                 !isDirty ||
                 isSavingPlaybackLanguagePreferences
               }
-              className="h-7 px-4 bg-white text-black hover:bg-zinc-200 rounded text-[12px] font-semibold gap-1.5 shadow-none"
+              className='h-7 px-4 bg-white text-black hover:bg-zinc-200 rounded text-[12px] font-semibold gap-1.5 shadow-none'
             >
-              {isSavingPlaybackLanguagePreferences && (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              )}
+              {isSavingPlaybackLanguagePreferences && <Loader2 className='h-3 w-3 animate-spin' />}
               Save
             </Button>
           </div>
@@ -238,22 +258,22 @@ function SpoilerProtectionToggle() {
   };
 
   return (
-    <div className="rounded border border-white/[0.07] bg-white/[0.02] overflow-hidden">
-      <div className="px-4 py-3 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="text-zinc-400 shrink-0">
-            {spoilerProtection ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+    <div className='rounded border border-white/[0.07] bg-white/[0.02] overflow-hidden'>
+      <div className='px-4 py-3 flex items-center justify-between gap-4'>
+        <div className='flex items-center gap-2.5 min-w-0'>
+          <div className='text-zinc-400 shrink-0'>
+            {spoilerProtection ? <EyeOff className='w-4 h-4' /> : <Eye className='w-4 h-4' />}
           </div>
-          <div className="min-w-0">
-            <p className="text-[13px] font-semibold text-white">Spoiler Protection</p>
-            <p className="text-[11px] text-zinc-500 mt-0.5">
+          <div className='min-w-0'>
+            <p className='text-[13px] font-semibold text-white'>Spoiler Protection</p>
+            <p className='text-[11px] text-zinc-500 mt-0.5'>
               Blur episode thumbnails and descriptions for unwatched episodes.
             </p>
           </div>
         </div>
         <button
-          type="button"
-          role="switch"
+          type='button'
+          role='switch'
           aria-checked={spoilerProtection}
           aria-disabled={isLoading || isSaving}
           disabled={isLoading || isSaving}
@@ -274,7 +294,7 @@ function SpoilerProtectionToggle() {
                 : 'translate-x-0 bg-white/90 text-zinc-800',
             )}
           >
-            {spoilerProtection ? <EyeOff className="w-2 h-2" /> : <Eye className="w-2 h-2" />}
+            {spoilerProtection ? <EyeOff className='w-2 h-2' /> : <Eye className='w-2 h-2' />}
           </span>
         </button>
       </div>
@@ -286,7 +306,7 @@ function SpoilerProtectionToggle() {
 
 export function PlaybackSettings() {
   return (
-    <div className="space-y-4">
+    <div className='space-y-4'>
       <PlaybackLanguageConfig />
       <SpoilerProtectionToggle />
     </div>

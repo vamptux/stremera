@@ -2,16 +2,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useMemo } from 'react';
 
 import { useLegacyStorageImport } from '@/hooks/use-legacy-storage-import';
-import {
-  api,
-  type LocalProfile,
-  type ProfilePreferences,
-  type ProfileViewMode,
-} from '@/lib/api';
+import { api, type LocalProfile, type ProfilePreferences, type ProfileViewMode } from '@/lib/api';
 import {
   clearLegacyStorageFeatureKeys,
-  readLegacyStorageFeature,
   type LegacyStorageReadResult,
+  readLegacyStorageFeature,
 } from '@/lib/legacy-storage';
 import { runOptimisticQueryMutation } from '@/lib/optimistic-query';
 
@@ -80,8 +75,8 @@ function sanitizeProfilePreferences(value: unknown): ProfilePreferences {
 
 function readLegacyProfilePreferences(): LegacyStorageReadResult<ProfilePreferences> {
   return readLegacyStorageFeature(PROFILE_LEGACY_STORAGE_FEATURE, (storage) => {
-    let storedProfile: unknown = undefined;
-    let storedViewMode: unknown = undefined;
+    let storedProfile: unknown;
+    let storedViewMode: unknown;
     let hasLegacyData = false;
 
     try {
@@ -143,10 +138,7 @@ export function useLocalProfile() {
     importLegacy: (preferences) =>
       api.importLegacyProfilePreferences(preferences.profile, preferences.viewMode),
     onImported: (savedPreferences) => {
-      queryClient.setQueryData<ProfilePreferences>(
-        PROFILE_PREFERENCES_QUERY_KEY,
-        savedPreferences,
-      );
+      queryClient.setQueryData<ProfilePreferences>(PROFILE_PREFERENCES_QUERY_KEY, savedPreferences);
     },
     readResult: legacyProfilePreferencesRead,
   });
@@ -159,7 +151,7 @@ export function useLocalProfile() {
   const currentPreferences = sanitizeProfilePreferences(
     profilePreferencesQuery.isSuccess
       ? profilePreferencesQuery.data
-      : legacyProfilePreferences ?? DEFAULT_PROFILE_PREFERENCES,
+      : (legacyProfilePreferences ?? DEFAULT_PROFILE_PREFERENCES),
   );
 
   const persistPreferences = useCallback(

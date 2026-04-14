@@ -1,13 +1,13 @@
-import { Button } from '@/components/ui/button';
-import { Play, Plus, Check, Star } from 'lucide-react';
-import { MediaItem, api } from '@/lib/api';
-import { Link, useLocation } from 'react-router-dom';
-import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
-import { cn } from '@/lib/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Check, Play, Plus, Star } from 'lucide-react';
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
+import { Link, useLocation } from 'react-router-dom';
+import { Button } from '@/components/ui/button';
 import { useIsItemInLibrary, useToggleLibraryItem } from '@/hooks/use-media-library';
+import { api, type MediaItem } from '@/lib/api';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
+import { cn } from '@/lib/utils';
 
 interface HeroCarouselStateOptions {
   isPaused?: boolean;
@@ -18,6 +18,7 @@ interface HeroCarouselStateOptions {
 
 interface HeroCarouselIndicatorsProps {
   activeIndex: number;
+  itemKeys: readonly string[];
   itemCount: number;
   onSelect: (index: number) => void;
   scrollOpacity: number;
@@ -25,6 +26,7 @@ interface HeroCarouselIndicatorsProps {
 
 function HeroCarouselIndicators({
   activeIndex,
+  itemKeys,
   itemCount,
   onSelect,
   scrollOpacity,
@@ -38,9 +40,9 @@ function HeroCarouselIndicators({
       className='absolute bottom-5 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-white/[0.06] bg-white/[0.06] px-2.5 py-1.5 backdrop-blur-md transition-opacity duration-300'
       style={{ opacity: Math.max(0, 1 - scrollOpacity * 2) }}
     >
-      {Array.from({ length: itemCount }, (_, index) => (
+      {itemKeys.map((itemKey, index) => (
         <button
-          key={index}
+          key={itemKey}
           type='button'
           aria-label={`Go to slide ${index + 1}`}
           onClick={() => onSelect(index)}
@@ -93,16 +95,16 @@ function useHeroCarouselState({
     [clearTransitionTimeout, itemCount, transitionDurationMs],
   );
 
-  const syncIndexBounds = useEffectEvent(() => {
-    if (itemCount === 0) {
+  const syncIndexBounds = useEffectEvent((nextItemCount: number) => {
+    if (nextItemCount === 0) {
       clearTransitionTimeout();
       setCurrentIndex(0);
       setIsTransitioning(false);
       return;
     }
 
-    if (currentIndex >= itemCount) {
-      setCurrentIndex((previousIndex) => previousIndex % itemCount);
+    if (currentIndex >= nextItemCount) {
+      setCurrentIndex((previousIndex) => previousIndex % nextItemCount);
     }
   });
 
@@ -132,8 +134,8 @@ function useHeroCarouselState({
   }, [clearTransitionTimeout]);
 
   useEffect(() => {
-    syncIndexBounds();
-  }, [currentIndex, itemCount]);
+    syncIndexBounds(itemCount);
+  }, [itemCount]);
 
   useEffect(() => {
     if (itemCount <= 1 || isPaused) {
@@ -177,18 +179,21 @@ export function Hero({ items, onFirstImageLoaded }: HeroProps) {
   });
 
   const item = items[activeIndex];
+  const activeHeroItemId = item?.id;
   const activeHeroDetailsType = resolvePlayerRouteMediaType(item?.type, item?.id);
   const shouldIncludeHeroEpisodes = !(
     item?.id?.startsWith('kitsu:') && activeHeroDetailsType === 'anime'
   );
 
   const { data: heroDetails } = useQuery({
-    queryKey: ['details', activeHeroDetailsType, item?.id],
+    queryKey: ['details', activeHeroDetailsType, activeHeroItemId],
     queryFn: () =>
-      api.getMediaDetails(activeHeroDetailsType, item!.id, {
-        includeEpisodes: shouldIncludeHeroEpisodes,
-      }),
-    enabled: !!item,
+      activeHeroItemId
+        ? api.getMediaDetails(activeHeroDetailsType, activeHeroItemId, {
+            includeEpisodes: shouldIncludeHeroEpisodes,
+          })
+        : Promise.reject(new Error('Media ID is required for hero details lookup.')),
+    enabled: !!activeHeroItemId,
     staleTime: 1000 * 60 * 30,
     refetchOnWindowFocus: false,
   });
@@ -257,10 +262,11 @@ export function Hero({ items, onFirstImageLoaded }: HeroProps) {
   const detailsRouteType = resolvePlayerRouteMediaType(item.type, item.id);
 
   return (
-    <div
+    <section
       className='relative w-full h-[60vh] min-h-[420px] max-h-[680px] -mt-8 overflow-hidden group'
-      onMouseEnter={() => setIsPausedByHover(true)}
-      onMouseLeave={() => setIsPausedByHover(false)}
+      aria-label='Featured titles'
+      onPointerEnter={() => setIsPausedByHover(true)}
+      onPointerLeave={() => setIsPausedByHover(false)}
     >
       {/* Scroll Dimming & Blur Overlay */}
       <div
@@ -409,12 +415,13 @@ export function Hero({ items, onFirstImageLoaded }: HeroProps) {
 
           <HeroCarouselIndicators
             activeIndex={activeIndex}
+            itemKeys={items.map((heroItem) => heroItem.id)}
             itemCount={items.length}
             onSelect={handleSelect}
             scrollOpacity={scrollOpacity}
           />
         </div>
       </div>
-    </div>
+    </section>
   );
 }

@@ -1,48 +1,29 @@
-import { useCallback, useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useRef } from 'react';
 
-import { api, type PlaybackLanguagePreferences } from '@/lib/api';
-import { normalizeLanguageToken } from '@/lib/player-track-utils';
+import { api, type PlaybackLanguagePreferences, type TrackLanguageCandidate } from '@/lib/api';
 import { invalidatePlaybackLanguageQueries } from '@/lib/query-invalidation';
 
 const PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY = ['playbackLanguagePreferences'] as const;
 const PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME = 1000 * 60 * 5;
 
-function normalizePlaybackLanguagePreference(value?: string | null): string | undefined {
-  return normalizeLanguageToken(value) || undefined;
-}
-
-function normalizePlaybackLanguagePreferences(
-  preferences?: PlaybackLanguagePreferences | null,
-): PlaybackLanguagePreferences {
-  return {
-    preferredAudioLanguage: normalizePlaybackLanguagePreference(
-      preferences?.preferredAudioLanguage,
-    ),
-    preferredSubtitleLanguage: normalizePlaybackLanguagePreference(
-      preferences?.preferredSubtitleLanguage,
-    ),
-  };
-}
-
-function normalizePlaybackLanguagePatch(
+function applyPlaybackLanguagePatch(
+  current: PlaybackLanguagePreferences,
   patch: Partial<PlaybackLanguagePreferences>,
-): Partial<PlaybackLanguagePreferences> {
-  const normalizedPatch: Partial<PlaybackLanguagePreferences> = {};
+): PlaybackLanguagePreferences {
+  const nextPreferences: PlaybackLanguagePreferences = {
+    ...current,
+  };
 
-  if (Object.prototype.hasOwnProperty.call(patch, 'preferredAudioLanguage')) {
-    normalizedPatch.preferredAudioLanguage = normalizePlaybackLanguagePreference(
-      patch.preferredAudioLanguage,
-    );
+  if ('preferredAudioLanguage' in patch) {
+    nextPreferences.preferredAudioLanguage = patch.preferredAudioLanguage;
   }
 
-  if (Object.prototype.hasOwnProperty.call(patch, 'preferredSubtitleLanguage')) {
-    normalizedPatch.preferredSubtitleLanguage = normalizePlaybackLanguagePreference(
-      patch.preferredSubtitleLanguage,
-    );
+  if ('preferredSubtitleLanguage' in patch) {
+    nextPreferences.preferredSubtitleLanguage = patch.preferredSubtitleLanguage;
   }
 
-  return normalizedPatch;
+  return nextPreferences;
 }
 
 function effectivePlaybackLanguagePreferencesQueryKey(mediaType?: string, mediaId?: string) {
@@ -70,7 +51,6 @@ export function usePlaybackLanguagePreferences({
     queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
     queryFn: api.getPlaybackLanguagePreferences,
     staleTime: PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME,
-    select: normalizePlaybackLanguagePreferences,
   });
 
   const { data: effectivePlaybackLanguagePreferences } = useQuery({
@@ -78,7 +58,6 @@ export function usePlaybackLanguagePreferences({
     queryFn: () => api.getEffectivePlaybackLanguagePreferences(mediaId, mediaType),
     enabled: !!mediaId && mediaId !== 'local',
     staleTime: PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME,
-    select: normalizePlaybackLanguagePreferences,
   });
 
   useEffect(() => {
@@ -96,8 +75,6 @@ export function usePlaybackLanguagePreferences({
 
   const saveGlobalPlaybackLanguagePreferences = useCallback(
     (patch: Partial<PlaybackLanguagePreferences>) => {
-      const normalizedPatch = normalizePlaybackLanguagePatch(patch);
-
       const saveTask = async () => {
         if (!globalPlaybackPreferencesHydratedRef.current) {
           const cached = queryClient.getQueryData<PlaybackLanguagePreferences>(
@@ -105,23 +82,50 @@ export function usePlaybackLanguagePreferences({
           );
           const fresh = cached ?? (await api.getPlaybackLanguagePreferences());
 
-          globalPlaybackPreferencesRef.current = normalizePlaybackLanguagePreferences(fresh);
+          globalPlaybackPreferencesRef.current = fresh;
           globalPlaybackPreferencesHydratedRef.current = true;
         }
 
-        const nextPreferences: PlaybackLanguagePreferences = {
-          ...globalPlaybackPreferencesRef.current,
-          ...normalizedPatch,
-        };
+        const nextPreferences = applyPlaybackLanguagePatch(
+          globalPlaybackPreferencesRef.current,
+          patch,
+        );
 
-        const savedPreferences = normalizePlaybackLanguagePreferences(
-          await api.savePlaybackLanguagePreferences(
-            nextPreferences.preferredAudioLanguage,
-            nextPreferences.preferredSubtitleLanguage,
-          ),
+        const savedPreferences = await api.savePlaybackLanguagePreferences(
+          nextPreferences.preferredAudioLanguage,
+          nextPreferences.preferredSubtitleLanguage,
         );
 
         globalPlaybackPreferencesRef.current = savedPreferences;
+        queryClient.setQueryData(PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY, savedPreferences);
+
+        await invalidatePlaybackLanguageQueries(queryClient);
+
+        return savedPreferences;
+      };
+
+      const queuedSave = saveQueueRef.current.then(saveTask);
+      saveQueueRef.current = queuedSave.catch(() => undefined);
+      return queuedSave;
+    },
+    [queryClient],
+  );
+
+  const saveGlobalPlaybackLanguagePreferenceSelection = useCallback(
+    (
+      preferenceKind: 'audio' | 'sub',
+      track?: TrackLanguageCandidate,
+      options?: { subtitlesOff?: boolean },
+    ) => {
+      const saveTask = async () => {
+        const savedPreferences = await api.saveSelectedPlaybackLanguagePreference(
+          preferenceKind,
+          track,
+          options?.subtitlesOff,
+        );
+
+        globalPlaybackPreferencesRef.current = savedPreferences;
+        globalPlaybackPreferencesHydratedRef.current = true;
         queryClient.setQueryData(PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY, savedPreferences);
 
         await invalidatePlaybackLanguageQueries(queryClient);
@@ -141,5 +145,6 @@ export function usePlaybackLanguagePreferences({
     globalPlaybackLanguagePreferences,
     isLoadingGlobalPlaybackLanguagePreferences,
     saveGlobalPlaybackLanguagePreferences,
+    saveGlobalPlaybackLanguagePreferenceSelection,
   };
 }

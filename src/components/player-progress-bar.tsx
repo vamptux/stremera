@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { type SkipSegment } from '@/lib/api';
+import type { SkipSegment } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 function getSkipLabel(type: string): string {
@@ -162,6 +162,7 @@ export function PlayerProgressBar({
 
   const handlePointerUp = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
+      e.stopPropagation();
       finalizeDrag(e.clientX);
     },
     [finalizeDrag],
@@ -175,6 +176,41 @@ export function PlayerProgressBar({
     clearHoverState();
   }, [clearHoverState, onSeekPreviewTimeChange]);
 
+  const handleKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (duration <= 0) {
+        return;
+      }
+
+      const step = event.shiftKey ? 30 : 5;
+      const activeTime = seekPreviewTime ?? currentTime;
+      let nextTime: number | null = null;
+
+      switch (event.key) {
+        case 'ArrowLeft':
+          nextTime = Math.max(0, activeTime - step);
+          break;
+        case 'ArrowRight':
+          nextTime = Math.min(duration, activeTime + step);
+          break;
+        case 'Home':
+          nextTime = 0;
+          break;
+        case 'End':
+          nextTime = duration;
+          break;
+        default:
+          return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      onSeekPreviewTimeChange(nextTime);
+      void onSeek(nextTime);
+    },
+    [currentTime, duration, onSeek, onSeekPreviewTimeChange, seekPreviewTime],
+  );
+
   useEffect(() => {
     return () => {
       if (hoverRafRef.current !== null) {
@@ -186,6 +222,15 @@ export function PlayerProgressBar({
   return (
     <div
       ref={progressBarRef}
+      data-player-interactive
+      role='slider'
+      tabIndex={0}
+      aria-label='Playback progress'
+      aria-orientation='horizontal'
+      aria-valuemin={0}
+      aria-valuemax={Math.max(duration, 0)}
+      aria-valuenow={Math.max(0, Math.min(duration, seekPreviewTime ?? currentTime))}
+      aria-valuetext={formatTime(seekPreviewTime ?? currentTime)}
       className='relative group/bar cursor-pointer select-none h-8 -my-2 flex items-center'
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
@@ -193,7 +238,7 @@ export function PlayerProgressBar({
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerCancel}
-      onClick={(e) => e.stopPropagation()}
+      onKeyDown={handleKeyDown}
     >
       {hoverPct !== null && duration > 0 && (
         <div
@@ -237,23 +282,24 @@ export function PlayerProgressBar({
           style={{
             width:
               duration > 0
-                ? `${Math.min(100, (((seekPreviewTime ?? currentTime) / duration) * 100))}%`
+                ? `${Math.min(100, ((seekPreviewTime ?? currentTime) / duration) * 100)}%`
                 : '0%',
           }}
         />
 
         {duration > 0 &&
-          skipSegments.map((seg, i) => {
+          skipSegments.map((seg) => {
             const leftPct = Math.max(0, Math.min(100, (seg.start_time / duration) * 100));
             const widthPct = Math.max(
               0,
               Math.min(100 - leftPct, ((seg.end_time - seg.start_time) / duration) * 100),
             );
             const isHovered = hoverSegment?.start_time === seg.start_time;
+            const segmentKey = `${seg.type}:${seg.start_time}:${seg.end_time}`;
 
             return (
               <div
-                key={`seg-${i}`}
+                key={segmentKey}
                 className={cn(
                   'absolute inset-y-0 pointer-events-none transition-opacity duration-100 z-0',
                   isHovered ? 'opacity-100' : 'opacity-70',
@@ -265,12 +311,13 @@ export function PlayerProgressBar({
           })}
 
         {duration > 0 &&
-          skipSegments.map((seg, i) => {
+          skipSegments.map((seg) => {
             const startPct = Math.max(0, Math.min(100, (seg.start_time / duration) * 100));
             const endPct = Math.max(0, Math.min(100, (seg.end_time / duration) * 100));
+            const segmentKey = `${seg.type}:${seg.start_time}:${seg.end_time}`;
 
             return (
-              <div key={`cut-group-${i}`}>
+              <div key={`cut-group-${segmentKey}`}>
                 {startPct > 0 && (
                   <div
                     className='absolute inset-y-0 w-[3px] bg-black z-20'

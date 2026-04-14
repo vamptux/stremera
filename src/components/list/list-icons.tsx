@@ -1,27 +1,27 @@
 import {
-  Film,
-  Tv,
-  Star,
-  Heart,
+  Baby,
   Bookmark,
-  Zap,
+  BookOpen,
+  Clapperboard,
   Clock,
   Eye,
+  Film,
+  Flame,
+  Gamepad2,
+  Ghost,
+  Globe,
+  Heart,
+  Laugh,
+  type LucideIcon,
+  Music2,
+  Rocket,
+  Sparkles,
+  Star,
+  Swords,
   ThumbsUp,
   Trophy,
-  Flame,
-  Globe,
-  Music2,
-  Laugh,
-  Ghost,
-  Swords,
-  Rocket,
-  Baby,
-  BookOpen,
-  Gamepad2,
-  Sparkles,
-  Clapperboard,
-  type LucideIcon,
+  Tv,
+  Zap,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -32,28 +32,28 @@ export interface ListIconDef {
 }
 
 export const LIST_ICONS: ListIconDef[] = [
-  { id: 'Film',        Icon: Film,        label: 'Movies'     },
-  { id: 'Tv',          Icon: Tv,          label: 'Series'     },
-  { id: 'Star',        Icon: Star,        label: 'Favourites' },
-  { id: 'Heart',       Icon: Heart,       label: 'Loved'      },
-  { id: 'Sparkles',    Icon: Sparkles,    label: 'Highlights' },
-  { id: 'Clapperboard',Icon: Clapperboard,label: 'Cinema'     },
-  { id: 'Bookmark',    Icon: Bookmark,    label: 'Saved'      },
-  { id: 'Zap',         Icon: Zap,         label: 'Must Watch' },
-  { id: 'Clock',       Icon: Clock,       label: 'Watch Later'},
-  { id: 'Eye',         Icon: Eye,         label: 'Watched'    },
-  { id: 'ThumbsUp',    Icon: ThumbsUp,    label: 'Liked'      },
-  { id: 'Trophy',      Icon: Trophy,      label: 'Best Of'    },
-  { id: 'Flame',       Icon: Flame,       label: 'Hot'        },
-  { id: 'Globe',       Icon: Globe,       label: 'World'      },
-  { id: 'Music2',      Icon: Music2,      label: 'Musical'    },
-  { id: 'Laugh',       Icon: Laugh,       label: 'Comedy'     },
-  { id: 'Ghost',       Icon: Ghost,       label: 'Horror'     },
-  { id: 'Swords',      Icon: Swords,      label: 'Action'     },
-  { id: 'Rocket',      Icon: Rocket,      label: 'Sci-Fi'     },
-  { id: 'Baby',        Icon: Baby,        label: 'Kids'       },
-  { id: 'BookOpen',    Icon: BookOpen,    label: 'Docs'       },
-  { id: 'Gamepad2',    Icon: Gamepad2,    label: 'Gaming'     },
+  { id: 'Film', Icon: Film, label: 'Movies' },
+  { id: 'Tv', Icon: Tv, label: 'Series' },
+  { id: 'Star', Icon: Star, label: 'Favourites' },
+  { id: 'Heart', Icon: Heart, label: 'Loved' },
+  { id: 'Sparkles', Icon: Sparkles, label: 'Highlights' },
+  { id: 'Clapperboard', Icon: Clapperboard, label: 'Cinema' },
+  { id: 'Bookmark', Icon: Bookmark, label: 'Saved' },
+  { id: 'Zap', Icon: Zap, label: 'Must Watch' },
+  { id: 'Clock', Icon: Clock, label: 'Watch Later' },
+  { id: 'Eye', Icon: Eye, label: 'Watched' },
+  { id: 'ThumbsUp', Icon: ThumbsUp, label: 'Liked' },
+  { id: 'Trophy', Icon: Trophy, label: 'Best Of' },
+  { id: 'Flame', Icon: Flame, label: 'Hot' },
+  { id: 'Globe', Icon: Globe, label: 'World' },
+  { id: 'Music2', Icon: Music2, label: 'Musical' },
+  { id: 'Laugh', Icon: Laugh, label: 'Comedy' },
+  { id: 'Ghost', Icon: Ghost, label: 'Horror' },
+  { id: 'Swords', Icon: Swords, label: 'Action' },
+  { id: 'Rocket', Icon: Rocket, label: 'Sci-Fi' },
+  { id: 'Baby', Icon: Baby, label: 'Kids' },
+  { id: 'BookOpen', Icon: BookOpen, label: 'Docs' },
+  { id: 'Gamepad2', Icon: Gamepad2, label: 'Gaming' },
 ];
 
 export const DEFAULT_LIST_ICON = 'Film';
@@ -80,7 +80,7 @@ export function ListIcon({ iconId, className, size = 16 }: ListIconProps) {
       <span
         className={cn('leading-none select-none', className)}
         style={{ fontSize: size }}
-        aria-hidden="true"
+        aria-hidden='true'
       >
         {iconId}
       </span>
@@ -89,11 +89,6 @@ export function ListIcon({ iconId, className, size = 16 }: ListIconProps) {
 
   const { Icon } = found;
   return (
-    <Icon
-      width={size}
-      height={size}
-      className={cn('shrink-0', className)}
-      aria-hidden="true"
-    />
+    <Icon width={size} height={size} className={cn('shrink-0', className)} aria-hidden='true' />
   );
 }

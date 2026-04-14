@@ -10,12 +10,7 @@ export type SearchProviderId =
   | 'apple'
   | 'kitsu';
 export type SearchDiscoverFeed = 'popular' | 'featured' | 'trending' | 'airing' | 'rating';
-export type SearchSortOption =
-  | 'default'
-  | 'title-asc'
-  | 'title-desc'
-  | 'year-desc'
-  | 'year-asc';
+export type SearchSortOption = 'default' | 'title-asc' | 'title-desc' | 'year-desc' | 'year-asc';
 
 export interface SearchProviderOption {
   color: string;
@@ -283,10 +278,7 @@ export function resolveSearchUrlFeed(
     : defaultFeed;
 }
 
-export function getSearchFeedLabel(
-  type: SearchMediaType,
-  feed: SearchDiscoverFeed,
-): string {
+export function getSearchFeedLabel(type: SearchMediaType, feed: SearchDiscoverFeed): string {
   const feedOptions = type === 'anime' ? SEARCH_KITSU_FEEDS : SEARCH_CINEMETA_FEEDS;
   return feedOptions.find((option) => option.id === feed)?.label ?? 'Popular';
 }

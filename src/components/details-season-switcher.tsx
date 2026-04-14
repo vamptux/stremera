@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
 
 export interface LocalSeasonEntry {
@@ -13,32 +13,28 @@ interface SeasonSwitcherProps {
   onLocalSeason: (season: number) => void;
 }
 
-export function SeasonSwitcher({
-  localSeasons,
-  activeSeason,
-  onLocalSeason,
-}: SeasonSwitcherProps) {
+export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: SeasonSwitcherProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [showLeft, setShowLeft] = useState(false);
   const [showRight, setShowRight] = useState(false);
   const hasMultipleSeasons = localSeasons.length > 1;
 
-  const syncScrollState = () => {
+  const syncScrollState = useCallback(() => {
     if (!scrollRef.current) return;
 
     const { scrollLeft, scrollWidth, clientWidth } = scrollRef.current;
     setShowLeft(scrollLeft > 4);
     setShowRight(scrollLeft < scrollWidth - clientWidth - 4);
-  };
+  }, []);
 
   useEffect(() => {
-    if (!hasMultipleSeasons) return;
+    if (localSeasons.length <= 1) return;
 
     syncScrollState();
     window.addEventListener('resize', syncScrollState);
     return () => window.removeEventListener('resize', syncScrollState);
-  }, [hasMultipleSeasons, localSeasons]);
+  }, [localSeasons.length, syncScrollState]);
 
   useEffect(() => {
     if (!hasMultipleSeasons) return;
@@ -105,7 +101,9 @@ export function SeasonSwitcher({
               onClick={() => onLocalSeason(season.number)}
             >
               {season.label}
-              {isActive && <div className='absolute bottom-0 left-0 right-0 h-[2px] rounded-t-sm bg-indigo-500' />}
+              {isActive && (
+                <div className='absolute bottom-0 left-0 right-0 h-[2px] rounded-t-sm bg-indigo-500' />
+              )}
             </button>
           );
         })}

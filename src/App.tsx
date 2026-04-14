@@ -1,14 +1,13 @@
+import { Loader2 } from 'lucide-react';
+import { lazy, type ReactNode, Suspense, useEffect, useRef } from 'react';
 import { Route, Routes } from 'react-router-dom';
-import { Suspense, lazy, type ReactNode, useEffect, useRef } from 'react';
-
+import { toast } from 'sonner';
+import { Toaster } from '@/components/ui/sonner';
 import { DownloadProvider } from '@/contexts/download-context';
 import { useAppUpdater } from '@/hooks/use-app-updater';
 import { getErrorMessage } from '@/lib/api';
-import { Toaster } from '@/components/ui/sonner';
 import { Layout } from './components/layout';
 import { Home } from './pages/home';
-import { Loader2 } from 'lucide-react';
-import { toast } from 'sonner';
 
 const Search = lazy(() => import('./pages/search').then((module) => ({ default: module.Search })));
 const Details = lazy(() =>

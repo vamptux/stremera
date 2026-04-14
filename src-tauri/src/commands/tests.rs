@@ -102,6 +102,22 @@ fn build_magnet_returns_none_when_both_absent() {
 }
 
 #[test]
+fn normalize_stream_media_type_promotes_kitsu_series_ids_to_anime() {
+    assert_eq!(
+        normalize_stream_media_type("series", Some("kitsu:42")).as_deref(),
+        Some("anime")
+    );
+    assert_eq!(
+        normalize_stream_media_type("series", Some("KITSU:42")).as_deref(),
+        Some("anime")
+    );
+    assert_eq!(
+        normalize_stream_media_type("series", Some("tt0944947")).as_deref(),
+        Some("series")
+    );
+}
+
+#[test]
 fn placeholder_block_payload_is_filtered() {
     let blocked = mk_stream(
         Some("[BLOCKED] No Streams Available"),

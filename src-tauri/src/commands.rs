@@ -122,11 +122,21 @@ fn normalize_non_empty(input: &str) -> Option<String> {
     }
 }
 
-fn normalize_stream_media_type(media_type: &str) -> Option<String> {
+fn normalize_stream_media_type(media_type: &str, media_id: Option<&str>) -> Option<String> {
     match media_type.trim().to_ascii_lowercase().as_str() {
         "movie" => Some("movie".to_string()),
-        "series" => Some("series".to_string()),
         "anime" => Some("anime".to_string()),
+        "series" => Some(
+            if media_id
+                .map(str::trim)
+                .is_some_and(|value| value.to_ascii_lowercase().starts_with("kitsu:"))
+            {
+                "anime"
+            } else {
+                "series"
+            }
+            .to_string(),
+        ),
         _ => None,
     }
 }

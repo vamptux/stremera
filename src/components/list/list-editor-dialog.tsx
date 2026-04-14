@@ -1,9 +1,7 @@
-import { useEffect, useEffectEvent, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Loader2 } from 'lucide-react';
+import { useEffect, useEffectEvent, useState } from 'react';
 import { toast } from 'sonner';
-
-import { api, type UserList } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -13,6 +11,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { api, type UserList } from '@/lib/api';
 import { invalidateListQueries } from '@/lib/query-invalidation';
 import { cn } from '@/lib/utils';
 
@@ -43,10 +42,11 @@ function ListEditorDialog({
 }: ListEditorDialogProps) {
   const [name, setName] = useState(initialName);
   const [selectedIcon, setSelectedIcon] = useState(initialIcon);
+  const nameInputId = `${title.replace(/\s+/g, '-').toLowerCase()}-name`;
 
-  const syncInitialState = useEffectEvent(() => {
-    setName(initialName);
-    setSelectedIcon(initialIcon);
+  const syncInitialState = useEffectEvent((nextInitialIcon: string, nextInitialName: string) => {
+    setName(nextInitialName);
+    setSelectedIcon(nextInitialIcon);
   });
 
   useEffect(() => {
@@ -54,7 +54,7 @@ function ListEditorDialog({
       return;
     }
 
-    syncInitialState();
+    syncInitialState(initialIcon, initialName);
   }, [initialIcon, initialName, open]);
 
   const handleOpenChange = (nextOpen: boolean) => {
@@ -89,9 +89,9 @@ function ListEditorDialog({
 
         <form onSubmit={handleSubmit} className='space-y-5 mt-2'>
           <div className='space-y-2'>
-            <label className='text-[11px] font-bold text-zinc-500 uppercase tracking-widest'>
+            <div className='text-[11px] font-bold text-zinc-500 uppercase tracking-widest'>
               Icon
-            </label>
+            </div>
             <div className='grid grid-cols-8 gap-2'>
               {LIST_ICONS.map(({ id, label }) => (
                 <button
@@ -113,7 +113,10 @@ function ListEditorDialog({
           </div>
 
           <div className='space-y-2'>
-            <label className='text-[11px] font-bold text-zinc-500 uppercase tracking-widest'>
+            <label
+              htmlFor={nameInputId}
+              className='text-[11px] font-bold text-zinc-500 uppercase tracking-widest'
+            >
               List Name
             </label>
             <div className='flex items-center gap-2'>
@@ -121,6 +124,7 @@ function ListEditorDialog({
                 <ListIcon iconId={selectedIcon} size={16} />
               </div>
               <Input
+                id={nameInputId}
                 value={name}
                 onChange={(event) => setName(event.target.value)}
                 placeholder='My Favourites'
@@ -196,12 +200,7 @@ interface RenameListDialogProps {
   open: boolean;
 }
 
-export function RenameListDialog({
-  list,
-  open,
-  onOpenChange,
-  onRenamed,
-}: RenameListDialogProps) {
+export function RenameListDialog({ list, open, onOpenChange, onRenamed }: RenameListDialogProps) {
   const queryClient = useQueryClient();
 
   const renameList = useMutation({

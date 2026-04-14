@@ -3,8 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import {
   clearLegacyStorageFeatureKeys,
-  readLegacyStorageFeature,
   type LegacyStorageReadResult,
+  readLegacyStorageFeature,
 } from '@/lib/legacy-storage';
 
 export const APP_UPDATE_STATE_QUERY_KEY = ['app-update-state'] as const;
@@ -14,8 +14,7 @@ export const APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY = [
 ] as const;
 const APP_UPDATE_STATUS_EVENT = 'app-update-status';
 const LAST_NOTIFIED_VERSION_KEY = 'stremera:last-notified-app-update-version';
-export const APP_UPDATE_LAST_NOTIFIED_VERSION_LEGACY_FEATURE =
-  'app-update-last-notified-version';
+export const APP_UPDATE_LAST_NOTIFIED_VERSION_LEGACY_FEATURE = 'app-update-last-notified-version';
 
 export interface AppUpdateHandle {
   version: string;
@@ -82,7 +81,10 @@ function createInitialAppUpdateState(): AppUpdateState {
 }
 
 function readAppUpdateState(queryClient?: QueryClient): AppUpdateState {
-  return queryClient?.getQueryData<AppUpdateState>(APP_UPDATE_STATE_QUERY_KEY) ?? createInitialAppUpdateState();
+  return (
+    queryClient?.getQueryData<AppUpdateState>(APP_UPDATE_STATE_QUERY_KEY) ??
+    createInitialAppUpdateState()
+  );
 }
 
 function writeAppUpdateState(
@@ -167,9 +169,7 @@ export async function checkForAppUpdate(): Promise<AppUpdateHandle | null> {
   return update;
 }
 
-export async function runAppUpdateCheck(
-  queryClient: QueryClient,
-): Promise<AppUpdateHandle | null> {
+export async function runAppUpdateCheck(queryClient: QueryClient): Promise<AppUpdateHandle | null> {
   if (!isTauriDesktopRuntime()) {
     writeAppUpdateState(queryClient, () => createInitialAppUpdateState());
     return null;
@@ -193,10 +193,7 @@ export async function runAppUpdateCheck(
       const checkedAt = Date.now();
 
       if (!update) {
-        queryClient.setQueryData<string | null>(
-          APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY,
-          null,
-        );
+        queryClient.setQueryData<string | null>(APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY, null);
       }
 
       writeAppUpdateState(queryClient, (current) => ({
@@ -314,16 +311,13 @@ export async function runAppUpdateInstall(
     }
 
     if (recoveredCheckSucceeded && !recoveredUpdate) {
-      queryClient.setQueryData<string | null>(
-        APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY,
-        null,
-      );
+      queryClient.setQueryData<string | null>(APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY, null);
     }
 
     writeAppUpdateState(queryClient, (current) => ({
       ...current,
       isSupported: true,
-      status: recoveredUpdate ?? current.update ?? targetUpdate ? 'available' : 'error',
+      status: (recoveredUpdate ?? current.update ?? targetUpdate) ? 'available' : 'error',
       update: recoveredUpdate ?? current.update ?? targetUpdate,
       lastCheckedAt: recoveredUpdate ? Date.now() : current.lastCheckedAt,
       installStatus: null,

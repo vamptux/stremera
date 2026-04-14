@@ -1,20 +1,20 @@
-import { getErrorMessage, type TorrentioStream } from '@/lib/api';
-import { Button } from '@/components/ui/button';
 import { ArrowUp, Download, FileVideo, Loader2, SlidersHorizontal, X } from 'lucide-react';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Badge } from '@/components/ui/badge';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { DownloadModal } from '@/components/download-modal';
-import { cn } from '@/lib/utils';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { useStreamSelectorController } from '@/hooks/use-stream-selector-controller';
+import { getErrorMessage, type TorrentioStream } from '@/lib/api';
 import {
+  type BatchFilter,
   getAddonSourceName,
   getStreamPresentation,
-  type BatchFilter,
   type QualityFilter,
-  type SourceFilter,
   type SortMode,
+  type SourceFilter,
 } from '@/lib/stream-selector-utils';
+import { cn } from '@/lib/utils';
 
 interface StreamItemProps {
   disabled: boolean;
@@ -50,7 +50,6 @@ function StreamItem({
 
   return (
     <div
-      onClick={disabled ? undefined : onSelect}
       className={cn(
         'group relative px-3 py-2.5 rounded-lg',
         'bg-white/[0.015] hover:bg-white/[0.04] border border-transparent hover:border-white/[0.06]',
@@ -61,13 +60,21 @@ function StreamItem({
         isResolving && 'opacity-50 pointer-events-none',
       )}
     >
+      <button
+        type='button'
+        onClick={onSelect}
+        disabled={disabled}
+        aria-label={`Select ${sourceName} stream`}
+        className='absolute inset-0 z-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 focus-visible:ring-offset-0'
+      />
+
       {isResolving && (
         <div className='absolute bottom-0 left-0 right-0 h-[2px] bg-white/5 overflow-hidden rounded-b-lg'>
           <div className='h-full bg-white/50 animate-progress' />
         </div>
       )}
 
-      <div className='flex items-start gap-2.5'>
+      <div className='relative z-10 flex items-start gap-2.5 pointer-events-none'>
         <div
           className={cn(
             'mt-0.5 w-5 h-5 rounded flex items-center justify-center flex-shrink-0',
@@ -89,9 +96,9 @@ function StreamItem({
               </span>
             )}
             <div className='flex items-center gap-0.5 flex-shrink-0 flex-wrap justify-end'>
-              {techBadges.slice(0, 7).map((badge, index) => (
+              {techBadges.slice(0, 7).map((badge) => (
                 <span
-                  key={index}
+                  key={`${badge.label}:${badge.cls}`}
                   className={cn(
                     'inline-flex items-center gap-[2px] text-[8px] font-bold uppercase tracking-wide px-1 py-[2px] rounded-[3px] border leading-none',
                     badge.cls,
@@ -109,7 +116,7 @@ function StreamItem({
                   event.stopPropagation();
                   onDownload();
                 }}
-                className='h-5 w-5 hover:bg-white/10 rounded text-zinc-600 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity shrink-0 ml-0.5'
+                className='pointer-events-auto h-5 w-5 hover:bg-white/10 rounded text-zinc-600 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity shrink-0 ml-0.5'
                 title='Download'
               >
                 <Download className='h-2.5 w-2.5' />
@@ -233,7 +240,6 @@ export function StreamSelector({
     addonHealthMetrics,
     batchFilter,
     compactOverview,
-    debridStreams,
     defaultFilters,
     downloadData,
     downloadModalOpen,
@@ -353,6 +359,7 @@ export function StreamSelector({
         </DialogHeader>
 
         <button
+          type='button'
           onClick={handleRequestClose}
           className='absolute top-3 right-3 z-20 p-1.5 rounded bg-black/30 hover:bg-white/10 text-white/60 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed'
           aria-label='Close'
@@ -400,7 +407,7 @@ export function StreamSelector({
               Enable at least one addon in Settings → Streaming, then try again.
             </p>
           </div>
-        ) : debridStreams.length > 0 ? (
+        ) : streamStats.playableCount > 0 ? (
           <ScrollArea className='h-full [&>[data-radix-scroll-area-viewport]]:h-full'>
             <div className={cn('p-3 space-y-1 pb-6', isAnyResolving && 'pointer-events-none')}>
               {/* Addon telemetry */}
@@ -470,7 +477,7 @@ export function StreamSelector({
                       ] as [QualityFilter, string][]
                     ).map(([val, label]) => {
                       const count =
-                        val === 'all' ? debridStreams.length : streamStats.resCounts[val];
+                        val === 'all' ? streamStats.playableCount : streamStats.resCounts[val];
                       if (val !== 'all' && count === 0) return null;
                       return (
                         <button
@@ -528,7 +535,7 @@ export function StreamSelector({
                             [
                               ['episodes', 'Episodes', streamStats.episodeLikeCount],
                               ['packs', 'Packs', streamStats.batchCount],
-                              ['all', 'All', debridStreams.length],
+                              ['all', 'All', streamStats.playableCount],
                             ] as [BatchFilter, string, number][]
                           )
                             .filter((entry) => (entry[0] === 'all' ? true : entry[2] > 0))
@@ -591,9 +598,9 @@ export function StreamSelector({
 
                   <div className='ml-auto flex items-center gap-2 flex-shrink-0'>
                     <span className='text-[10px] font-semibold text-zinc-500 tabular-nums'>
-                      {sortedStreams.length === debridStreams.length
+                      {sortedStreams.length === streamStats.playableCount
                         ? `${sortedStreams.length} streams`
-                        : `${sortedStreams.length} / ${debridStreams.length}`}
+                        : `${sortedStreams.length} / ${streamStats.playableCount}`}
                     </span>
                     {hasActiveFilter && (
                       <button

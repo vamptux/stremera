@@ -1,46 +1,45 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
-
-import { getErrorMessage, type MediaItem, type WatchStatus } from '@/lib/api';
-import { MediaCard, MediaCardSkeleton } from '@/components/media-card';
 import {
-  Search as SearchIcon,
-  X,
-  Filter,
-  History,
-  ChevronDown,
-  TrendingUp,
-  Sparkles,
-  Loader2,
-  WifiOff,
   AlertCircle,
   Check,
+  ChevronDown,
+  Filter,
+  History,
+  Loader2,
+  Search as SearchIcon,
+  Sparkles,
+  TrendingUp,
+  WifiOff,
+  X,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
-import { useOnlineStatus } from '@/hooks/use-online-status';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { type MutableRefObject, useEffect, useMemo, useRef, useState } from 'react';
+import { MediaCard, MediaCardSkeleton } from '@/components/media-card';
 import { Badge } from '@/components/ui/badge';
-import { cn } from '@/lib/utils';
-import {
-  SEARCH_CINEMETA_FEEDS,
-  SEARCH_KITSU_FEEDS,
-  SEARCH_PROVIDERS,
-  SEARCH_SORT_OPTIONS,
-  SEARCH_YEAR_OPTIONS,
-  formatRecentSearchContext,
-} from '@/lib/search-page-state';
-import { buildSearchHistoryKey } from '@/lib/search-history';
+import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { useSearchResults } from '@/hooks/use-search-results';
-import { useSearchPageState } from '@/hooks/use-search-page-state';
 import { useLibraryItems, useWatchStatuses } from '@/hooks/use-media-library';
+import { useOnlineStatus } from '@/hooks/use-online-status';
+import { useSearchPageState } from '@/hooks/use-search-page-state';
+import { useSearchResults } from '@/hooks/use-search-results';
+import { getErrorMessage, type MediaItem, type WatchStatus } from '@/lib/api';
+import { buildSearchHistoryKey } from '@/lib/search-history';
+import {
+  formatRecentSearchContext,
+  SEARCH_CINEMETA_FEEDS,
+  SEARCH_KITSU_FEEDS,
+  SEARCH_PROVIDERS,
+  SEARCH_SORT_OPTIONS,
+  SEARCH_YEAR_OPTIONS,
+} from '@/lib/search-page-state';
+import { cn } from '@/lib/utils';
 
 const SEARCH_RESULT_GRID_CLASS_NAME =
   'grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-2.5';
@@ -48,6 +47,32 @@ const SEARCH_RESULT_GRID_GAP_PX = 10;
 const SEARCH_RESULT_CARD_TEXT_HEIGHT_PX = 56;
 const SEARCH_RESULT_CARD_FALLBACK_WIDTH_PX = 160;
 const EMPTY_WATCH_STATUSES: Partial<Record<string, WatchStatus>> = {};
+const SEARCH_SKELETON_KEYS = [
+  'search-skeleton-1',
+  'search-skeleton-2',
+  'search-skeleton-3',
+  'search-skeleton-4',
+  'search-skeleton-5',
+  'search-skeleton-6',
+  'search-skeleton-7',
+  'search-skeleton-8',
+  'search-skeleton-9',
+  'search-skeleton-10',
+  'search-skeleton-11',
+  'search-skeleton-12',
+  'search-skeleton-13',
+  'search-skeleton-14',
+  'search-skeleton-15',
+  'search-skeleton-16',
+  'search-skeleton-17',
+  'search-skeleton-18',
+  'search-skeleton-19',
+  'search-skeleton-20',
+  'search-skeleton-21',
+  'search-skeleton-22',
+  'search-skeleton-23',
+  'search-skeleton-24',
+] as const;
 
 function getSearchGridColumnCount(viewportWidth: number) {
   if (viewportWidth >= 1536) {
@@ -829,8 +854,8 @@ export function Search() {
             </div>
           ) : showSkeleton ? (
             <div className={cn(SEARCH_RESULT_GRID_CLASS_NAME, 'pb-20')}>
-              {Array.from({ length: 24 }).map((_, i) => (
-                <MediaCardSkeleton key={i} />
+              {SEARCH_SKELETON_KEYS.map((key) => (
+                <MediaCardSkeleton key={key} />
               ))}
             </div>
           ) : isError ? (

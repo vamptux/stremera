@@ -31,13 +31,11 @@ export function PlayerActionOverlays({
 
   return (
     <div
+      data-player-interactive
       className='absolute bottom-[116px] right-6 z-[55] flex flex-col items-end gap-2 pointer-events-auto'
-      onClick={(event) => {
-        event.stopPropagation();
-      }}
     >
       {skipAction && (
-        <div onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
+        <div>
           <Button
             onClick={skipAction.onSkip}
             variant='outline'
@@ -58,12 +56,7 @@ export function PlayerActionOverlays({
       )}
 
       {upNextAction && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
-          aria-live='polite'
-          aria-atomic='true'
-        >
+        <div aria-live='polite' aria-atomic='true'>
           <div className='flex items-center gap-2 animate-in fade-in slide-in-from-right-4 duration-300'>
             <Button
               size='icon'
@@ -77,6 +70,7 @@ export function PlayerActionOverlays({
             </Button>
 
             <button
+              type='button'
               onClick={upNextAction.onPlayNext}
               aria-label={`Play next episode: ${upNextAction.title}`}
               className={cn(

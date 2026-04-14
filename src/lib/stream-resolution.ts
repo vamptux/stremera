@@ -5,11 +5,8 @@ import {
   type ResolvedStream,
   type TorrentioStream,
 } from '@/lib/api';
-import {
-  buildStreamRankingOptions,
-  type StreamRankingTarget,
-} from '@/lib/stream-ranking';
 import type { PlaybackStreamOutcome } from '@/lib/playback-stream-health';
+import { buildStreamRankingOptions, type StreamRankingTarget } from '@/lib/stream-ranking';
 
 type StreamMediaType = 'movie' | 'series' | 'anime';
 
@@ -64,10 +61,17 @@ export async function resolveRankedBestStream({
     },
   );
 
-  return api.resolveBestStream(mediaType, streamLookupId, streamSeason, streamEpisode, absoluteEpisode, {
-    bypassCache,
-    ...rankingOptions,
-  });
+  return api.resolveBestStream(
+    mediaType,
+    streamLookupId,
+    streamSeason,
+    streamEpisode,
+    absoluteEpisode,
+    {
+      bypassCache,
+      ...rankingOptions,
+    },
+  );
 }
 
 export async function recoverPlaybackStream({

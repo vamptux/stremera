@@ -1,14 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { command, setProperty } from 'tauri-plugin-libmpv-api';
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { command, setProperty } from 'tauri-plugin-libmpv-api';
 
-import {
-  api,
-  type PlaybackLanguagePreferences,
-  type TrackLanguageCandidate,
-} from '@/lib/api';
-import { readPlayerTrackList } from '@/lib/player-mpv';
 import { usePlaybackLanguagePreferences } from '@/hooks/use-playback-language-preferences';
+import { api, type PlaybackLanguagePreferences, type TrackLanguageCandidate } from '@/lib/api';
+import { readPlayerTrackList } from '@/lib/player-mpv';
 import {
   areTrackListsEqual,
   doesTrackSelectionMatch,
@@ -64,13 +60,19 @@ function normalizeStoredPreference(value?: string | null): string | undefined {
   return normalizeLanguageToken(value) || undefined;
 }
 
-async function inferTrackLanguagePreference(track: Track | null): Promise<string | undefined> {
+function buildTrackLanguageCandidateFingerprint(track: Track | null): string {
   if (!track) {
-    return undefined;
+    return '';
   }
 
-  const inferred = await api.inferTrackLanguagePreference(toTrackLanguageCandidate(track));
-  return normalizeStoredPreference(inferred);
+  return [
+    track.id,
+    normalizeLanguageToken(track.lang) ?? track.lang?.trim().toLowerCase() ?? '',
+    track.title?.trim().toLowerCase() ?? '',
+    track.defaultTrack ? '1' : '0',
+    track.forced ? '1' : '0',
+    track.hearingImpaired ? '1' : '0',
+  ].join(':');
 }
 
 function buildTrackAutoApplyFingerprint(preferredLanguage: string, tracks: Track[]): string {
@@ -129,16 +131,20 @@ export function usePlayerTrackController({
     audio: false,
     sub: false,
   });
-  const autoApplyAttemptStateRef = useRef<
-    Record<TrackPreferenceKind, TrackAutoApplyAttemptState>
-  >(resetTrackAutoApplyAttempts());
+  const autoApplyAttemptStateRef = useRef<Record<TrackPreferenceKind, TrackAutoApplyAttemptState>>(
+    resetTrackAutoApplyAttempts(),
+  );
   const preferenceFingerprintRef = useRef<string | null>(null);
   const lastRecordedTrackOutcomeRef = useRef<string | null>(null);
 
-  useEffect(() => {
+  const resetTrackListState = useEffectEvent((_streamUrl?: string) => {
     trackListRef.current = [];
     setAudioTracks([]);
     setSubTracks([]);
+  });
+
+  useEffect(() => {
+    resetTrackListState(activeStreamUrl);
   }, [activeStreamUrl]);
 
   const activeAudioTrack = useMemo(
@@ -222,7 +228,7 @@ export function usePlayerTrackController({
   const {
     globalPlaybackLanguagePreferences,
     effectivePlaybackLanguagePreferences,
-    saveGlobalPlaybackLanguagePreferences,
+    saveGlobalPlaybackLanguagePreferenceSelection,
   } = usePlaybackLanguagePreferences({ mediaId, mediaType });
 
   const playbackLanguagePreferences = useMemo<PlaybackLanguagePreferences>(
@@ -248,33 +254,27 @@ export function usePlayerTrackController({
     (type: TrackType, id: number | 'no') => {
       if (type === 'audio') {
         const selectedAudioTrack = audioTracks.find((track) => track.id === id);
-        void inferTrackLanguagePreference(selectedAudioTrack ?? null).then((preferredAudioLanguage) => {
-          if (!preferredAudioLanguage) {
-            return;
-          }
-
-          void saveGlobalPlaybackLanguagePreferences({ preferredAudioLanguage });
-        });
+        void saveGlobalPlaybackLanguagePreferenceSelection(
+          'audio',
+          selectedAudioTrack ? toTrackLanguageCandidate(selectedAudioTrack) : undefined,
+        );
         return;
       }
 
       if (id === 'no') {
-        void saveGlobalPlaybackLanguagePreferences({ preferredSubtitleLanguage: 'off' });
+        void saveGlobalPlaybackLanguagePreferenceSelection('sub', undefined, {
+          subtitlesOff: true,
+        });
         return;
       }
 
       const selectedSubtitleTrack = subTracks.find((track) => track.id === id);
-      void inferTrackLanguagePreference(selectedSubtitleTrack ?? null).then(
-        (preferredSubtitleLanguage) => {
-          if (!preferredSubtitleLanguage) {
-            return;
-          }
-
-          void saveGlobalPlaybackLanguagePreferences({ preferredSubtitleLanguage });
-        },
+      void saveGlobalPlaybackLanguagePreferenceSelection(
+        'sub',
+        selectedSubtitleTrack ? toTrackLanguageCandidate(selectedSubtitleTrack) : undefined,
       );
     },
-    [audioTracks, saveGlobalPlaybackLanguagePreferences, subTracks],
+    [audioTracks, saveGlobalPlaybackLanguagePreferenceSelection, subTracks],
   );
 
   const setTrack = useCallback<TrackChangeHandler>(
@@ -358,16 +358,27 @@ export function usePlayerTrackController({
     autoApplyAttemptStateRef.current = resetTrackAutoApplyAttempts();
   }, []);
 
-  const hasReachedAttemptLimit = useCallback(
-    (type: TrackPreferenceKind, fingerprint: string) => {
-      const state = autoApplyAttemptStateRef.current[type];
-      return (
-        state.fingerprint === fingerprint &&
-        state.count >= MAX_AUTO_APPLY_ATTEMPTS_PER_FINGERPRINT
-      );
-    },
-    [],
-  );
+  const resetAutoApplyStateForSession = useEffectEvent((_resetKey: string) => {
+    resetAutoApplyState();
+  });
+
+  const resetTrackSwitchingState = useEffectEvent((_streamSessionKey: string) => {
+    trackSwitchingRef.current = { audio: false, sub: false };
+    setTrackSwitching((currentState) =>
+      currentState.audio || currentState.sub ? { audio: false, sub: false } : currentState,
+    );
+  });
+
+  const resetRecordedTrackOutcome = useEffectEvent((_outcomeKey: string) => {
+    lastRecordedTrackOutcomeRef.current = null;
+  });
+
+  const hasReachedAttemptLimit = useCallback((type: TrackPreferenceKind, fingerprint: string) => {
+    const state = autoApplyAttemptStateRef.current[type];
+    return (
+      state.fingerprint === fingerprint && state.count >= MAX_AUTO_APPLY_ATTEMPTS_PER_FINGERPRINT
+    );
+  }, []);
 
   const recordAttempt = useCallback((type: TrackPreferenceKind, fingerprint: string) => {
     const state = autoApplyAttemptStateRef.current[type];
@@ -382,8 +393,8 @@ export function usePlayerTrackController({
   }, []);
 
   useEffect(() => {
-    resetAutoApplyState();
-  }, [resetAutoApplyState, resetKey]);
+    resetAutoApplyStateForSession(resetKey);
+  }, [resetKey]);
 
   useEffect(() => {
     const nextPreferenceFingerprint = [
@@ -616,7 +627,7 @@ export function usePlayerTrackController({
   ]);
 
   useEffect(() => {
-    lastRecordedTrackOutcomeRef.current = null;
+    resetRecordedTrackOutcome([activeStreamUrl ?? '', mediaId ?? '', mediaType ?? ''].join('|'));
   }, [activeStreamUrl, mediaId, mediaType]);
 
   useEffect(() => {
@@ -624,46 +635,28 @@ export function usePlayerTrackController({
       return;
     }
 
-    let cancelled = false;
+    const fingerprint = [
+      activeStreamUrl ?? '',
+      buildTrackLanguageCandidateFingerprint(activeAudioTrack),
+      subtitlesOff ? 'sub:off' : buildTrackLanguageCandidateFingerprint(activeSubTrack),
+    ].join('|');
 
-    void Promise.all([
-      inferTrackLanguagePreference(activeAudioTrack ?? null),
-      subtitlesOff ? Promise.resolve('off') : inferTrackLanguagePreference(activeSubTrack ?? null),
-    ]).then(([preferredAudioLanguage, preferredSubtitleLanguage]) => {
-      if (cancelled) {
-        return;
-      }
+    if (lastRecordedTrackOutcomeRef.current === fingerprint) {
+      return;
+    }
 
-      if (!preferredAudioLanguage && preferredSubtitleLanguage === undefined) {
-        return;
-      }
-
-      const fingerprint = [
-        activeStreamUrl ?? '',
-        preferredAudioLanguage ?? '',
-        preferredSubtitleLanguage ?? '',
-      ].join('|');
-
-      if (lastRecordedTrackOutcomeRef.current === fingerprint) {
-        return;
-      }
-
-      lastRecordedTrackOutcomeRef.current = fingerprint;
-      void api
-        .savePlaybackLanguagePreferenceOutcome(
-          mediaId,
-          mediaType ?? 'series',
-          preferredAudioLanguage,
-          preferredSubtitleLanguage,
-        )
-        .catch(() => {
-          // Title-scoped playback preference memory is best-effort only.
-        });
-    });
-
-    return () => {
-      cancelled = true;
-    };
+    lastRecordedTrackOutcomeRef.current = fingerprint;
+    void api
+      .savePlaybackLanguagePreferenceOutcomeFromTracks(
+        mediaId,
+        mediaType ?? 'series',
+        activeAudioTrack ? toTrackLanguageCandidate(activeAudioTrack) : undefined,
+        subtitlesOff || !activeSubTrack ? undefined : toTrackLanguageCandidate(activeSubTrack),
+        subtitlesOff,
+      )
+      .catch(() => {
+        // Title-scoped playback preference memory is best-effort only.
+      });
   }, [
     activeAudioTrack,
     activeStreamUrl,
@@ -677,13 +670,7 @@ export function usePlayerTrackController({
   ]);
 
   useEffect(() => {
-    trackSwitchingRef.current = { audio: false, sub: false };
-
-    const timer = window.setTimeout(() => {
-      setTrackSwitching({ audio: false, sub: false });
-    }, 0);
-
-    return () => window.clearTimeout(timer);
+    resetTrackSwitchingState([activeStreamUrl ?? '', resetKey].join('|'));
   }, [activeStreamUrl, resetKey]);
 
   return {

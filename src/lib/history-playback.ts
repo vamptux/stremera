@@ -1,27 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import { api, type HistoryPlaybackPlan, type WatchProgress } from '@/lib/api';
 
 export interface DetailsHistoryRouteState {

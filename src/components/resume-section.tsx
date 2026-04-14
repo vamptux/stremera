@@ -1,20 +1,11 @@
-import { MediaItem, WatchProgress } from '@/lib/api';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { MediaCard } from './media-card';
-import {
-  HorizontalMediaRail,
-  HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS,
-} from './horizontal-media-rail';
-import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
-import {
-  buildHistoryPlaybackPlan,
-  getHistoryPlaybackFallbackNotice,
-} from '@/lib/history-playback';
-import {
-  useContinueWatching,
-  useRemoveFromContinueWatching,
-} from '@/hooks/use-media-library';
+import { useContinueWatching, useRemoveFromContinueWatching } from '@/hooks/use-media-library';
+import type { MediaItem, WatchProgress } from '@/lib/api';
+import { buildHistoryPlaybackPlan, getHistoryPlaybackFallbackNotice } from '@/lib/history-playback';
+import { cn } from '@/lib/utils';
+import { HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS, HorizontalMediaRail } from './horizontal-media-rail';
+import { MediaCard } from './media-card';
 
 export function ResumeSection() {
   const { data = [], isLoading } = useContinueWatching({
@@ -33,7 +24,9 @@ export function ResumeSection() {
         <div className={cn(HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS, 'pt-5 pb-3')}>
           <div className='rounded-lg border border-white/[0.05] bg-white/[0.015] px-6 py-7 text-center'>
             <p className='text-[13px] font-medium text-white/40'>No activity yet</p>
-            <p className='mt-1 text-[12px] text-zinc-700'>Start watching something to see it here</p>
+            <p className='mt-1 text-[12px] text-zinc-700'>
+              Start watching something to see it here
+            </p>
           </div>
         </div>
       }

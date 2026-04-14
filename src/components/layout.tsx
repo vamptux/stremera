@@ -1,6 +1,6 @@
 import { Outlet, useLocation } from 'react-router-dom';
-import { Sidebar } from './sidebar';
 import { DesktopTitlebar } from './desktop-titlebar';
+import { Sidebar } from './sidebar';
 
 export function Layout() {
   const location = useLocation();
@@ -13,7 +13,10 @@ export function Layout() {
         <Sidebar className='fixed left-0 top-0 z-50 hidden md:flex' />
         <div className='relative flex min-h-[calc(100vh-2rem)] min-w-0 flex-col pt-8 overflow-x-clip'>
           <main className='flex-1'>
-            <div key={location.pathname} className='min-h-full animate-in fade-in duration-150 ease-out'>
+            <div
+              key={location.pathname}
+              className='min-h-full animate-in fade-in duration-150 ease-out'
+            >
               <Outlet />
             </div>
           </main>

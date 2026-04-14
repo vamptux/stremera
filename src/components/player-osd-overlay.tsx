@@ -1,12 +1,4 @@
-import {
-  FastForward,
-  Pause,
-  Play,
-  Rewind,
-  Volume1,
-  Volume2,
-  VolumeX,
-} from 'lucide-react';
+import { FastForward, Pause, Play, Rewind, Volume1, Volume2, VolumeX } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export type PlayerOsdAction =

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, type MutableRefObject } from 'react';
-import { type PlaybackStreamOutcome } from '@/lib/playback-stream-health';
+import { type MutableRefObject, useCallback, useEffect, useRef } from 'react';
+import type { PlaybackStreamOutcome } from '@/lib/playback-stream-health';
 import { recoverPlaybackStream } from '@/lib/stream-resolution';
 
 interface StreamFallback {
@@ -97,11 +97,13 @@ export function useStreamRecovery({
     clearRecoveryTimers();
   }, [clearRecoveryTimers]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Active stream changes intentionally reset recovery refs without reading the stream URL in the effect body.
   useEffect(() => {
     playbackStartedRef.current = false;
     startupWatchdogCancelledRef.current = false;
   }, [activeStreamUrl]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Episode and lookup changes intentionally clear recovery-attempt history without reading the keys in the effect body.
   useEffect(() => {
     startupRecoveryAttemptedForRef.current.clear();
   }, [absoluteEpisode, absoluteSeason, mediaId, resolveSeason, resolveEpisode]);

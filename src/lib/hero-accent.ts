@@ -7,7 +7,9 @@ export interface HeroAccent {
 }
 
 function rgbToHsl(r: number, g: number, b: number) {
-  const rn = r / 255, gn = g / 255, bn = b / 255;
+  const rn = r / 255,
+    gn = g / 255,
+    bn = b / 255;
   const max = Math.max(rn, gn, bn);
   const min = Math.min(rn, gn, bn);
   const l = (max + min) / 2;
@@ -22,11 +24,15 @@ function rgbToHsl(r: number, g: number, b: number) {
 }
 
 function hslToRgb(h: number, s: number, l: number) {
-  if (s === 0) { const v = Math.round(l * 255); return { r: v, g: v, b: v }; }
+  if (s === 0) {
+    const v = Math.round(l * 255);
+    return { r: v, g: v, b: v };
+  }
   const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
   const p = 2 * l - q;
   const hue2rgb = (t: number) => {
-    if (t < 0) t += 1; if (t > 1) t -= 1;
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
     if (t < 1 / 6) return p + (q - p) * 6 * t;
     if (t < 1 / 2) return q;
     if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
@@ -66,7 +72,9 @@ export async function extractHeroAccent(url?: string | null): Promise<HeroAccent
 
     const { data } = ctx.getImageData(0, 0, size, size);
     let totalWeight = 0;
-    let rSum = 0, gSum = 0, bSum = 0;
+    let rSum = 0,
+      gSum = 0,
+      bSum = 0;
 
     for (let y = 0; y < size; y++) {
       // Reduce weight for bottom quarter (dark bottom gradient area)
@@ -77,7 +85,9 @@ export async function extractHeroAccent(url?: string | null): Promise<HeroAccent
         const xWeight = x < size * 0.15 ? 0.2 : 1;
 
         const i = (y * size + x) * 4;
-        const r = data[i], g = data[i + 1], b = data[i + 2];
+        const r = data[i],
+          g = data[i + 1],
+          b = data[i + 2];
         const a = data[i + 3] / 255;
         if (a < 0.8) continue;
 

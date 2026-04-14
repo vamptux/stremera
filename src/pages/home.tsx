@@ -1,21 +1,32 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { MediaRow } from '@/components/media-row';
-import { Hero } from '@/components/hero';
-import { ResumeSection } from '@/components/resume-section';
-import { api } from '@/lib/api';
 import { useQuery } from '@tanstack/react-query';
-import { useOnlineStatus } from '@/hooks/use-online-status';
-import { Button } from '@/components/ui/button';
-import { WifiOff, Download } from 'lucide-react';
+import { Download, WifiOff } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Hero } from '@/components/hero';
+import { MediaRow } from '@/components/media-row';
+import { ResumeSection } from '@/components/resume-section';
+import { Button } from '@/components/ui/button';
+import { useOnlineStatus } from '@/hooks/use-online-status';
+import { api } from '@/lib/api';
 
 const HERO_DELAY_MS = 600;
 const ROW_STALE_TIME_MS = 1000 * 60 * 10;
 
 const GENRES = [
-  'All', 'Action', 'Adventure', 'Animation', 'Comedy', 'Crime',
-  'Documentary', 'Drama', 'Fantasy', 'Horror', 'Mystery',
-  'Romance', 'Sci-Fi', 'Thriller',
+  'All',
+  'Action',
+  'Adventure',
+  'Animation',
+  'Comedy',
+  'Crime',
+  'Documentary',
+  'Drama',
+  'Fantasy',
+  'Horror',
+  'Mystery',
+  'Romance',
+  'Sci-Fi',
+  'Thriller',
 ] as const;
 
 type Genre = (typeof GENRES)[number];
@@ -54,8 +65,7 @@ export function Home() {
         <div className='space-y-2'>
           <h1 className='text-2xl font-bold text-white'>You are offline</h1>
           <p className='text-muted-foreground max-w-sm mx-auto'>
-            Connect to the internet to browse content.
-            Your downloaded titles are still available.
+            Connect to the internet to browse content. Your downloaded titles are still available.
           </p>
         </div>
         <Button onClick={() => navigate('/downloads')} size='lg' className='gap-2'>
@@ -69,10 +79,7 @@ export function Home() {
 
   return (
     <div className='flex flex-col min-h-screen pb-20 relative'>
-      <Hero
-        items={(heroItems ?? []).slice(0, 5)}
-        onFirstImageLoaded={triggerHeroReady}
-      />
+      <Hero items={(heroItems ?? []).slice(0, 5)} onFirstImageLoaded={triggerHeroReady} />
 
       <div className='relative z-10 space-y-1'>
         <ResumeSection />

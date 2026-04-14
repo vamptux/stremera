@@ -1,5 +1,5 @@
-import { useCallback, useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useMemo } from 'react';
 
 import { useLegacyStorageImport } from '@/hooks/use-legacy-storage-import';
 import {
@@ -7,26 +7,23 @@ import {
   APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY,
   APP_UPDATE_STATE_QUERY_KEY,
   APP_VERSION_QUERY_KEY,
+  type AppUpdateHandle,
   clearLegacyLastNotifiedAppUpdateVersion,
   getCurrentAppVersion,
   getInitialAppUpdateState,
   getStoredLastNotifiedAppUpdateVersion,
   importLegacyLastNotifiedAppUpdateVersion,
   isUpdateReady,
-  saveLastNotifiedAppUpdateVersion,
   readLegacyLastNotifiedAppUpdateVersion,
   runAppUpdateCheck,
   runAppUpdateInstall,
-  type AppUpdateHandle,
+  saveLastNotifiedAppUpdateVersion,
 } from '@/lib/app-updater';
 import { runOptimisticQueryMutation } from '@/lib/optimistic-query';
 
 export function useAppUpdater() {
   const queryClient = useQueryClient();
-  const legacyLastNotifiedVersionRead = useMemo(
-    () => readLegacyLastNotifiedAppUpdateVersion(),
-    [],
-  );
+  const legacyLastNotifiedVersionRead = useMemo(() => readLegacyLastNotifiedAppUpdateVersion(), []);
 
   const { data: updateState = getInitialAppUpdateState() } = useQuery({
     queryKey: APP_UPDATE_STATE_QUERY_KEY,
@@ -105,7 +102,7 @@ export function useAppUpdater() {
   );
 
   const lastNotifiedVersion = updateState.isSupported
-    ? lastNotifiedVersionQuery.data ?? legacyLastNotifiedVersionRead.value ?? null
+    ? (lastNotifiedVersionQuery.data ?? legacyLastNotifiedVersionRead.value ?? null)
     : null;
 
   return {
@@ -114,8 +111,7 @@ export function useAppUpdater() {
     installUpdate,
     isChecking: updateState.status === 'checking',
     isInstalling: updateState.status === 'installing',
-    isLastNotifiedVersionReady:
-      !updateState.isSupported || lastNotifiedVersionQuery.isSuccess,
+    isLastNotifiedVersionReady: !updateState.isSupported || lastNotifiedVersionQuery.isSuccess,
     isSupported: updateState.isSupported,
     isUpdateAvailable: isUpdateReady(updateState),
     lastNotifiedVersion,

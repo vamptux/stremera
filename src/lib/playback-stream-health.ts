@@ -1,8 +1,4 @@
-export type PlaybackStreamOutcome =
-  | 'verified'
-  | 'startup-timeout'
-  | 'load-failed'
-  | 'disconnected';
+export type PlaybackStreamOutcome = 'verified' | 'startup-timeout' | 'load-failed' | 'disconnected';
 
 export interface PlaybackStreamOutcomeReport {
   id: string;

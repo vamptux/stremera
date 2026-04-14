@@ -1,6 +1,5 @@
 import { ChevronDown, List, X } from 'lucide-react';
 import { type Ref, useMemo } from 'react';
-import { type Episode } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -9,6 +8,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import type { Episode } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 interface PlayerEpisodesToggleButtonProps {
@@ -16,10 +16,7 @@ interface PlayerEpisodesToggleButtonProps {
   onToggle: () => void;
 }
 
-export function PlayerEpisodesToggleButton({
-  open,
-  onToggle,
-}: PlayerEpisodesToggleButtonProps) {
+export function PlayerEpisodesToggleButton({ open, onToggle }: PlayerEpisodesToggleButtonProps) {
   return (
     <button
       type='button'
@@ -73,14 +70,13 @@ export function PlayerEpisodesPanel({
   return (
     <div
       ref={panelRef}
+      data-player-interactive
       className={cn(
         'absolute top-0 right-0 bottom-0 w-[400px] bg-zinc-950 border-l border-white/[0.07] z-[60] flex flex-col',
         'shadow-[-20px_0_60px_rgba(0,0,0,0.85)]',
         'transition-transform [transition-duration:380ms] [transition-timing-function:cubic-bezier(0.22,1,0.36,1)]',
         open ? 'translate-x-0' : 'translate-x-full',
       )}
-      onClick={(e) => e.stopPropagation()}
-      onPointerDown={(e) => e.stopPropagation()}
     >
       <div className='flex items-center justify-between p-5 border-b border-white/10 flex-shrink-0 bg-gradient-to-b from-black/60 to-transparent'>
         <div className='flex flex-col gap-1.5'>
@@ -96,8 +92,7 @@ export function PlayerEpisodesPanel({
                   onClick={(e) => e.stopPropagation()}
                   onPointerDown={(e) => e.stopPropagation()}
                 >
-                  Season {selectedSeason}{' '}
-                  <ChevronDown className='w-3.5 h-3.5 ml-2 opacity-70' />
+                  Season {selectedSeason} <ChevronDown className='w-3.5 h-3.5 ml-2 opacity-70' />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent
@@ -143,9 +138,7 @@ export function PlayerEpisodesPanel({
           )}
 
           {seasonEpisodes.map((ep) => {
-            const isCurrent =
-              ep.season === currentSeason &&
-              ep.episode === currentEpisode;
+            const isCurrent = ep.season === currentSeason && ep.episode === currentEpisode;
 
             return (
               <button
@@ -173,8 +166,8 @@ export function PlayerEpisodesPanel({
                         alt=''
                         onError={(e) => {
                           (e.currentTarget as HTMLImageElement).style.display = 'none';
-                          const placeholder =
-                            e.currentTarget.nextElementSibling as HTMLElement | null;
+                          const placeholder = e.currentTarget
+                            .nextElementSibling as HTMLElement | null;
                           if (placeholder) placeholder.style.display = 'flex';
                         }}
                       />
@@ -203,9 +196,7 @@ export function PlayerEpisodesPanel({
                     <h3
                       className={cn(
                         'text-sm font-medium truncate transition-colors',
-                        isCurrent
-                          ? 'text-white'
-                          : 'text-gray-300 group-hover:text-white',
+                        isCurrent ? 'text-white' : 'text-gray-300 group-hover:text-white',
                       )}
                     >
                       {ep.title || `Episode ${ep.episode}`}

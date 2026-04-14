@@ -1,38 +1,38 @@
-import { useState, useMemo } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
-  Download,
-  Pause,
-  Play,
-  X,
-  CheckCircle2,
   AlertCircle,
-  HardDriveDownload,
-  Trash2,
-  MoreVertical,
+  CheckCircle2,
+  ChevronRight,
+  Download,
   Folder,
   FolderOpen,
-  ChevronRight,
+  HardDriveDownload,
+  MoreVertical,
+  Pause,
+  Play,
   RotateCcw,
+  Trash2,
+  X,
 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Progress } from '@/components/ui/progress';
+import { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Progress } from '@/components/ui/progress';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useDownloads } from '@/contexts/download-context';
-import { api, DownloadItem } from '@/lib/api';
-import { buildPlayerNavigationTarget, type PlayerRouteMediaType } from '@/lib/player-navigation';
+import { api, type DownloadItem } from '@/lib/api';
 import { getLatestEpisodeResumeStartTime } from '@/lib/history-playback';
-import { useNavigate } from 'react-router-dom';
-import { toast } from 'sonner';
+import { buildPlayerNavigationTarget, type PlayerRouteMediaType } from '@/lib/player-navigation';
+import { cn } from '@/lib/utils';
 
 function formatBytes(bytes: number, decimals = 2) {
   if (!+bytes) return '0 B';
@@ -40,7 +40,7 @@ function formatBytes(bytes: number, decimals = 2) {
   const dm = decimals < 0 ? 0 : decimals;
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+  return `${parseFloat((bytes / k ** i).toFixed(dm))} ${sizes[i]}`;
 }
 
 function formatSpeed(bytesPerSec: number) {
@@ -253,7 +253,8 @@ export function Downloads() {
             {/* Groups */}
             {groupedItems.groups.map((group) => (
               <div key={group.id} className='space-y-2'>
-                <div
+                <button
+                  type='button'
                   className='flex items-center gap-2 p-2 rounded-lg bg-white/[0.02] border border-white/[0.06] cursor-pointer hover:bg-white/[0.04] transition-colors'
                   onClick={() => setExpandedSeries(expandedSeries === group.id ? null : group.id)}
                 >
@@ -268,7 +269,7 @@ export function Downloads() {
                       expandedSeries === group.id && 'rotate-90',
                     )}
                   />
-                </div>
+                </button>
                 <AnimatePresence>
                   {expandedSeries === group.id && (
                     <motion.div

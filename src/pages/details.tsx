@@ -1,33 +1,32 @@
-import { useParams, useLocation } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { openUrl as openExternal } from '@tauri-apps/plugin-opener';
+import { motion } from 'framer-motion';
 import {
-  Play,
-  Plus,
-  Youtube,
   Check,
-  Loader2,
-  Star,
-  Search,
-  X,
   ChevronLeft,
   ChevronRight,
+  Loader2,
+  Play,
+  Plus,
+  Search,
+  Star,
+  X,
+  Youtube,
 } from 'lucide-react';
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
-import { motion } from 'framer-motion';
-import { openUrl as openExternal } from '@tauri-apps/plugin-opener';
-import { api, Episode, MediaItem, WatchProgress, getErrorMessage } from '@/lib/api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useParams } from 'react-router-dom';
+import { toast } from 'sonner';
 import { AnimeMetadataSection } from '@/components/anime-metadata-panel';
 import { SeasonSwitcher } from '@/components/details-season-switcher';
+import { MediaCard } from '@/components/media-card';
+import { StreamSelector } from '@/components/stream-selector';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { StreamSelector } from '@/components/stream-selector';
-import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { MediaCard } from '@/components/media-card';
-import { cn } from '@/lib/utils';
-import { toast } from 'sonner';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
+import { useDetailsEpisodePane } from '@/hooks/use-details-episode-pane';
 import {
   useContinueWatching,
   useIsItemInLibrary,
@@ -35,18 +34,24 @@ import {
   useWatchHistory,
 } from '@/hooks/use-media-library';
 import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
+import { api, type Episode, getErrorMessage, type MediaItem, type WatchProgress } from '@/lib/api';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
+import { resolveEpisodeStreamTarget } from '@/lib/episode-stream-target';
 import {
+  type DetailsHistoryRouteState,
   getLatestEpisodeResumeStartTime,
   getPlayableResumeStartTime,
-  type DetailsHistoryRouteState,
 } from '@/lib/history-playback';
-import { useDetailsEpisodePane } from '@/hooks/use-details-episode-pane';
-import { resolveEpisodeStreamTarget } from '@/lib/episode-stream-target';
 import { resolveTrailerEmbedUrl } from '@/lib/trailer-utils';
+import { cn } from '@/lib/utils';
 
-const EPISODE_FETCH_PAGE_SIZE = 50;
 const EPISODE_DISPLAY_PAGE_SIZE = 4;
+const EPISODE_SKELETON_KEYS = [
+  'episode-skeleton-1',
+  'episode-skeleton-2',
+  'episode-skeleton-3',
+  'episode-skeleton-4',
+] as const;
 
 function formatRelationRoleLabel(role?: string | null): string | null {
   if (!role) return null;
@@ -84,10 +89,6 @@ function getRelationRoleBadgeClass(role?: string | null): string {
 // Wrapper component to remount Details on id change
 export function Details() {
   const { type, id } = useParams<{ type: string; id: string }>();
-  // Scroll to top on mount
-  useEffect(() => {
-    window.scrollTo(0, 0);
-  }, [type, id]);
 
   return (
     <motion.div
@@ -119,6 +120,10 @@ function DetailsContent() {
   const queryClient = useQueryClient();
   const { preferences: appUiPreferences } = useAppUiPreferences();
   const spoilerProtection = appUiPreferences.spoilerProtection;
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, []);
 
   const {
     data: item,
@@ -177,7 +182,6 @@ function DetailsContent() {
     seasonCount,
     selectedSeason,
     localSeasonEntries,
-    seasonEpisodes,
     visibleEpisodes,
     episodeSearch,
     setEpisodeSearch,
@@ -216,7 +220,7 @@ function DetailsContent() {
         mediaId: normalizedId,
         mediaType: normalizedType,
         preferredSeason,
-        episodePageSize: EPISODE_FETCH_PAGE_SIZE,
+        episodePageSize: EPISODE_DISPLAY_PAGE_SIZE,
       });
     },
     [queryClient],
@@ -319,10 +323,17 @@ function DetailsContent() {
     if (!spoilerProtection || selectedSeason === null || !item) return null;
     let max: number | null = null;
 
-    for (const ep of seasonEpisodes) {
-      const prog = episodeProgressMap.get(`${item.id}:${ep.season}:${ep.episode}`);
-      if (prog && prog.duration > 0 && prog.position / prog.duration > 0.05) {
-        if (max === null || ep.episode > max) max = ep.episode;
+    for (const entry of watchHistoryForItem ?? []) {
+      if (entry.type_ !== 'series' && entry.type_ !== 'anime') {
+        continue;
+      }
+
+      if (entry.season !== selectedSeason || entry.episode === undefined || entry.duration <= 0) {
+        continue;
+      }
+
+      if (entry.position / entry.duration > 0.05) {
+        if (max === null || entry.episode > max) max = entry.episode;
       }
     }
 
@@ -338,7 +349,7 @@ function DetailsContent() {
     }
 
     return max;
-  }, [spoilerProtection, selectedSeason, item, seasonEpisodes, episodeProgressMap, watchHistory]);
+  }, [spoilerProtection, selectedSeason, item, watchHistory, watchHistoryForItem]);
 
   const isEpisodeSpoiler = useCallback(
     (ep: Episode): boolean => {
@@ -656,7 +667,7 @@ function DetailsContent() {
     }, 80);
 
     return () => window.clearTimeout(timer);
-  }, [visibleEpisodes, resumeEpisodeCoords, selectedSeason, resumeEpisodeRef]);
+  }, [visibleEpisodes, resumeEpisodeCoords, selectedSeason]);
 
   if (isLoading) return <DetailsSkeleton />;
 
@@ -744,12 +755,12 @@ function DetailsContent() {
                   {item.rating && (
                     <div className='flex items-center gap-1.5'>
                       <div className='flex text-amber-500'>
-                        {Array.from({ length: 5 }).map((_, i) => (
+                        {[1, 2, 3, 4, 5].map((starNumber) => (
                           <Star
-                            key={i}
+                            key={`rating-star-${starNumber}`}
                             className={cn(
                               'w-4 h-4 fill-current',
-                              i >= Math.round(Number(item.rating) / 2) && 'opacity-30',
+                              starNumber > Math.round(Number(item.rating) / 2) && 'opacity-30',
                             )}
                           />
                         ))}
@@ -776,6 +787,7 @@ function DetailsContent() {
                 className='flex flex-wrap items-center gap-4 pt-4'
               >
                 <button
+                  type='button'
                   className='flex items-center gap-3 group'
                   onClick={() => {
                     void primaryPlayback.handlePrimaryAction();
@@ -791,6 +803,7 @@ function DetailsContent() {
 
                 <div className='flex gap-2.5 ml-1'>
                   <button
+                    type='button'
                     className={cn(
                       'w-11 h-11 md:h-12 md:w-12 rounded-lg border border-white/[0.12] bg-white/[0.06] flex items-center justify-center text-white/70 hover:bg-white/[0.1] hover:text-white hover:border-white/[0.2] transition-all duration-200 backdrop-blur-sm',
                       isInLibrary &&
@@ -809,6 +822,7 @@ function DetailsContent() {
 
                   {item.trailers && item.trailers.length > 0 && (
                     <button
+                      type='button'
                       className='w-11 h-11 md:h-12 md:w-12 rounded-lg border border-white/[0.12] bg-white/[0.06] flex items-center justify-center text-white/70 hover:bg-white/[0.1] hover:text-white hover:border-white/[0.2] transition-all duration-200 backdrop-blur-sm hover:text-red-400 hover:border-red-500/25 hover:bg-red-500/[0.06]'
                       onClick={() => {
                         void handleOpenTrailer();
@@ -830,14 +844,12 @@ function DetailsContent() {
                 >
                   <div className='flex flex-wrap items-center gap-x-2 gap-y-2 text-[13px] md:text-[14px]'>
                     <span className='font-semibold text-white/50 mr-1'>Starring:</span>
-                    {item.cast.slice(0, 5).map((actor, i) => (
-                      <span key={i} className='flex items-center'>
+                    {item.cast.slice(0, 5).map((actor, i, cast) => (
+                      <span key={actor} className='flex items-center'>
                         <span className='text-zinc-300 hover:text-white transition-colors cursor-default'>
                           {actor}
                         </span>
-                        {i < Math.min(item.cast!.length, 5) - 1 && (
-                          <span className='text-white/20 mx-2'>,</span>
-                        )}
+                        {i < cast.length - 1 && <span className='text-white/20 mx-2'>,</span>}
                       </span>
                     ))}
                     {item.cast.length > 5 && (
@@ -976,9 +988,9 @@ function DetailsContent() {
 
                   <div className='grid grid-cols-1 gap-4 pb-2 sm:grid-cols-2 2xl:grid-cols-4'>
                     {shouldShowEpisodeProgressSkeleton ? (
-                      Array.from({ length: EPISODE_DISPLAY_PAGE_SIZE }).map((_, i) => (
+                      EPISODE_SKELETON_KEYS.map((key) => (
                         <div
-                          key={`episode-skeleton-${i}`}
+                          key={key}
                           className='aspect-video w-full rounded-xl bg-zinc-900/60 animate-pulse'
                         />
                       ))
@@ -1106,18 +1118,16 @@ function DetailsContent() {
                     viewport={{ once: true }}
                     transition={{ delay: i * 0.05 }}
                     key={rel.id}
+                    onMouseEnter={() => {
+                      const relationType = rel.id.startsWith('kitsu:') ? 'anime' : rel.type;
+                      prefetchInlineDetailsTarget(
+                        relationType,
+                        rel.id,
+                        rel.relationPreferredSeason,
+                      );
+                    }}
                   >
-                    <div
-                      className='space-y-2'
-                      onMouseEnter={() => {
-                        const relationType = rel.id.startsWith('kitsu:') ? 'anime' : rel.type;
-                        prefetchInlineDetailsTarget(
-                          relationType,
-                          rel.id,
-                          rel.relationPreferredSeason,
-                        );
-                      }}
-                    >
+                    <div className='space-y-2'>
                       <MediaCard
                         item={rel}
                         subtitle={rel.relationContextLabel ?? undefined}

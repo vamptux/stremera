@@ -10,12 +10,12 @@ import {
   type MediaItem,
   type WatchProgress,
 } from '@/lib/api';
-import { buildHistoryPlaybackPlan, getHistoryPlaybackFallbackNotice } from '@/lib/history-playback';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
+import { buildHistoryPlaybackPlan, getHistoryPlaybackFallbackNotice } from '@/lib/history-playback';
 import {
   buildPlayerNavigationTarget,
-  resolvePlayerRouteMediaType,
   type PlayerRouteMediaType,
+  resolvePlayerRouteMediaType,
 } from '@/lib/player-navigation';
 
 type PrimaryPlaybackSurface = 'card' | 'details' | 'menu';

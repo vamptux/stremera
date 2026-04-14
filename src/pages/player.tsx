@@ -1,54 +1,53 @@
-import React, { useEffect, useEffectEvent, useRef, useState, useCallback, useMemo } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { toast } from 'sonner';
-
 import {
   ArrowLeft,
+  ArrowLeftRight,
+  Download,
+  FastForward,
   Loader2,
-  Play,
-  Pause,
-  X,
-  Volume2,
-  VolumeX,
   Maximize,
   Minimize,
-  Volume1,
-  Download,
+  Pause,
+  Play,
   Rewind,
-  FastForward,
-  ArrowLeftRight,
+  Volume1,
+  Volume2,
+  VolumeX,
+  X,
 } from 'lucide-react';
-import { api, type Episode, type SkipSegment } from '@/lib/api';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { StreamSelector } from '@/components/stream-selector';
+import type React from 'react';
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { toast } from 'sonner';
 import { command, setProperty } from 'tauri-plugin-libmpv-api';
-import { cn } from '@/lib/utils';
-import { Sidebar } from '@/components/sidebar';
-import { DownloadModal } from '@/components/download-modal';
 import { DesktopTitlebar } from '@/components/desktop-titlebar';
+import { DownloadModal } from '@/components/download-modal';
+import { PlayerActionOverlays } from '@/components/player-action-overlays';
 import {
   PlayerEpisodesPanel,
   PlayerEpisodesToggleButton,
 } from '@/components/player-episodes-panel';
+import { type PlayerOsdAction, PlayerOsdOverlay } from '@/components/player-osd-overlay';
 import { PlayerProgressBar } from '@/components/player-progress-bar';
-import { useStreamRecovery } from '@/hooks/use-stream-recovery';
-import { usePlayerViewportMode } from '@/hooks/use-player-viewport-mode';
-import { AudioTrackSelector, SubtitleTrackSelector } from '@/components/player-track-selectors';
-import { PlayerOsdOverlay, type PlayerOsdAction } from '@/components/player-osd-overlay';
 import { PlayerSlider } from '@/components/player-slider';
-import { PlayerActionOverlays } from '@/components/player-action-overlays';
+import { AudioTrackSelector, SubtitleTrackSelector } from '@/components/player-track-selectors';
+import { Sidebar } from '@/components/sidebar';
+import { StreamSelector } from '@/components/stream-selector';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import { usePlayerMpvLifecycle } from '@/hooks/use-player-mpv-lifecycle';
+import { usePlayerRouteState } from '@/hooks/use-player-route-state';
 import { usePlayerSessionBoundary } from '@/hooks/use-player-session-boundary';
 import { usePlayerStreamSession } from '@/hooks/use-player-stream-session';
-import { usePlayerRouteState } from '@/hooks/use-player-route-state';
 import { usePlayerSurfaceLayout } from '@/hooks/use-player-surface-layout';
 import { usePlayerUiTimers } from '@/hooks/use-player-ui-timers';
-import { type NextEpisodeStreamCoordinates } from '@/hooks/use-player-up-next';
-import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
+import type { NextEpisodeStreamCoordinates } from '@/hooks/use-player-up-next';
+import { usePlayerViewportMode } from '@/hooks/use-player-viewport-mode';
+import { useStreamRecovery } from '@/hooks/use-stream-recovery';
+import { api, type Episode, type SkipSegment } from '@/lib/api';
 import {
-  buildEpisodeStreamTargetLookupKey,
   buildEpisodeStreamTarget,
+  buildEpisodeStreamTargetLookupKey,
   resolveEpisodeStreamTarget,
 } from '@/lib/episode-stream-target';
 import {
@@ -56,11 +55,12 @@ import {
   getLatestEpisodeResumeStartTime,
 } from '@/lib/history-playback';
 import { resolveRankedBestStream } from '@/lib/stream-resolution';
+import { cn } from '@/lib/utils';
 
 // --- Types & Constants ---
 
 const formatTime = (seconds: number) => {
-  if (!seconds || isNaN(seconds)) return '00:00';
+  if (!seconds || Number.isNaN(seconds)) return '00:00';
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
@@ -95,7 +95,9 @@ const SPEED_OPTIONS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 const OPTIMISTIC_SEEK_HOLD_MS = 450;
 const PLAYBACK_READY_AUTO_HIDE_DELAY_MS = 2600;
 const PLAYER_INTERACTIVE_TARGET_SELECTOR =
-  'button, a, input, textarea, select, [role="button"], [role="menu"], [role="menuitem"], [data-radix-popper-content-wrapper]';
+  '[data-player-interactive], [data-radix-popper-content-wrapper]';
+const PLAYER_SHORTCUT_BLOCK_SELECTOR =
+  'button, a, input, textarea, select, [role="button"], [role="menu"], [role="menuitem"], [data-player-interactive], [data-radix-popper-content-wrapper]';
 type TimerHandle = ReturnType<typeof setTimeout>;
 type SelectedEpisodeStreamTarget = NextEpisodeStreamCoordinates & { startTime?: number };
 
@@ -111,11 +113,32 @@ const CLOSED_STREAM_SELECTOR_STATE: StreamSelectorState = {
   target: null,
 };
 
-function shouldIgnorePlayerSurfaceInteraction(event: React.MouseEvent<HTMLDivElement>): boolean {
+function shouldIgnorePlayerSurfaceInteraction(event: React.MouseEvent<HTMLElement>): boolean {
   const target = event.target as HTMLElement;
   return (
     !event.currentTarget.contains(target) || !!target.closest(PLAYER_INTERACTIVE_TARGET_SELECTOR)
   );
+}
+
+function shouldIgnorePlayerHotkeyTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  return target.isContentEditable || !!target.closest(PLAYER_SHORTCUT_BLOCK_SELECTOR);
+}
+
+function blurActivePlayerControl() {
+  const activeElement = document.activeElement;
+  if (!(activeElement instanceof HTMLElement)) {
+    return;
+  }
+
+  if (activeElement === document.body || activeElement === document.documentElement) {
+    return;
+  }
+
+  activeElement.blur();
 }
 
 function clearTimer(timerRef: React.MutableRefObject<TimerHandle | null>) {
@@ -220,16 +243,15 @@ function InnerPlayer() {
   const [selectedSeason, setSelectedSeason] = useState<number>(() => {
     return routeAbsoluteSeason ?? 1;
   });
-  const [isHoveringVolume, setIsHoveringVolume] = useState(false);
   const [subtitleScale, setSubtitleScale] = useState(1.0);
 
-  const resetActiveStreamUi = useEffectEvent(() => {
+  const resetActiveStreamUi = useEffectEvent((_streamUrl?: string) => {
     setHasPlaybackStarted(false);
     setSeekPreviewTime(null);
   });
 
   useEffect(() => {
-    resetActiveStreamUi();
+    resetActiveStreamUi(activeStreamUrl);
   }, [activeStreamUrl]);
 
   // Stream Selector State
@@ -309,7 +331,13 @@ function InnerPlayer() {
   const syncPlayerSpeedPreference = useEffectEvent((nextSpeed: number) => {
     setPlaybackSpeed((current) => (current === nextSpeed ? current : nextSpeed));
   });
-  const resetStreamTimingState = useEffectEvent(() => {
+  const resetStreamTimingState = useEffectEvent((_streamUrl?: string) => {
+    currentTimeRef.current = 0;
+    durationRef.current = 0;
+    pendingSeekTargetRef.current = null;
+    pendingSeekDeadlineRef.current = 0;
+    lastTimeUpdateRef.current = 0;
+    playbackVerifiedAtRef.current = 0;
     setCurrentTime(0);
     setDuration(0);
   });
@@ -366,19 +394,16 @@ function InnerPlayer() {
   }, []);
 
   useEffect(() => {
-    currentTimeRef.current = 0;
-    durationRef.current = 0;
-    pendingSeekTargetRef.current = null;
-    pendingSeekDeadlineRef.current = 0;
-    lastTimeUpdateRef.current = 0;
-    playbackVerifiedAtRef.current = 0;
-    resetStreamTimingState();
+    resetStreamTimingState(activeStreamUrl);
   }, [activeStreamUrl]);
 
   // -- Queries --
   const { data: details, isLoading: isLoadingDetails } = useQuery({
     queryKey: ['media', effectiveResolveMediaType, id],
-    queryFn: () => api.getMediaDetails(effectiveResolveMediaType, id!),
+    queryFn: () =>
+      id
+        ? api.getMediaDetails(effectiveResolveMediaType, id)
+        : Promise.reject(new Error('Media ID is required for player details lookup.')),
     enabled: !!type && !!id && effectiveResolveMediaType !== 'movie' && !isOffline,
     staleTime: 1000 * 60 * 60,
   });
@@ -478,14 +503,16 @@ function InnerPlayer() {
       skipDurationHint,
     ],
     queryFn: () =>
-      api.getSkipTimes(
-        effectiveResolveMediaType,
-        id!,
-        details?.imdbId ?? undefined,
-        resolvedAbsoluteSeason,
-        skipTimesEpisode,
-        duration > 0 ? duration : undefined,
-      ),
+      id
+        ? api.getSkipTimes(
+            effectiveResolveMediaType,
+            id,
+            details?.imdbId ?? undefined,
+            resolvedAbsoluteSeason,
+            skipTimesEpisode,
+            duration > 0 ? duration : undefined,
+          )
+        : Promise.reject(new Error('Media ID is required for skip-time lookup.')),
     enabled: canFetchSkipTimes,
     staleTime: 1000 * 60 * 60 * 12, // 12 h - crowdsourced data changes rarely
     gcTime: 1000 * 60 * 60 * 24,
@@ -1013,8 +1040,12 @@ function InnerPlayer() {
     }
   }, []);
 
-  useEffect(() => {
+  const resetAutoResolveLookupState = useEffectEvent((_lookupResetKey: string) => {
     lastAutoResolveLookupIdRef.current = null;
+  });
+
+  useEffect(() => {
+    resetAutoResolveLookupState([id ?? '', season ?? '', episode ?? ''].join('|'));
   }, [id, season, episode]);
 
   const openStreamSelectorForEpisode = useCallback(
@@ -1130,19 +1161,22 @@ function InnerPlayer() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!mountedRef.current) return;
-      // Guard: let the event pass normally when the user is typing in any input field
-      // (subtitle delay, search boxes, text areas, or contentEditable nodes) so that
-      // Space / Arrow keys don't simultaneously trigger player actions AND type text.
-      const target = e.target as HTMLElement;
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      if (shouldIgnorePlayerHotkeyTarget(e.target)) {
         return;
+      }
 
-      switch (e.key.toLowerCase()) {
+      const normalizedKey = e.key.toLowerCase();
+
+      switch (normalizedKey) {
         case ' ':
         case 'k':
+          if (e.repeat) {
+            e.preventDefault();
+            return;
+          }
           e.preventDefault();
           triggerOsd({ kind: isPlayingRef.current ? 'pause' : 'play' });
-          togglePlay();
+          void togglePlay();
           break;
         case 'arrowright':
         case 'l':
@@ -1216,6 +1250,7 @@ function InnerPlayer() {
   }, [error, activeStreamUrl, isResolving, type, id, streamLookupId]);
 
   // 0. Auto-Resolve Stream if missing
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This effect intentionally includes isDev as a logging dependency while other rerun triggers are modeled explicitly in the dependency list.
   useEffect(() => {
     // If we have a URL, we don't need to resolve.
     // If we are already resolving, don't start again.
@@ -1300,7 +1335,6 @@ function InnerPlayer() {
     shouldBypassResolveCache,
     shouldWaitForResolvedLookupId,
     streamLookupId,
-    preferredStreamLookupId,
     activeStreamFormatRef,
     activeStreamFamilyRef,
     activeStreamSourceNameRef,
@@ -1334,7 +1368,7 @@ function InnerPlayer() {
       document.body.style.cursor = '';
       document.documentElement.style.cursor = '';
     };
-  }, [isPlaying, playerContainerRef, showControls]);
+  }, [isPlaying, showControls]);
 
   useEffect(() => {
     return () => {
@@ -1355,8 +1389,10 @@ function InnerPlayer() {
   }, [cleanupViewportOnUnmount, invalidateWatchHistoryOnce]);
 
   const handlePlayerClick = useCallback(
-    (event: React.MouseEvent<HTMLDivElement>) => {
+    (event: React.MouseEvent<HTMLElement>) => {
       if (shouldIgnorePlayerSurfaceInteraction(event)) return;
+
+      blurActivePlayerControl();
 
       // Close episode panel when clicking outside it
       if (showEpisodes) {
@@ -1377,8 +1413,10 @@ function InnerPlayer() {
   );
 
   const handlePlayerDoubleClick = useCallback(
-    (event: React.MouseEvent<HTMLDivElement>) => {
+    (event: React.MouseEvent<HTMLElement>) => {
       if (shouldIgnorePlayerSurfaceInteraction(event)) return;
+
+      blurActivePlayerControl();
 
       // Cancel the pending single-click play/pause
       cancelPendingSingleClick();
@@ -1421,24 +1459,29 @@ function InnerPlayer() {
   return (
     <div
       ref={playerContainerRef}
+      role='application'
+      aria-label='Player viewport'
       className={cn(
         'relative w-full h-screen overflow-hidden bg-transparent text-white group',
         !isFullscreen && 'pl-[60px]',
       )}
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
-      onClick={handlePlayerClick}
-      onDoubleClick={handlePlayerDoubleClick}
       id='mpv-container'
     >
+      <div
+        aria-hidden='true'
+        className='absolute inset-0 z-10 cursor-default'
+        onClick={handlePlayerClick}
+        onDoubleClick={handlePlayerDoubleClick}
+      />
       {!isFullscreen && (
         <DesktopTitlebar className='z-[85] bg-gradient-to-b from-black/70 via-black/35 to-transparent backdrop-blur-[2px]' />
       )}
       {!isFullscreen && (
         <div
+          data-player-interactive
           className='fixed left-0 top-0 z-[70] h-screen pointer-events-auto'
-          onClick={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
         >
           <Sidebar className='flex' playerMode />
         </div>
@@ -1530,8 +1573,8 @@ function InnerPlayer() {
       >
         <div
           ref={topChromeRef}
+          data-player-interactive
           className='pointer-events-auto flex items-center justify-between'
-          onClick={(e) => e.stopPropagation()}
         >
           <button
             type='button'
@@ -1588,8 +1631,8 @@ function InnerPlayer() {
         {/* Bottom Bar */}
         <div
           ref={bottomChromeRef}
+          data-player-interactive
           className='pointer-events-auto space-y-0'
-          onClick={(e) => e.stopPropagation()}
         >
           {/* Time display — right-aligned above the progress bar */}
           <div className='flex items-center justify-end px-0.5 pb-2'>
@@ -1676,17 +1719,7 @@ function InnerPlayer() {
               </button>
 
               {/* Volume Control (Horizontal & Sleek) */}
-              <div
-                className='flex items-center group/vol'
-                onMouseEnter={() => setIsHoveringVolume(true)}
-                onMouseLeave={() => setIsHoveringVolume(false)}
-                onClick={(e) => e.stopPropagation()}
-                onPointerDown={(e) => e.stopPropagation()}
-                onKeyDown={(e) => {
-                  // Prevent arrow keys on the volume slider from triggering global hotkeys
-                  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') e.stopPropagation();
-                }}
-              >
+              <div data-player-interactive className='flex items-center group/vol'>
                 <button
                   type='button'
                   onClick={toggleMute}
@@ -1703,10 +1736,10 @@ function InnerPlayer() {
 
                 <div
                   className={cn(
-                    'transition-[width,opacity] duration-300 ease-in-out flex items-center gap-1.5',
-                    isHoveringVolume
-                      ? 'w-32 opacity-100 ml-0.5'
-                      : 'w-0 opacity-0 ml-0 pointer-events-none',
+                    'flex items-center gap-1.5 transition-[width,opacity,margin] duration-300 ease-in-out',
+                    'w-0 opacity-0 ml-0 pointer-events-none',
+                    'group-hover/vol:w-32 group-hover/vol:opacity-100 group-hover/vol:ml-0.5 group-hover/vol:pointer-events-auto',
+                    'group-focus-within/vol:w-32 group-focus-within/vol:opacity-100 group-focus-within/vol:ml-0.5 group-focus-within/vol:pointer-events-auto',
                   )}
                 >
                   <PlayerSlider
@@ -1714,6 +1747,11 @@ function InnerPlayer() {
                     max={100}
                     step={1}
                     onValueChange={(val) => handleVolumeChange(val[0])}
+                    onKeyDown={(event) => {
+                      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+                        event.stopPropagation();
+                      }
+                    }}
                     className='w-24'
                   />
                   <span className='text-[10px] font-mono text-white/40 tabular-nums w-7 leading-none flex-shrink-0'>
@@ -1882,10 +1920,7 @@ function InnerPlayer() {
 
       {/* Stream Selector Modal */}
       {showStreamSelector && type && id && (
-        <div
-          className='fixed inset-0 z-[100]'
-          onClick={(e) => e.stopPropagation()} // Stop click propagation to Player
-        >
+        <div data-player-interactive className='fixed inset-0 z-[100]'>
           <StreamSelector
             open={showStreamSelector}
             onClose={closeStreamSelector}
@@ -1912,7 +1947,7 @@ function InnerPlayer() {
         </div>
       )}
 
-      <div onClick={(e) => e.stopPropagation()}>
+      <div data-player-interactive>
         <DownloadModal
           open={showDownloadModal}
           onOpenChange={setShowDownloadModal}

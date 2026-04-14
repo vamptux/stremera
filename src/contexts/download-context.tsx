@@ -1,3 +1,4 @@
+import { listen } from '@tauri-apps/api/event';
 import {
   createContext,
   useCallback,
@@ -7,15 +8,14 @@ import {
   useRef,
   useState,
 } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { toast } from 'sonner';
 import {
   api,
-  getErrorMessage,
   type DownloadItem,
   type DownloadProgressEvent,
+  getErrorMessage,
   type StartDownloadParams,
 } from '@/lib/api';
-import { toast } from 'sonner';
 
 export interface DownloadContextType {
   downloads: DownloadItem[];

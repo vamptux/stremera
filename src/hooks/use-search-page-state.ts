@@ -1,11 +1,12 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  type MouseEvent as ReactMouseEvent,
   useCallback,
   useEffect,
+  useEffectEvent,
   useMemo,
   useRef,
   useState,
-  type MouseEvent as ReactMouseEvent,
 } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
@@ -13,8 +14,14 @@ import { useDebounce } from '@/hooks/use-debounce';
 import { useLegacyStorageImport } from '@/hooks/use-legacy-storage-import';
 import { api, type MediaItem } from '@/lib/api';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
+import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import {
-  SEARCH_PROVIDERS,
+  clearLegacySearchHistory,
+  readLegacySearchHistory,
+  type SearchHistoryEntry,
+  type SearchHistoryEntryInput,
+} from '@/lib/search-history';
+import {
   areStringArraysEqual,
   getSearchFeedLabel,
   getSearchGenresForType,
@@ -26,18 +33,12 @@ import {
   resolveSearchUrlFeed,
   resolveSearchUrlProvider,
   resolveSearchUrlType,
+  SEARCH_PROVIDERS,
   type SearchDiscoverFeed,
   type SearchMediaType,
   type SearchProviderId,
   type SearchSortOption,
 } from '@/lib/search-page-state';
-import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
-import {
-  clearLegacySearchHistory,
-  readLegacySearchHistory,
-  type SearchHistoryEntry,
-  type SearchHistoryEntryInput,
-} from '@/lib/search-history';
 
 const SEARCH_HISTORY_QUERY_KEY = ['search-history'] as const;
 const SEARCH_SCROLL_PERSIST_DEBOUNCE_MS = 180;
@@ -358,7 +359,7 @@ export function useSearchPageState() {
     };
   }, [flushPendingScrollTop]);
 
-  useEffect(() => {
+  const resetBrowseScroll = useEffectEvent((_resetKey: string) => {
     const scrollContainer = scrollContainerRef.current;
     if (!scrollContainer) {
       return;
@@ -370,6 +371,10 @@ export function useSearchPageState() {
     }
 
     scrollContainer.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+
+  useEffect(() => {
+    resetBrowseScroll(resetScrollKey);
   }, [resetScrollKey]);
 
   useEffect(() => {

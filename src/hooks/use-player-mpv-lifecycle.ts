@@ -1,4 +1,4 @@
-import { useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
+import { type Dispatch, type MutableRefObject, type SetStateAction, useEffect } from 'react';
 import {
   command,
   destroy,
@@ -9,7 +9,7 @@ import {
   setVideoMarginRatio,
 } from 'tauri-plugin-libmpv-api';
 
-import { type PlaybackLanguagePreferences } from '@/lib/api';
+import type { PlaybackLanguagePreferences } from '@/lib/api';
 import {
   buildPlayerMpvConfig,
   isPlayerTrackRefreshProperty,
@@ -131,6 +131,7 @@ export function usePlayerMpvLifecycle({
   setTransparent,
   restorePlayerSurface,
 }: UsePlayerMpvLifecycleArgs) {
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This stream-scoped lifecycle effect intentionally reads mutable refs and ref-backed callbacks without re-subscribing on every ref write.
   useEffect(() => {
     if (!activeStreamUrl) return;
 
@@ -181,8 +182,7 @@ export function usePlayerMpvLifecycle({
           preferredAudioLanguage: currentPlaybackLanguagePreferences.preferredAudioLanguage,
           preferredSubtitleLanguage: currentPlaybackLanguagePreferences.preferredSubtitleLanguage,
         });
-        const observedProperties =
-          mpvConfig.observedProperties ?? PLAYER_MPV_OBSERVED_PROPERTIES;
+        const observedProperties = mpvConfig.observedProperties ?? PLAYER_MPV_OBSERVED_PROPERTIES;
 
         await init(mpvConfig);
         if (cancelled) return;
@@ -291,10 +291,7 @@ export function usePlayerMpvLifecycle({
 
                 if (isHistoryResume && hasProgressedMeaningfully) break;
 
-                reportStreamFailure(
-                  duringInitialLoad ? 'load-failed' : 'disconnected',
-                  currentUrl,
-                );
+                reportStreamFailure(duringInitialLoad ? 'load-failed' : 'disconnected', currentUrl);
                 if (isHistoryResume) {
                   if (duringInitialLoad) stopLoading();
                   reopenSelectorForSavedStreamFailure();

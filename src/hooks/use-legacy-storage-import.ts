@@ -1,9 +1,9 @@
 import { useEffect, useEffectEvent, useState } from 'react';
 
 import {
-  markLegacyStorageFeatureComplete,
   type LegacyStorageFeature,
   type LegacyStorageReadResult,
+  markLegacyStorageFeatureComplete,
 } from '@/lib/legacy-storage';
 
 interface UseLegacyStorageImportOptions<TLegacy, TSaved> {
@@ -27,9 +27,7 @@ export function useLegacyStorageImport<TLegacy, TSaved>({
   readResult,
   skipImport = false,
 }: UseLegacyStorageImportOptions<TLegacy, TSaved>) {
-  const [hasAttemptedImport, setHasAttemptedImport] = useState(
-    () => !readResult.hasLegacyData,
-  );
+  const [hasAttemptedImport, setHasAttemptedImport] = useState(() => !readResult.hasLegacyData);
 
   const markImportHandled = useEffectEvent(() => {
     setHasAttemptedImport(true);

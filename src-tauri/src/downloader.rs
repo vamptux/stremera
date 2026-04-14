@@ -434,6 +434,10 @@ async fn save_to_disk(
         return;
     };
 
+    let _ = write_download_snapshot_json(app_handle, &json).await;
+}
+
+async fn write_download_snapshot_json(app_handle: &AppHandle, json: &str) -> bool {
     if let Ok(app_dir) = app_handle.path().app_data_dir() {
         if !app_dir.exists() {
             let _ = tokio::fs::create_dir_all(&app_dir).await;
@@ -441,13 +445,21 @@ async fn save_to_disk(
 
         let path = app_dir.join(DOWNLOADS_FILE);
         let tmp = path.with_extension("json.tmp");
-        if tokio::fs::write(&tmp, &json).await.is_ok()
-            && tokio::fs::rename(&tmp, &path).await.is_err()
-        {
+        if tokio::fs::write(&tmp, json).await.is_ok() {
+            if tokio::fs::rename(&tmp, &path).await.is_ok() {
+                return true;
+            }
+
             let _ = tokio::fs::remove_file(&path).await;
-            let _ = tokio::fs::rename(&tmp, &path).await;
+            if tokio::fs::rename(&tmp, &path).await.is_ok() {
+                return true;
+            }
         }
+
+        let _ = tokio::fs::remove_file(&tmp).await;
     }
+
+    false
 }
 
 async fn save_to_disk_if_changed(
@@ -464,28 +476,14 @@ async fn save_to_disk_if_changed(
         return;
     };
 
-    {
-        let snapshot = last_saved_snapshot.lock().await;
-        if snapshot.as_deref() == Some(json.as_str()) {
-            return;
-        }
+    // Keep the snapshot guard alive until the write result is known so the compare/update pair
+    // cannot race with another serialized save attempt.
+    let mut snapshot = last_saved_snapshot.lock().await;
+    if snapshot.as_deref() == Some(json.as_str()) {
+        return;
     }
 
-    if let Ok(app_dir) = app_handle.path().app_data_dir() {
-        if !app_dir.exists() {
-            let _ = tokio::fs::create_dir_all(&app_dir).await;
-        }
-
-        let path = app_dir.join(DOWNLOADS_FILE);
-        let tmp = path.with_extension("json.tmp");
-        if tokio::fs::write(&tmp, &json).await.is_ok()
-            && tokio::fs::rename(&tmp, &path).await.is_err()
-        {
-            let _ = tokio::fs::remove_file(&path).await;
-            let _ = tokio::fs::rename(&tmp, &path).await;
-        }
-
-        let mut snapshot = last_saved_snapshot.lock().await;
+    if write_download_snapshot_json(app_handle, &json).await {
         *snapshot = Some(json);
     }
 }

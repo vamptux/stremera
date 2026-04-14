@@ -1,13 +1,10 @@
 import {
-  normalizeSearchYearRange,
-  normalizeSearchYearValue,
-} from '@/lib/search-page-state';
-import {
   clearLegacyStorageFeatureKeys,
+  type LegacyStorageReadResult,
   markLegacyStorageFeatureComplete,
   readLegacyStorageFeature,
-  type LegacyStorageReadResult,
 } from '@/lib/legacy-storage';
+import { normalizeSearchYearRange, normalizeSearchYearValue } from '@/lib/search-page-state';
 
 export interface SearchHistoryEntry {
   query: string;
@@ -47,9 +44,7 @@ function normalizeGenres(value: unknown): string[] | undefined {
 
   const genres = Array.from(
     new Set(
-      value
-        .map((entry) => normalizeToken(entry))
-        .filter((entry): entry is string => !!entry),
+      value.map((entry) => normalizeToken(entry)).filter((entry): entry is string => !!entry),
     ),
   );
 
@@ -95,7 +90,12 @@ function normalizeEntry(value: unknown): SearchHistoryEntry | null {
   };
 }
 
-export function buildSearchHistoryKey(entry: Pick<SearchHistoryEntry, 'query' | 'mediaType' | 'provider' | 'feed' | 'sort' | 'genres' | 'yearFrom' | 'yearTo'>): string {
+export function buildSearchHistoryKey(
+  entry: Pick<
+    SearchHistoryEntry,
+    'query' | 'mediaType' | 'provider' | 'feed' | 'sort' | 'genres' | 'yearFrom' | 'yearTo'
+  >,
+): string {
   const normalizedYears = normalizeSearchYearRange(entry.yearFrom ?? null, entry.yearTo ?? null);
 
   return [
@@ -104,15 +104,16 @@ export function buildSearchHistoryKey(entry: Pick<SearchHistoryEntry, 'query' | 
     entry.provider?.trim().toLocaleLowerCase() ?? 'na',
     entry.feed?.trim().toLocaleLowerCase() ?? 'na',
     entry.sort?.trim().toLocaleLowerCase() ?? 'na',
-    entry.genres?.map((genre) => genre.toLocaleLowerCase()).sort().join(',') ?? 'na',
+    entry.genres
+      ?.map((genre) => genre.toLocaleLowerCase())
+      .sort()
+      .join(',') ?? 'na',
     normalizedYears.yearFrom ?? 'na',
     normalizedYears.yearTo ?? 'na',
   ].join('|');
 }
 
-export function canonicalizeSearchHistoryEntries(
-  values: readonly unknown[],
-): SearchHistoryEntry[] {
+export function canonicalizeSearchHistoryEntries(values: readonly unknown[]): SearchHistoryEntry[] {
   const normalized = values
     .map(normalizeEntry)
     .filter((entry): entry is SearchHistoryEntry => entry !== null)

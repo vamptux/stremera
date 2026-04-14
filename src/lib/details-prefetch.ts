@@ -6,7 +6,7 @@ import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 const DETAILS_ROUTE_STALE_TIME_MS = 1000 * 60 * 30;
 const DETAILS_EPISODES_STALE_TIME_MS = 1000 * 60 * 5;
 const HISTORY_STATE_STALE_TIME_MS = 1000 * 60 * 3;
-const DEFAULT_EPISODE_PAGE_SIZE = 50;
+const DEFAULT_EPISODE_PAGE_SIZE = 4;
 
 interface PrefetchDetailsRouteDataOptions {
   episodePageSize?: number;
@@ -67,7 +67,15 @@ export function prefetchDetailsRouteData(
   }
 
   void queryClient.prefetchQuery({
-    queryKey: ['media-episodes', routeType, normalizedId, preferredSeason, 0, episodePageSize],
+    queryKey: [
+      'media-episodes',
+      routeType,
+      normalizedId,
+      preferredSeason,
+      0,
+      episodePageSize,
+      null,
+    ],
     queryFn: () =>
       api.getMediaEpisodes(routeType, normalizedId, preferredSeason, 0, episodePageSize),
     staleTime: DETAILS_EPISODES_STALE_TIME_MS,

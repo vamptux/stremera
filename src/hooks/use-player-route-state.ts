@@ -1,10 +1,10 @@
 import { useMemo } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import {
-  resolvePlayerRouteMediaType,
-  sanitizePlayerRouteState,
   type PlayerRouteMediaType,
   type PlayerRouteState,
+  resolvePlayerRouteMediaType,
+  sanitizePlayerRouteState,
 } from '@/lib/player-navigation';
 
 function parseRouteNumber(value: string | undefined): number | undefined {

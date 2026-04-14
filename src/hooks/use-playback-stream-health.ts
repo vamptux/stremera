@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, type MutableRefObject } from 'react';
+import { type MutableRefObject, useCallback, useEffect, useEffectEvent, useRef } from 'react';
 import { api } from '@/lib/api';
-import { type PlaybackStreamOutcome } from '@/lib/playback-stream-health';
+import type { PlaybackStreamOutcome } from '@/lib/playback-stream-health';
 
 interface UsePlaybackStreamHealthArgs {
   mediaId?: string;
@@ -30,9 +30,21 @@ export function usePlaybackStreamHealth({
   const lastVerifiedUrlRef = useRef<string | null>(null);
   const reportedFailureKeysRef = useRef<Set<string>>(new Set());
 
-  useEffect(() => {
+  const resetReportedOutcomeState = useEffectEvent((_streamSessionKey: string) => {
     lastVerifiedUrlRef.current = null;
     reportedFailureKeysRef.current.clear();
+  });
+
+  useEffect(() => {
+    resetReportedOutcomeState(
+      [
+        mediaId ?? '',
+        mediaType ?? '',
+        absoluteSeason ?? '',
+        absoluteEpisode ?? '',
+        activeStreamUrl ?? '',
+      ].join('|'),
+    );
   }, [mediaId, mediaType, absoluteSeason, absoluteEpisode, activeStreamUrl]);
 
   const reportOutcome = useCallback(

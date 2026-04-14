@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, type MutableRefObject } from 'react';
+import { type MutableRefObject, useCallback, useEffect, useRef } from 'react';
 import { command, setProperty } from 'tauri-plugin-libmpv-api';
 import { api } from '@/lib/api';
 import { getPlayableResumeStartTime } from '@/lib/history-playback';
@@ -14,8 +14,7 @@ function normalizeResumeTime(value?: number): number {
 
 function hasResumeReadinessSignal(currentTime: number, duration: number): boolean {
   return (
-    (Number.isFinite(duration) && duration > 0) ||
-    (Number.isFinite(currentTime) && currentTime > 0)
+    (Number.isFinite(duration) && duration > 0) || (Number.isFinite(currentTime) && currentTime > 0)
   );
 }
 
@@ -29,6 +28,24 @@ function formatResumeTime(seconds: number) {
     return `${hours}:${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
   }
   return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+}
+
+function buildResumeSessionKey(
+  mediaId?: string,
+  mediaType?: string,
+  absoluteSeason?: number,
+  absoluteEpisode?: number,
+  activeStreamUrl?: string,
+  startTime?: number,
+) {
+  return [
+    mediaId ?? '',
+    mediaType ?? '',
+    absoluteSeason ?? '',
+    absoluteEpisode ?? '',
+    activeStreamUrl ?? '',
+    normalizeResumeTime(startTime),
+  ].join('|');
 }
 
 interface UsePlayerResumeControllerArgs {
@@ -68,6 +85,7 @@ export function usePlayerResumeController({
   const resumeSeekRetryTimerRef = useRef<number | null>(null);
   const resumePausePendingRef = useRef(false);
   const resumeOsdShownRef = useRef(false);
+  const resumeSessionKeyRef = useRef('');
   const applyResumeIfReadyRef = useRef<() => Promise<void>>(async () => undefined);
 
   const clearResumeRetryTimer = useCallback(() => {
@@ -181,7 +199,14 @@ export function usePlayerResumeController({
     }
 
     scheduleResumeRetry(durationValue > 0 ? 140 : RESUME_SEEK_RETRY_DELAY_MS);
-  }, [clearResumeRetryTimer, currentTimeRef, durationRef, finalizeResume, releaseResumePause, scheduleResumeRetry]);
+  }, [
+    clearResumeRetryTimer,
+    currentTimeRef,
+    durationRef,
+    finalizeResume,
+    releaseResumePause,
+    scheduleResumeRetry,
+  ]);
 
   const prepareForStreamLoad = useCallback(() => {
     resumeAppliedRef.current = false;
@@ -197,7 +222,16 @@ export function usePlayerResumeController({
 
   useEffect(() => {
     const normalizedStartTime = normalizeResumeTime(startTime);
+    const nextResumeSessionKey = buildResumeSessionKey(
+      mediaId,
+      mediaType,
+      absoluteSeason,
+      absoluteEpisode,
+      activeStreamUrl,
+      startTime,
+    );
 
+    resumeSessionKeyRef.current = nextResumeSessionKey;
     resumeTimeRef.current = normalizedStartTime;
     initialTimeRef.current = normalizedStartTime;
     resumeAppliedRef.current = false;
@@ -214,7 +248,17 @@ export function usePlayerResumeController({
     ) {
       void applyResumeIfReadyRef.current();
     }
-  }, [activeStreamUrl, clearResumeRetryTimer, currentTimeRef, durationRef, startTime]);
+  }, [
+    absoluteEpisode,
+    absoluteSeason,
+    activeStreamUrl,
+    clearResumeRetryTimer,
+    currentTimeRef,
+    durationRef,
+    mediaId,
+    mediaType,
+    startTime,
+  ]);
 
   useEffect(() => {
     if (!mediaType || !mediaId || mediaId === 'local') {
@@ -222,13 +266,21 @@ export function usePlayerResumeController({
     }
 
     let cancelled = false;
+    const requestResumeSessionKey = buildResumeSessionKey(
+      mediaId,
+      mediaType,
+      absoluteSeason,
+      absoluteEpisode,
+      activeStreamUrl,
+      startTime,
+    );
 
     void api
       .getWatchProgress(mediaId, mediaType, absoluteSeason, absoluteEpisode)
       .then((progress) => {
         const candidate = getPlayableResumeStartTime(progress);
 
-        if (cancelled || !candidate) {
+        if (cancelled || requestResumeSessionKey !== resumeSessionKeyRef.current || !candidate) {
           return;
         }
         const currentResume = resumeTimeRef.current || 0;
@@ -240,7 +292,11 @@ export function usePlayerResumeController({
           resumeAppliedRef.current = false;
           resumeOsdShownRef.current = false;
 
-          if (activeStreamUrl && (durationRef.current > 0 || currentTimeRef.current > 0)) {
+          if (
+            activeStreamUrl &&
+            requestResumeSessionKey === resumeSessionKeyRef.current &&
+            (durationRef.current > 0 || currentTimeRef.current > 0)
+          ) {
             void applyResumeIfReadyRef.current();
           }
         }

@@ -4,6 +4,7 @@ const SEARCH_QUERY_MAX_CHARS = 120;
 export const BEST_STREAM_CACHE_TTL_MS = 1000 * 60 * 8;
 export const STREAMS_CACHE_TTL_MS = 1000 * 60 * 3;
 export const MEDIA_DETAILS_CACHE_TTL_MS = 1000 * 60 * 30;
+export const MEDIA_SCHEDULE_CACHE_TTL_MS = 1000 * 60 * 30;
 export const SEARCH_CACHE_TTL_MS = 1000 * 60 * 2;
 export const RESOLVE_STREAM_CACHE_TTL_MS = 1000 * 60 * 5;
 
@@ -22,6 +23,7 @@ export interface ApiCacheGroups {
   streams: { clear: () => void };
   streamSelector: { clear: () => void };
   mediaDetails: { clear: () => void };
+  mediaSchedule: { clear: () => void };
   searchCatalog: { clear: () => void };
   searchResults: { clear: () => void };
 }
@@ -132,7 +134,7 @@ export function clearSearchCaches(caches: ApiCacheGroups) {
 }
 
 export function clearMediaDetailsCaches(caches: ApiCacheGroups) {
-  clearCacheGroups(caches.mediaDetails);
+  clearCacheGroups(caches.mediaDetails, caches.mediaSchedule);
 }
 
 export function clearProviderDataCaches(caches: ApiCacheGroups) {
@@ -179,10 +181,6 @@ export function normalizeSearchQuery(query: string): string {
 
 export function normalizeGenreFilters(genres: string[]): string[] {
   return Array.from(
-    new Set(
-      genres
-        .map((genre) => genre.trim())
-        .filter((genre) => genre.length > 0),
-    ),
+    new Set(genres.map((genre) => genre.trim()).filter((genre) => genre.length > 0)),
   ).sort((left, right) => left.localeCompare(right));
 }

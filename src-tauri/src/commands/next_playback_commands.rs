@@ -34,7 +34,7 @@ pub async fn prepare_next_playback_plan(
     current_stream_lookup_id: Option<String>,
 ) -> Result<Option<NextPlaybackPlan>, String> {
     let id = normalize_non_empty(&id).ok_or_else(|| "Media ID is required.".to_string())?;
-    let media_type = normalize_stream_media_type(&media_type)
+    let media_type = normalize_stream_media_type(&media_type, Some(&id))
         .ok_or_else(|| "Invalid media type for next playback planning.".to_string())?;
 
     if media_type == "movie" {

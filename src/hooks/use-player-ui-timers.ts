@@ -1,6 +1,12 @@
-import { useCallback, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
+import {
+  type Dispatch,
+  type MutableRefObject,
+  type SetStateAction,
+  useCallback,
+  useRef,
+} from 'react';
 
-import { type PlayerOsdAction } from '@/components/player-osd-overlay';
+import type { PlayerOsdAction } from '@/components/player-osd-overlay';
 
 const CONTROLS_AUTO_HIDE_DELAY_MS = 3000;
 const OSD_CLEAR_DELAY_MS = 120;

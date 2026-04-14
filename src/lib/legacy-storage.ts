@@ -30,10 +30,7 @@ function getLegacyStorageFeatureKey(feature: LegacyStorageFeature): string {
   return `${LEGACY_STORAGE_FEATURE_PREFIX}${feature}`;
 }
 
-function getLegacyStorageFeatureVersion(
-  storage: Storage,
-  feature: LegacyStorageFeature,
-): number {
+function getLegacyStorageFeatureVersion(storage: Storage, feature: LegacyStorageFeature): number {
   const rawVersion = storage.getItem(getLegacyStorageFeatureKey(feature));
   const parsedVersion = Number.parseInt(rawVersion ?? '', 10);
   return Number.isFinite(parsedVersion) && parsedVersion > 0 ? parsedVersion : 0;
@@ -62,10 +59,7 @@ export function markLegacyStorageFeatureComplete(feature: LegacyStorageFeature) 
   }
 
   try {
-    storage.setItem(
-      getLegacyStorageFeatureKey(feature),
-      String(LEGACY_STORAGE_IMPORT_VERSION),
-    );
+    storage.setItem(getLegacyStorageFeatureKey(feature), String(LEGACY_STORAGE_IMPORT_VERSION));
   } catch {
     // Ignore storage write failures and keep the runtime usable.
   }
@@ -85,10 +79,7 @@ export function clearLegacyStorageFeatureKeys(
       storage.removeItem(key);
     }
 
-    storage.setItem(
-      getLegacyStorageFeatureKey(feature),
-      String(LEGACY_STORAGE_IMPORT_VERSION),
-    );
+    storage.setItem(getLegacyStorageFeatureKey(feature), String(LEGACY_STORAGE_IMPORT_VERSION));
   } catch {
     // Ignore storage cleanup failures and keep the runtime usable.
   }

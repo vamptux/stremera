@@ -1,14 +1,14 @@
+import type { LucideIcon } from 'lucide-react';
+import { Cpu, FileVideo, HardDrive, Headphones, Monitor, Sun, Volume2, Zap } from 'lucide-react';
 import type {
-  StreamSelectorPreferences,
   StreamSelectorBatch,
+  StreamSelectorPreferences,
   StreamSelectorQuality,
   StreamSelectorSort,
   StreamSelectorSource,
   TorrentioStream,
   TorrentioStreamResolution,
 } from '@/lib/api';
-import type { LucideIcon } from 'lucide-react';
-import { Cpu, FileVideo, HardDrive, Headphones, Monitor, Sun, Volume2, Zap } from 'lucide-react';
 
 export type StreamResolution = TorrentioStreamResolution;
 export type QualityFilter = StreamSelectorQuality;
@@ -83,9 +83,10 @@ export function getStreamPresentation(stream: TorrentioStream): StreamPresentati
   if (hdrLabel) {
     techBadges.push({
       label: hdrLabel,
-      cls: hdrLabel === 'DV'
-        ? 'bg-violet-500/15 text-violet-300 border-violet-500/25'
-        : 'bg-amber-500/15 text-amber-300 border-amber-500/25',
+      cls:
+        hdrLabel === 'DV'
+          ? 'bg-violet-500/15 text-violet-300 border-violet-500/25'
+          : 'bg-amber-500/15 text-amber-300 border-amber-500/25',
       Icon: Sun,
     });
   }
@@ -136,38 +137,6 @@ export function getStreamPresentation(stream: TorrentioStream): StreamPresentati
 
 export function isBatchStream(stream: TorrentioStream): boolean {
   return stream.presentation.isBatch;
-}
-
-export interface StreamStats {
-  resCounts: Record<StreamResolution, number>;
-  cachedCount: number;
-  addonNames: string[];
-  batchCount: number;
-  episodeLikeCount: number;
-}
-
-export function buildStreamStats(streams: TorrentioStream[]): StreamStats {
-  const resCounts: Record<StreamResolution, number> = { '4k': 0, '1080p': 0, '720p': 0, sd: 0 };
-  let cachedCount = 0;
-  let batchCount = 0;
-  const addonNames = new Set<string>();
-
-  for (const stream of streams) {
-    resCounts[getStreamRes(stream)] += 1;
-    if (stream.cached === true) cachedCount += 1;
-    if (isBatchStream(stream)) batchCount += 1;
-    addonNames.add(getAddonSourceName(stream));
-  }
-
-  return {
-    resCounts,
-    cachedCount,
-    addonNames: Array.from(addonNames).sort((a, b) =>
-      a.localeCompare(b, undefined, { sensitivity: 'base' }),
-    ),
-    batchCount,
-    episodeLikeCount: Math.max(0, streams.length - batchCount),
-  };
 }
 
 export function filterAndSortStreams(

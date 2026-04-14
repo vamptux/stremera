@@ -1,37 +1,29 @@
-import { useCallback, useRef, useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api, type AddonConfig } from '@/lib/api';
 import {
+  closestCenter,
   DndContext,
+  type DragEndEvent,
   KeyboardSensor,
   PointerSensor,
-  closestCenter,
-  type DragEndEvent,
   useSensor,
   useSensors,
 } from '@dnd-kit/core';
 import {
-  SortableContext,
   arrayMove,
+  SortableContext,
   sortableKeyboardCoordinates,
   useSortable,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ExternalLink, Globe, GripVertical, Loader2, Plus, Power, Trash2 } from 'lucide-react';
+import { useCallback, useRef, useState } from 'react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import {
-  Loader2,
-  Globe,
-  Trash2,
-  Plus,
-  GripVertical,
-  Power,
-  ExternalLink,
-} from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { type AddonConfig, api } from '@/lib/api';
 import { invalidateStreamQueries } from '@/lib/query-invalidation';
-import { toast } from 'sonner';
+import { cn } from '@/lib/utils';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -118,19 +110,19 @@ function SortableAddonRow({ addon, isWorking, onToggle, onRemove }: SortableAddo
       )}
     >
       <button
-        type="button"
+        type='button'
         {...attributes}
         {...listeners}
         disabled={isWorking}
-        className="text-zinc-700 hover:text-zinc-400 transition-colors cursor-grab active:cursor-grabbing disabled:opacity-30 disabled:cursor-not-allowed touch-none p-1 -m-1"
-        aria-label="Drag to reorder"
+        className='text-zinc-700 hover:text-zinc-400 transition-colors cursor-grab active:cursor-grabbing disabled:opacity-30 disabled:cursor-not-allowed touch-none p-1 -m-1'
+        aria-label='Drag to reorder'
       >
-        <GripVertical className="w-3.5 h-3.5 shrink-0" />
+        <GripVertical className='w-3.5 h-3.5 shrink-0' />
       </button>
 
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="text-[13px] font-medium text-white truncate">{addon.name}</span>
+      <div className='flex-1 min-w-0'>
+        <div className='flex items-center gap-2'>
+          <span className='text-[13px] font-medium text-white truncate'>{addon.name}</span>
           <span
             className={cn(
               'text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded shrink-0',
@@ -142,14 +134,14 @@ function SortableAddonRow({ addon, isWorking, onToggle, onRemove }: SortableAddo
             {addon.enabled ? 'Active' : 'Off'}
           </span>
         </div>
-        <p className="text-[11px] text-zinc-500 truncate mt-0.5 font-mono leading-none">
+        <p className='text-[11px] text-zinc-500 truncate mt-0.5 font-mono leading-none'>
           {addon.url.replace(/\/manifest\.json$/i, '')}
         </p>
       </div>
 
-      <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover/row:opacity-100 transition-opacity duration-100">
+      <div className='flex items-center gap-1 shrink-0 opacity-0 group-hover/row:opacity-100 transition-opacity duration-100'>
         <button
-          type="button"
+          type='button'
           title={addon.enabled ? 'Disable' : 'Enable'}
           onClick={() => onToggle(addon.id)}
           disabled={isWorking}
@@ -160,16 +152,16 @@ function SortableAddonRow({ addon, isWorking, onToggle, onRemove }: SortableAddo
               : 'text-zinc-600 hover:bg-white/5 hover:text-zinc-400',
           )}
         >
-          <Power className="w-3.5 h-3.5" />
+          <Power className='w-3.5 h-3.5' />
         </button>
         <button
-          type="button"
-          title="Remove"
+          type='button'
+          title='Remove'
           onClick={() => onRemove(addon.id)}
           disabled={isWorking}
-          className="w-7 h-7 rounded flex items-center justify-center text-zinc-600 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-40"
+          className='w-7 h-7 rounded flex items-center justify-center text-zinc-600 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-40'
         >
-          <Trash2 className="w-3.5 h-3.5" />
+          <Trash2 className='w-3.5 h-3.5' />
         </button>
       </div>
     </div>
@@ -249,7 +241,9 @@ export function StreamingSources() {
       return;
     }
     if (isConfigureUrl(normalized)) {
-      toast.error('This is a configure page — open it, finish setup, then paste the generated manifest URL.');
+      toast.error(
+        'This is a configure page — open it, finish setup, then paste the generated manifest URL.',
+      );
       return;
     }
     if (addons.some((addon) => normalizeAddonUrl(addon.url) === normalized)) {
@@ -264,7 +258,9 @@ export function StreamingSources() {
         const manifest = await api.fetchAddonManifest(normalized);
         if (manifest.name?.trim()) name = manifest.name.trim();
       } catch {
-        toast.info('Could not fetch addon manifest — using the addon host as its label.', { duration: 3000 });
+        toast.info('Could not fetch addon manifest — using the addon host as its label.', {
+          duration: 3000,
+        });
       }
 
       const newAddon: AddonConfig = { id: generateId(), url: normalized, name, enabled: true };
@@ -283,36 +279,40 @@ export function StreamingSources() {
   const activeCount = addons.filter((a) => a.enabled).length;
 
   return (
-    <div className="space-y-4">
+    <div className='space-y-4'>
       {/* Configured addons */}
-      <div className="rounded border border-white/[0.07] bg-white/[0.02] overflow-hidden">
-        <div className="px-4 py-3 border-b border-white/[0.05] flex items-center justify-between">
+      <div className='rounded border border-white/[0.07] bg-white/[0.02] overflow-hidden'>
+        <div className='px-4 py-3 border-b border-white/[0.05] flex items-center justify-between'>
           <div>
-            <h3 className="text-[13px] font-semibold text-white">Configured Sources</h3>
-            <p className="text-[11px] text-zinc-500 mt-0.5">
+            <h3 className='text-[13px] font-semibold text-white'>Configured Sources</h3>
+            <p className='text-[11px] text-zinc-500 mt-0.5'>
               Drag to reorder priority. Higher sources are queried first.
             </p>
           </div>
           {addons.length > 0 && (
-            <span className="text-[11px] text-zinc-500 tabular-nums shrink-0">
+            <span className='text-[11px] text-zinc-500 tabular-nums shrink-0'>
               {activeCount}/{addons.length} active
             </span>
           )}
         </div>
 
         {isLoading ? (
-          <div className="px-4 py-5 flex items-center gap-2 text-zinc-500 text-[13px]">
-            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          <div className='px-4 py-5 flex items-center gap-2 text-zinc-500 text-[13px]'>
+            <Loader2 className='w-3.5 h-3.5 animate-spin' />
             Loading…
           </div>
         ) : addons.length === 0 ? (
-          <div className="px-4 py-6 text-center text-zinc-600 text-[13px]">
+          <div className='px-4 py-6 text-center text-zinc-600 text-[13px]'>
             No addons configured yet. Add one below.
           </div>
         ) : (
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={handleDragEnd}
+          >
             <SortableContext items={addons.map((a) => a.id)} strategy={verticalListSortingStrategy}>
-              <div className="divide-y divide-white/[0.04]">
+              <div className='divide-y divide-white/[0.04]'>
                 {addons.map((addon) => (
                   <SortableAddonRow
                     key={addon.id}
@@ -329,44 +329,53 @@ export function StreamingSources() {
       </div>
 
       {/* Add new */}
-      <div className="rounded border border-white/[0.07] bg-white/[0.02] overflow-hidden">
-        <div className="px-4 py-3 border-b border-white/[0.05]">
-          <h3 className="text-[13px] font-semibold text-white flex items-center gap-1.5">
-            <Plus className="w-3.5 h-3.5 text-zinc-500" />
+      <div className='rounded border border-white/[0.07] bg-white/[0.02] overflow-hidden'>
+        <div className='px-4 py-3 border-b border-white/[0.05]'>
+          <h3 className='text-[13px] font-semibold text-white flex items-center gap-1.5'>
+            <Plus className='w-3.5 h-3.5 text-zinc-500' />
             Add Source
           </h3>
         </div>
 
-        <div className="px-4 py-3.5 space-y-3">
-          <div className="flex gap-2">
+        <div className='px-4 py-3.5 space-y-3'>
+          <div className='flex gap-2'>
             <Input
               ref={newUrlInputRef}
-              placeholder="https://addon.host/.../manifest.json"
+              placeholder='https://addon.host/.../manifest.json'
               value={newUrl}
               onChange={(e) => setNewUrl(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && void handleAddUrl()}
               disabled={isWorking}
-              className="flex-1 h-8 bg-white/[0.03] border-white/[0.07] text-[13px] font-mono focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0 rounded"
+              className='flex-1 h-8 bg-white/[0.03] border-white/[0.07] text-[13px] font-mono focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0 rounded'
             />
             <Button
-              size="sm"
+              size='sm'
               onClick={handleAddUrl}
               disabled={!canSubmitNewAddon}
-              className="h-8 px-4 bg-white text-black hover:bg-zinc-200 rounded text-[13px] font-semibold gap-1.5 shrink-0"
+              className='h-8 px-4 bg-white text-black hover:bg-zinc-200 rounded text-[13px] font-semibold gap-1.5 shrink-0'
             >
-              {fetchingManifest ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+              {fetchingManifest ? (
+                <Loader2 className='w-3 h-3 animate-spin' />
+              ) : (
+                <Plus className='w-3 h-3' />
+              )}
               Add
             </Button>
           </div>
 
           {newUrl.trim() && (
-            <p className={cn(
-              'text-[11px]',
-              !normalizedNewUrl ? 'text-red-400'
-                : isConfigureCandidate ? 'text-amber-400'
-                : duplicateAddon ? 'text-amber-400'
-                : 'text-emerald-400',
-            )}>
+            <p
+              className={cn(
+                'text-[11px]',
+                !normalizedNewUrl
+                  ? 'text-red-400'
+                  : isConfigureCandidate
+                    ? 'text-amber-400'
+                    : duplicateAddon
+                      ? 'text-amber-400'
+                      : 'text-emerald-400',
+              )}
+            >
               {!normalizedNewUrl
                 ? 'Enter a valid http(s) addon URL.'
                 : isConfigureCandidate
@@ -380,21 +389,21 @@ export function StreamingSources() {
       </div>
 
       {/* Popular sources */}
-      <div className="rounded border border-white/[0.05] bg-white/[0.015] px-4 py-3 space-y-2">
-        <p className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest flex items-center gap-1.5">
-          <Globe className="w-3 h-3" /> Popular Sources
+      <div className='rounded border border-white/[0.05] bg-white/[0.015] px-4 py-3 space-y-2'>
+        <p className='text-[10px] font-semibold text-zinc-500 uppercase tracking-widest flex items-center gap-1.5'>
+          <Globe className='w-3 h-3' /> Popular Sources
         </p>
-        <div className="flex flex-wrap gap-1.5">
+        <div className='flex flex-wrap gap-1.5'>
           {POPULAR_SOURCES.map((s) => (
             <a
               key={s.name}
               href={s.url}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-200 bg-white/[0.03] border border-white/[0.04] hover:border-white/10 px-2 py-1 rounded transition-colors"
+              target='_blank'
+              rel='noreferrer'
+              className='inline-flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-200 bg-white/[0.03] border border-white/[0.04] hover:border-white/10 px-2 py-1 rounded transition-colors'
             >
               {s.name}
-              <ExternalLink className="w-2.5 h-2.5 opacity-50" />
+              <ExternalLink className='w-2.5 h-2.5 opacity-50' />
             </a>
           ))}
         </div>

@@ -1,22 +1,21 @@
-import { useState, type ReactNode } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api, getErrorMessage } from '@/lib/api';
-import { Button } from '@/components/ui/button';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import {
-  Loader2,
-  Trash2,
-  Download,
-  Upload,
   AlertTriangle,
   Check,
   Database,
+  Download,
   History as HistoryIcon,
-  Library,
   LayoutList,
+  Library,
+  Loader2,
+  Trash2,
+  Upload,
 } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { type ReactNode, useState } from 'react';
 import { toast } from 'sonner';
-import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
+import { Button } from '@/components/ui/button';
+import { api, getErrorMessage } from '@/lib/api';
 import {
   invalidateDataStatsQuery,
   invalidateLibraryQueries,
@@ -25,6 +24,7 @@ import {
   invalidateStoredDataQueries,
   invalidateWatchStatusQueries,
 } from '@/lib/query-invalidation';
+import { cn } from '@/lib/utils';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -94,35 +94,44 @@ function BackupRestore() {
   };
 
   return (
-    <div className="rounded border border-white/[0.07] bg-white/[0.02] overflow-hidden">
-      <div className="px-4 py-3 border-b border-white/[0.05]">
-        <h3 className="text-[13px] font-semibold text-white flex items-center gap-2">
-          <Database className="w-3.5 h-3.5 text-zinc-500" />
+    <div className='rounded border border-white/[0.07] bg-white/[0.02] overflow-hidden'>
+      <div className='px-4 py-3 border-b border-white/[0.05]'>
+        <h3 className='text-[13px] font-semibold text-white flex items-center gap-2'>
+          <Database className='w-3.5 h-3.5 text-zinc-500' />
           Backup & Restore
         </h3>
-        <p className="text-[11px] text-zinc-500 mt-0.5">
-          Export all data to a <span className="text-zinc-400">.json</span> file or restore from a backup. Imports are non-destructive.
+        <p className='text-[11px] text-zinc-500 mt-0.5'>
+          Export all data to a <span className='text-zinc-400'>.json</span> file or restore from a
+          backup. Imports are non-destructive.
         </p>
       </div>
-      <div className="px-4 py-3 flex items-center gap-2.5 flex-wrap">
+      <div className='px-4 py-3 flex items-center gap-2.5 flex-wrap'>
         <Button
-          size="sm"
-          variant="outline"
+          size='sm'
+          variant='outline'
           onClick={handleExport}
           disabled={exporting || importing}
-          className="h-7 px-3.5 text-[12px] font-semibold gap-1.5 border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-white rounded"
+          className='h-7 px-3.5 text-[12px] font-semibold gap-1.5 border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-white rounded'
         >
-          {exporting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+          {exporting ? (
+            <Loader2 className='w-3 h-3 animate-spin' />
+          ) : (
+            <Download className='w-3 h-3' />
+          )}
           Export
         </Button>
         <Button
-          size="sm"
-          variant="outline"
+          size='sm'
+          variant='outline'
           onClick={handleImport}
           disabled={importing || exporting}
-          className="h-7 px-3.5 text-[12px] font-semibold gap-1.5 border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-white rounded"
+          className='h-7 px-3.5 text-[12px] font-semibold gap-1.5 border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-white rounded'
         >
-          {importing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+          {importing ? (
+            <Loader2 className='w-3 h-3 animate-spin' />
+          ) : (
+            <Upload className='w-3 h-3' />
+          )}
           Import
         </Button>
       </div>
@@ -136,7 +145,11 @@ function DataManager() {
   const queryClient = useQueryClient();
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
 
-  const { data: stats, isLoading: statsLoading, refetch: refetchStats } = useQuery({
+  const {
+    data: stats,
+    isLoading: statsLoading,
+    refetch: refetchStats,
+  } = useQuery({
     queryKey: ['dataStats'],
     queryFn: api.getDataStats,
     staleTime: 1000 * 30,
@@ -164,7 +177,7 @@ function DataManager() {
       key: 'history',
       label: 'Watch History',
       description: 'Viewed episodes, movies and progress data.',
-      icon: <HistoryIcon className="w-3.5 h-3.5" />,
+      icon: <HistoryIcon className='w-3.5 h-3.5' />,
       count: stats?.history_count ?? 0,
       unit: 'entries',
       clearFn: api.clearWatchHistory,
@@ -174,7 +187,7 @@ function DataManager() {
       key: 'library',
       label: 'Library',
       description: 'Saved movies and shows.',
-      icon: <Library className="w-3.5 h-3.5" />,
+      icon: <Library className='w-3.5 h-3.5' />,
       count: stats?.library_count ?? 0,
       unit: 'items',
       clearFn: api.clearLibrary,
@@ -184,7 +197,7 @@ function DataManager() {
       key: 'lists',
       label: 'Custom Lists',
       description: 'All custom lists and their contents.',
-      icon: <LayoutList className="w-3.5 h-3.5" />,
+      icon: <LayoutList className='w-3.5 h-3.5' />,
       count: stats?.lists_count ?? 0,
       unit: 'lists',
       clearFn: api.clearAllLists,
@@ -194,7 +207,7 @@ function DataManager() {
       key: 'statuses',
       label: 'Watch Statuses',
       description: 'Watching / Watched / Plan to Watch / Dropped labels.',
-      icon: <Check className="w-3.5 h-3.5" />,
+      icon: <Check className='w-3.5 h-3.5' />,
       count: stats?.watch_statuses_count ?? 0,
       unit: 'labels',
       clearFn: api.clearAllWatchStatuses,
@@ -203,15 +216,15 @@ function DataManager() {
   ];
 
   return (
-    <div className="rounded border border-white/[0.07] bg-white/[0.02] overflow-hidden">
-      <div className="px-4 py-3 border-b border-white/[0.05]">
-        <h3 className="text-[13px] font-semibold text-white">Storage</h3>
-        <p className="text-[11px] text-zinc-500 mt-0.5">
+    <div className='rounded border border-white/[0.07] bg-white/[0.02] overflow-hidden'>
+      <div className='px-4 py-3 border-b border-white/[0.05]'>
+        <h3 className='text-[13px] font-semibold text-white'>Storage</h3>
+        <p className='text-[11px] text-zinc-500 mt-0.5'>
           View and clear locally stored data. These actions are permanent.
         </p>
       </div>
 
-      <div className="px-4 py-3 space-y-2">
+      <div className='px-4 py-3 space-y-2'>
         {categories.map((cat) => {
           const isPending = clearMutation.isPending && clearMutation.variables?.key === cat.key;
           const isConfirming = confirmKey === cat.key;
@@ -220,54 +233,67 @@ function DataManager() {
           return (
             <div
               key={cat.key}
-              className="flex items-center justify-between gap-3 rounded border border-white/[0.05] bg-transparent px-3.5 py-2.5"
+              className='flex items-center justify-between gap-3 rounded border border-white/[0.05] bg-transparent px-3.5 py-2.5'
             >
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="w-7 h-7 rounded bg-white/[0.04] flex items-center justify-center text-zinc-500 shrink-0">
+              <div className='flex items-center gap-2.5 min-w-0'>
+                <div className='w-7 h-7 rounded bg-white/[0.04] flex items-center justify-center text-zinc-500 shrink-0'>
                   {cat.icon}
                 </div>
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[13px] font-semibold text-white">{cat.label}</span>
+                <div className='min-w-0'>
+                  <div className='flex items-center gap-1.5'>
+                    <span className='text-[13px] font-semibold text-white'>{cat.label}</span>
                     {statsLoading ? (
-                      <span className="text-[10px] text-zinc-600 animate-pulse">loading…</span>
+                      <span className='text-[10px] text-zinc-600 animate-pulse'>loading…</span>
                     ) : (
-                      <span className={cn(
-                        'text-[10px] font-bold px-1.5 py-0.5 rounded tabular-nums',
-                        isEmpty ? 'text-zinc-600 bg-white/[0.03]' : 'text-zinc-400 bg-white/[0.06]',
-                      )}>
+                      <span
+                        className={cn(
+                          'text-[10px] font-bold px-1.5 py-0.5 rounded tabular-nums',
+                          isEmpty
+                            ? 'text-zinc-600 bg-white/[0.03]'
+                            : 'text-zinc-400 bg-white/[0.06]',
+                        )}
+                      >
                         {cat.count} {cat.unit}
                       </span>
                     )}
                   </div>
-                  <p className="text-[11px] text-zinc-500 truncate leading-none mt-0.5">{cat.description}</p>
+                  <p className='text-[11px] text-zinc-500 truncate leading-none mt-0.5'>
+                    {cat.description}
+                  </p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-1.5 shrink-0">
+              <div className='flex items-center gap-1.5 shrink-0'>
                 {isConfirming ? (
                   <>
-                    <span className="text-[11px] text-zinc-400 flex items-center gap-1">
-                      <AlertTriangle className="w-3 h-3 text-amber-400" />
+                    <span className='text-[11px] text-zinc-400 flex items-center gap-1'>
+                      <AlertTriangle className='w-3 h-3 text-amber-400' />
                       Confirm?
                     </span>
-                    <Button size="sm" variant="outline" onClick={() => setConfirmKey(null)} className="h-6 px-2.5 text-[11px] rounded">
+                    <Button
+                      size='sm'
+                      variant='outline'
+                      onClick={() => setConfirmKey(null)}
+                      className='h-6 px-2.5 text-[11px] rounded'
+                    >
                       Cancel
                     </Button>
                     <Button
-                      size="sm"
+                      size='sm'
                       onClick={() => clearMutation.mutate(cat)}
                       disabled={isPending}
-                      className="h-6 px-2.5 text-[11px] bg-red-500/90 hover:bg-red-500 text-white border-0 rounded"
+                      className='h-6 px-2.5 text-[11px] bg-red-500/90 hover:bg-red-500 text-white border-0 rounded'
                     >
-                      {isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Clear'}
+                      {isPending ? <Loader2 className='w-3 h-3 animate-spin' /> : 'Clear'}
                     </Button>
                   </>
                 ) : (
                   <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => { if (!isEmpty) setConfirmKey(cat.key); }}
+                    size='sm'
+                    variant='outline'
+                    onClick={() => {
+                      if (!isEmpty) setConfirmKey(cat.key);
+                    }}
                     disabled={isEmpty || clearMutation.isPending}
                     className={cn(
                       'h-6 px-2.5 text-[11px] font-semibold rounded',
@@ -276,7 +302,7 @@ function DataManager() {
                         : 'border-red-500/20 text-red-400 hover:bg-red-500/10 hover:text-red-300',
                     )}
                   >
-                    <Trash2 className="w-3 h-3 mr-1" />
+                    <Trash2 className='w-3 h-3 mr-1' />
                     Clear
                   </Button>
                 )}
@@ -284,7 +310,6 @@ function DataManager() {
             </div>
           );
         })}
-
       </div>
     </div>
   );
@@ -294,7 +319,7 @@ function DataManager() {
 
 export function DataSection() {
   return (
-    <div className="space-y-4">
+    <div className='space-y-4'>
       <BackupRestore />
       <DataManager />
     </div>

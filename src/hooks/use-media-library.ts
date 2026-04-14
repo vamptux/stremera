@@ -1,13 +1,18 @@
-import { useCallback } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-
-import { api, type MediaItem, type UserList, type WatchProgress, type WatchStatus } from '@/lib/api';
+import { useCallback } from 'react';
+import { toast } from 'sonner';
+import {
+  api,
+  type MediaItem,
+  type UserList,
+  type WatchProgress,
+  type WatchStatus,
+} from '@/lib/api';
 import {
   invalidateLibraryQueries,
   invalidateListQueries,
   invalidatePlaybackHistoryQueries,
 } from '@/lib/query-invalidation';
-import { toast } from 'sonner';
 
 const LIBRARY_QUERY_KEY = ['library'] as const;
 const CONTINUE_WATCHING_QUERY_KEY = ['continue-watching'] as const;
@@ -157,7 +162,10 @@ export function useLists(options?: SharedCollectionQueryOptions) {
 export function useItemListIds(itemId?: string, options?: SharedCollectionQueryOptions) {
   return useQuery({
     queryKey: itemId ? itemListsQueryKey(itemId) : ['item-lists', 'unknown'],
-    queryFn: () => api.checkItemInLists(itemId!),
+    queryFn: () =>
+      itemId
+        ? api.checkItemInLists(itemId)
+        : Promise.reject(new Error('Item ID is required to read list membership.')),
     enabled: (options?.enabled ?? true) && Boolean(itemId),
     gcTime: options?.gcTime,
     refetchOnWindowFocus: options?.refetchOnWindowFocus,
@@ -184,7 +192,7 @@ export function useIsItemInLibrary(itemId?: string, options?: SharedCollectionQu
 
 export function useItemWatchStatus(itemId?: string, options?: SharedCollectionQueryOptions) {
   const selectWatchStatus = useCallback(
-    (statuses: Record<string, WatchStatus>) => (itemId ? statuses[itemId] ?? null : null),
+    (statuses: Record<string, WatchStatus>) => (itemId ? (statuses[itemId] ?? null) : null),
     [itemId],
   );
 
@@ -204,7 +212,8 @@ export function useLatestWatchHistoryEntry(
   options?: UseLatestWatchHistoryEntryOptions,
 ) {
   const selectLatestEntry = useCallback(
-    (entries: WatchProgress[]) => (itemId ? findLatestWatchHistoryEntry(entries, itemId) : undefined),
+    (entries: WatchProgress[]) =>
+      itemId ? findLatestWatchHistoryEntry(entries, itemId) : undefined,
     [itemId],
   );
 

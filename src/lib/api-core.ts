@@ -25,10 +25,7 @@ export function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
-export async function safeInvoke<T>(
-  command: string,
-  args?: Record<string, unknown>,
-): Promise<T> {
+export async function safeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
     if (isTauriDesktopRuntime()) {
       return await invoke<T>(command, args);

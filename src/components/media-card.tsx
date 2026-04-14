@@ -1,52 +1,58 @@
-import { Link, useLocation } from 'react-router-dom';
-import { MediaItem, WatchStatus, WATCH_STATUS_LABELS, WATCH_STATUS_COLORS, api } from '@/lib/api';
-import { cn } from '@/lib/utils';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Play,
-  Plus,
-  Check,
-  Loader2,
-  Volume2,
-  VolumeX,
   Bookmark,
   BookmarkCheck,
-  ListPlus,
+  Check,
   ChevronLeft,
+  ListPlus,
+  Loader2,
+  Play,
+  Plus,
   Trash2,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { toast } from 'sonner';
 import {
-  useState,
-  useRef,
-  useCallback,
-  useEffect,
   type MouseEvent as ReactMouseEvent,
   type SetStateAction,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { Link, useLocation } from 'react-router-dom';
+import { toast } from 'sonner';
 import { CreateListDialog } from '@/components/list/list-editor-dialog';
 import { ListIcon } from '@/components/list/list-icons';
-import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import {
   useIsItemInLibrary,
-  useItemWatchStatus,
   useItemListIds,
+  useItemWatchStatus,
   useLatestWatchHistoryEntry,
   useLists,
   useMediaCollectionActions,
 } from '@/hooks/use-media-library';
-import { buildYouTubeEmbedUrl, extractYouTubeVideoId } from '@/lib/trailer-utils';
-import { invalidateWatchStatusQueries } from '@/lib/query-invalidation';
-import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
+import {
+  api,
+  type MediaItem,
+  WATCH_STATUS_COLORS,
+  WATCH_STATUS_LABELS,
+  type WatchStatus,
+} from '@/lib/api';
+import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
+import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
+import { invalidateWatchStatusQueries } from '@/lib/query-invalidation';
+import { buildYouTubeEmbedUrl, extractYouTubeVideoId } from '@/lib/trailer-utils';
+import { cn } from '@/lib/utils';
 
 // ── Rating helpers ─────────────────────────────────────────────────────────────
 // Normalise a rating string (IMDb "8.3" or percentage "83") to a 0-100 score.
 function normalizeRating(raw: string | null | undefined): number | null {
   if (!raw) return null;
   const val = parseFloat(raw);
-  if (isNaN(val)) return null;
+  if (Number.isNaN(val)) return null;
   return val <= 10 ? Math.round(val * 10) : Math.round(val);
 }
 function getRatingStyle(score: number | null) {
@@ -326,7 +332,7 @@ export function MediaCard({
   ]);
 
   const computePopupPos = useCallback((): { top: number; left: number } | null => {
-    if (!cardRef.current || !cardRef.current.isConnected) return null;
+    if (!cardRef.current?.isConnected) return null;
     const rect = cardRef.current.getBoundingClientRect();
     if (rect.width < 8 || rect.height < 8) return null;
     if (
@@ -674,11 +680,12 @@ export function MediaCard({
   const primaryActionLabel = onPlay ? 'Resume' : primaryPlayback.primaryActionLabel;
 
   return (
-    <div
+    <article
       ref={cardRef}
       className={cn('relative', className)}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
+      aria-label={item.title}
+      onPointerEnter={handleMouseEnter}
+      onPointerLeave={handleMouseLeave}
     >
       <MediaCardPoster
         currentStatus={currentStatus}
@@ -707,8 +714,9 @@ export function MediaCard({
             }}
           >
             {/* Inner content remains interactive so status/list buttons are clickable. */}
-            <div
+            <section
               ref={popupContainerRef}
+              aria-label={`${item.title} preview`}
               className='rounded-md overflow-hidden bg-[#111114] border border-white/[0.07] shadow-[0_20px_48px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.04)]'
               style={{
                 willChange: 'transform, opacity',
@@ -716,10 +724,10 @@ export function MediaCard({
                 animation: 'mediaCardPopupIn 160ms cubic-bezier(0.16, 1, 0.3, 1) both',
                 pointerEvents: 'auto',
               }}
-              onMouseEnter={() => {
+              onPointerEnter={() => {
                 clearHoverLeaveTimer();
               }}
-              onMouseLeave={handleMouseLeave}
+              onPointerLeave={handleMouseLeave}
               onWheel={forwardWheelToScrollContainer}
             >
               {/* Backdrop / trailer area */}
@@ -1031,7 +1039,7 @@ export function MediaCard({
                   aria-hidden
                 />
               )}
-            </div>
+            </section>
           </div>,
           document.body,
         )}
@@ -1050,7 +1058,7 @@ export function MediaCard({
           void addItemToNewList(newList);
         }}
       />
-    </div>
+    </article>
   );
 }
 

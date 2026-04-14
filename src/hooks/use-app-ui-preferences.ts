@@ -2,15 +2,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useMemo } from 'react';
 
 import { useLegacyStorageImport } from '@/hooks/use-legacy-storage-import';
-import {
-  api,
-  type AppUiPreferences,
-  type AppUiPreferencesPatch,
-} from '@/lib/api';
+import { type AppUiPreferences, type AppUiPreferencesPatch, api } from '@/lib/api';
 import {
   clearLegacyStorageFeatureKeys,
-  readLegacyStorageFeature,
   type LegacyStorageReadResult,
+  readLegacyStorageFeature,
 } from '@/lib/legacy-storage';
 import { runOptimisticQueryMutation } from '@/lib/optimistic-query';
 
@@ -83,9 +79,7 @@ function readLegacyAppUiPreferences(): LegacyStorageReadResult<AppUiPreferences>
     }
 
     try {
-      const savedSpoilerProtection = storage.getItem(
-        LEGACY_SPOILER_PROTECTION_STORAGE_KEY,
-      );
+      const savedSpoilerProtection = storage.getItem(LEGACY_SPOILER_PROTECTION_STORAGE_KEY);
       if (savedSpoilerProtection !== null) {
         spoilerProtection = savedSpoilerProtection === 'true';
         hasLegacyData = true;
@@ -146,7 +140,7 @@ export function useAppUiPreferences() {
   const currentPreferences = sanitizeAppUiPreferences(
     preferencesQuery.isSuccess
       ? preferencesQuery.data
-      : legacyPreferences ?? DEFAULT_APP_UI_PREFERENCES,
+      : (legacyPreferences ?? DEFAULT_APP_UI_PREFERENCES),
   );
 
   const updatePreferences = useCallback(

@@ -1,4 +1,4 @@
-import { type QueryClient } from '@tanstack/react-query';
+import type { QueryClient } from '@tanstack/react-query';
 
 const LIBRARY_QUERY_KEY = ['library'] as const;
 const CONTINUE_WATCHING_QUERY_KEY = ['continue-watching'] as const;

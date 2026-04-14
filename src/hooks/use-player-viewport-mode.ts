@@ -1,4 +1,3 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   currentMonitor,
   getCurrentWindow,
@@ -7,6 +6,7 @@ import {
   primaryMonitor,
   type Window as TauriWindow,
 } from '@tauri-apps/api/window';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { isTauriDesktopRuntime } from '@/lib/app-updater';
 
 const NATIVE_FULLSCREEN_VERIFY_ATTEMPTS = 12;
@@ -52,13 +52,8 @@ function toPhysicalSize(size: { width: number; height: number }): PhysicalSize {
   return new PhysicalSize(size.width, size.height);
 }
 
-async function measureWindowFrameInsets(
-  appWindow: TauriWindow,
-): Promise<{ x: number; y: number }> {
-  const [outerSize, innerSize] = await Promise.all([
-    appWindow.outerSize(),
-    appWindow.innerSize(),
-  ]);
+async function measureWindowFrameInsets(appWindow: TauriWindow): Promise<{ x: number; y: number }> {
+  const [outerSize, innerSize] = await Promise.all([appWindow.outerSize(), appWindow.innerSize()]);
 
   return {
     x: Math.max(0, Math.round((outerSize.width - innerSize.width) / 2)),
@@ -88,9 +83,7 @@ function isWindowsDesktopPlatform(): boolean {
 
 async function applyMonitorBounds(
   appWindow: TauriWindow,
-  monitor: Awaited<ReturnType<typeof currentMonitor>> extends infer T
-    ? Exclude<T, null>
-    : never,
+  monitor: Awaited<ReturnType<typeof currentMonitor>> extends infer T ? Exclude<T, null> : never,
 ): Promise<void> {
   const size = toPhysicalSize(monitor.size);
 
@@ -111,14 +104,9 @@ async function applyMonitorBounds(
   await appWindow.setSize(size);
   await delay(16);
 
-  const settledFrameInsets = await measureWindowFrameInsets(appWindow).catch(
-    () => frameInsets,
-  );
+  const settledFrameInsets = await measureWindowFrameInsets(appWindow).catch(() => frameInsets);
 
-  if (
-    settledFrameInsets.x !== frameInsets.x ||
-    settledFrameInsets.y !== frameInsets.y
-  ) {
+  if (settledFrameInsets.x !== frameInsets.x || settledFrameInsets.y !== frameInsets.y) {
     await appWindow.setPosition(
       toPhysicalPosition({
         x: monitor.position.x - settledFrameInsets.x,
@@ -198,8 +186,7 @@ async function enterManualDesktopFullscreen(appWindow: TauriWindow): Promise<boo
   }
 
   const monitor =
-    (await currentMonitor().catch(() => null)) ??
-    (await primaryMonitor().catch(() => null));
+    (await currentMonitor().catch(() => null)) ?? (await primaryMonitor().catch(() => null));
   if (!monitor) {
     return false;
   }
@@ -243,7 +230,10 @@ export function usePlayerViewportMode(
 ): UsePlayerViewportModeResult {
   const { onBeforeEnterFullscreen } = options;
   const isDesktopRuntime = isTauriDesktopRuntime();
-  const isWindowsDesktop = useMemo(() => isDesktopRuntime && isWindowsDesktopPlatform(), [isDesktopRuntime]);
+  const isWindowsDesktop = useMemo(
+    () => isDesktopRuntime && isWindowsDesktopPlatform(),
+    [isDesktopRuntime],
+  );
   const appWindow = useMemo(
     () => (isDesktopRuntime ? getCurrentWindow() : null),
     [isDesktopRuntime],
@@ -272,9 +262,7 @@ export function usePlayerViewportMode(
     }
 
     const next =
-      nativeFullscreen ||
-      desktopViewportState.mode === 'manual' ||
-      !!document.fullscreenElement;
+      nativeFullscreen || desktopViewportState.mode === 'manual' || !!document.fullscreenElement;
     setIsFullscreen((prev) => (prev === next ? prev : next));
   }, [appWindow]);
 
@@ -421,7 +409,14 @@ export function usePlayerViewportMode(
     } catch {
       await syncFullscreenState();
     }
-  }, [appWindow, exitFullscreenIfNeeded, isDesktopRuntime, isWindowsDesktop, onBeforeEnterFullscreen, syncFullscreenState]);
+  }, [
+    appWindow,
+    exitFullscreenIfNeeded,
+    isDesktopRuntime,
+    isWindowsDesktop,
+    onBeforeEnterFullscreen,
+    syncFullscreenState,
+  ]);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -438,22 +433,24 @@ export function usePlayerViewportMode(
     document.addEventListener('fullscreenchange', handleFullscreenChange);
 
     if (appWindow) {
-      void appWindow.onResized(() => {
-        if (!isActive) return;
-        // Debounce so rapid resize events during fullscreen transitions
-        // don't cause flickering state updates.
-        clearTimeout(resizeDebounceTimer);
-        resizeDebounceTimer = setTimeout(() => {
-          void syncFullscreenState();
-        }, 60);
-      }).then((dispose) => {
-        if (!isActive) {
-          dispose();
-          return;
-        }
+      void appWindow
+        .onResized(() => {
+          if (!isActive) return;
+          // Debounce so rapid resize events during fullscreen transitions
+          // don't cause flickering state updates.
+          clearTimeout(resizeDebounceTimer);
+          resizeDebounceTimer = setTimeout(() => {
+            void syncFullscreenState();
+          }, 60);
+        })
+        .then((dispose) => {
+          if (!isActive) {
+            dispose();
+            return;
+          }
 
-        disposeWindowListener = dispose;
-      });
+          disposeWindowListener = dispose;
+        });
     }
 
     return () => {

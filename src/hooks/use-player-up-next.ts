@@ -104,15 +104,18 @@ export function usePlayerUpNext({
     }, 1000);
   }, [clearCountdown]);
 
-  const getFreshPrefetchedPlan = useCallback((lookupKey?: string) => {
-    if (!prefetchedPlan) return null;
-    if (lookupKey && prefetchedPlan.lookupKey !== lookupKey) return null;
-    if (Date.now() - prefetchedPlan.resolvedAt > NEXT_EPISODE_PREFETCH_MAX_AGE_MS) {
-      return null;
-    }
+  const getFreshPrefetchedPlan = useCallback(
+    (lookupKey?: string) => {
+      if (!prefetchedPlan) return null;
+      if (lookupKey && prefetchedPlan.lookupKey !== lookupKey) return null;
+      if (Date.now() - prefetchedPlan.resolvedAt > NEXT_EPISODE_PREFETCH_MAX_AGE_MS) {
+        return null;
+      }
 
-    return prefetchedPlan;
-  }, [prefetchedPlan]);
+      return prefetchedPlan;
+    },
+    [prefetchedPlan],
+  );
 
   useEffect(() => {
     return () => {
